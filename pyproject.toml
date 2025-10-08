@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "igp2"
+version = "0.3.1"
+description = "Open-source implementation of the goal recognition and motion planning algorithm IGP2 from the paper: Interpretable Goal-based Prediction and Planning for Autonomous Driving"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+  {name = "Balint Gyevnar", email = "balint.gyevnar@ed.ac.uk"},
+  {name = "Cillian Brewitt"},
+  {name = "Samuel Garcin"},
+  {name = "Massimiliano Tamborski"},
+  {name = "Stefano Albrecht"}
+]
+maintainers = [
+  {name = "Balint Gyevnar", email = "balint.gyevnar@ed.ac.uk"}
+]
+dependencies = [
+    "casadi>=3.6.7",
+    "gymnasium>=1.1.1",
+    "imageio==2.35.0",
+    "loguru>=0.7.3",
+    "lxml>=5.3.1",
+    "matplotlib==3.7.5",
+    "more-itertools==10.5.0",
+    "pandas==2.0.3",
+    "scipy==1.10.1",
+    "shapely>=2.0.7",
+]
+
+[project.optional-dependencies]
+carla = [
+  "carla>=0.9.13"
+]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+]
