@@ -569,7 +569,15 @@ class Igp2HUD(object):
 
         if world.ego.agent.goal_probabilities is not None:
             for agent_id, predictions in world.ego.agent.goal_probabilities.items():
-                if self.agents[agent_id] is None:
+                # print("agent_id:", agent_id)
+                # print("world.ego.agent.goal_probabilities:", world.ego.agent.goal_probabilities)
+                # print("self.agents:", self.agents)
+                # print("type(self.agents):", type(self.agents))
+                # print("self.agents.keys:", [k for k in self.agents.keys])
+                # print("self.agent.values:", [v for v in self.agents.values])
+                # print("type(self.agents.values:", [type(v) for v in self.agents.values])
+                # if self.agents[agent_id] is None:
+                if not agent_id in self.agents:
                     continue
                 vehicle = self.agents[agent_id].actor
 
@@ -1072,6 +1080,7 @@ class Visualiser(object):
         pygame.display.flip()
 
         hud = HUD(self.width, self.height)
+        print("self.carls_sim.agents:", self.carla_sim.agents)
         pred_hud = Igp2HUD(self.width, self.height, self.carla_sim.agents)
 
         ego = self.carla_sim.get_ego(self.ego_rolename)

@@ -88,6 +88,8 @@ def run_carla_simulation(simulation, ego_agent, args, config) -> bool:
         # tm.set_spawn_speed(low=4, high=14)
         tm.update(simulation)
 
+    print("ego_agent:", ego_agent)
+     
     if not args.no_visualiser:
         visualiser = ip.carlasim.Visualiser(simulation, record=args.record_visualiser)
         visualiser.run(config["scenario"]["max_steps"])

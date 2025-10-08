@@ -73,7 +73,10 @@ class Node:
     def add_reward_result(self, key: Tuple[str], reward_results: Reward):
         """ Add a new reward outcome to the node if the search has ended here. """
         action = key[-1]
-        assert action in self.actions_names, f"Action {action} not in Node {self._key}"
+        print("in add_reward_result -> key:", key, type(key))
+        print("in add_reward_result -> action:", action, type(action))
+        print("in add_reward_result -> actions_names", self.actions_names)
+        assert action in self.actions_names, f"Action {action} not in Node {self._key}" # EMRAN
         self._reward_results[action].append(reward_results)
 
     def store_q_values(self):

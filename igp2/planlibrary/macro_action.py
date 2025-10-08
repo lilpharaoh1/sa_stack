@@ -712,10 +712,16 @@ class Exit(MacroAction):
         assert current_lane is not None, f"No lane found at={state.position}, heading={state.heading}, goal={goal}"
 
         if junction:
-            if not current_lane.link.predecessor is None and len(current_lane.link.predecessor) == 1 \
-                    and not current_lane.link.predecessor[0].link.sucessor is None:
+            if not current_lane.link.predecessor is None and len(current_lane.link.predecessor) == 1:
+                if current_lane.link.predecessor[0] is None:
+                    print("if current_lane.link.predecessor[0] is None")
+                elif current_lane.link.predecessor[0].link is None:
+                    print("current_lane.link.predecessor[0].link is None")
+                elif current_lane.link.predecessor[0].link.successor is None:
+                    print("current_lane.link.predecessor[0].link.successor is None")
                 connecting_lanes = [suc for suc in current_lane.link.predecessor[0].link.successor
-                                    if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR]
+                                    if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR] \
+                                    if not current_lane.link.predecessor[0].link.successor is None else [] 
             else:
                 raise RuntimeError(f"Junction road {current_lane.parent_road.id} had "
                                    f"zero or more than one predecessor road.")
