@@ -29,6 +29,7 @@ class Node:
         self._key = key
         self._state = state
         self._actions = actions
+        print("in Node -> self._actions:", self._actions)
         self._children = {}
 
         self._state_visits = 0
@@ -111,6 +112,7 @@ class Node:
     @property
     def actions_names(self) -> List[str]:
         """ Return the human-readable names of actions in the node. """
+        print("in actions_names -> self._actions:", self._actions)
         return [str(action) for action in self._actions]
 
     @property

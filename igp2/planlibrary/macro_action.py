@@ -701,30 +701,102 @@ class Exit(MacroAction):
             in_roundabout = scenario_map.in_roundabout(state.position, state.heading)
             return GiveWay.applicable(state, scenario_map) and (can_turn or not in_roundabout)
 
+    # def get_possible_args(state: AgentState, scenario_map: Map, goal: Goal = None) -> List[Dict]:
+    #     targets = []
+    #     current_lane = scenario_map.best_lane_at(state.position, state.heading)
+    #     road = scenario_map.roads.get(current_lane.id)
+    #     assert current_lane is not None, f"No lane found at={state.position}, heading={state.heading}, goal={goal}"
+
+    #     junction = current_lane.parent_road.junction is not None
+    #     connecting_lanes = current_lane.link.successor or []
+
+    #     if junction:
+    #         print("------------------------------")
+    #         print("type(current_lane), type(road):", type(current_lane), type(road))
+    #         print("current_lane:", current_lane)
+    #         print("road:", road)
+    #         print("------------------------------")
+
+    #     if junction:
+    #         pred_links = getattr(current_lane.link, "predecessor", [])
+    #         if len(pred_links) == 1:
+    #             pred = pred_links[0]
+    #             if pred and pred.link:
+    #                 if pred.id == 7:
+    #                     print("Road 7) pred.link.successor:", pred.link.successor)
+    #                 successors = getattr(pred.link, "successor", None)
+    #                 if successors:
+    #                     connecting_lanes = [
+    #                         suc for suc in successors
+    #                         if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR
+    #                     ]
+    #                 else:
+    #                     # Fallback: get all lanes robustly
+    #                     all_lanes = []
+    #                     for road in scenario_map.roads.values():
+    #                         lanes_attr = getattr(road.lanes, "lanes", None)
+    #                         if lanes_attr is not None:
+    #                             # lanes_attr may be dict or list
+    #                             if isinstance(lanes_attr, dict):
+    #                                 all_lanes.extend(lanes_attr.values())
+    #                             elif isinstance(lanes_attr, list):
+    #                                 all_lanes.extend(lanes_attr)
+    #                         elif hasattr(road.lanes, "get_all_lanes"):
+    #                             all_lanes.extend(road.lanes.get_all_lanes())
+
+    #                     # Infer successors geometrically
+    #                     connecting_lanes = [
+    #                         lane for lane in all_lanes
+    #                         if lane.parent_road != current_lane.parent_road
+    #                         and lane.start.distance(current_lane.end) < 1.0
+    #                         and abs(lane.heading - current_lane.heading) < np.radians(45)
+    #                     ]
+
+    #                     print("current_lane:", current_lane)
+    #                     print("current_lane.link.successor:", current_lane.link.successor)
+    #                     print("current_lane.link.predecessor:", pred_links)
+    #                     print("current_lane.link.predecessor[0].link.successor:", pred_links[0].link.successor)
+    #                     print("recovered connecting_lanes:", connecting_lanes)
+
+    #                     print(f"[IGP2 FIX] Inferred {len(connecting_lanes)} successors for broken junction lane "
+    #                         f"{current_lane.id} on road {current_lane.parent_road.id}")
+    #             else:
+    #                 print(f"[IGP2 WARN] Junction lane {current_lane.id} has invalid predecessor links.")
+    #         else:
+    #             raise RuntimeError(f"Junction road {current_lane.parent_road.id} had zero or multiple predecessors.")
+
+    #     for connecting_lane in connecting_lanes:
+    #         if not scenario_map.road_in_roundabout(connecting_lane.parent_road) or len(connecting_lanes) == 1:
+    #             targets.append(np.array(connecting_lane.midline.coords[-1]))
+
+    #     results = [{"turn_target": t} for t in targets]
+    #     # sort deterministically (e.g., by x, y)
+    #     results = sorted(results, key=lambda d: (round(d["turn_target"][0], 2), round(d["turn_target"][1], 2)))
+    #     return results
+
+
     @staticmethod
     def get_possible_args(state: AgentState, scenario_map: Map, goal: Goal = None) -> List[Dict]:
         """ Return turn endpoint if approaching junction; if in junction
         return all possible turns within angle threshold"""
         targets = []
         current_lane = scenario_map.best_lane_at(state.position, state.heading)
-        junction = current_lane.parent_road.junction is not None
+        junction = not current_lane.parent_road.junction is None
         connecting_lanes = current_lane.link.successor
         assert current_lane is not None, f"No lane found at={state.position}, heading={state.heading}, goal={goal}"
 
         if junction:
             if not current_lane.link.predecessor is None and len(current_lane.link.predecessor) == 1:
-                if current_lane.link.predecessor[0] is None:
-                    print("if current_lane.link.predecessor[0] is None")
-                elif current_lane.link.predecessor[0].link is None:
-                    print("current_lane.link.predecessor[0].link is None")
-                elif current_lane.link.predecessor[0].link.successor is None:
-                    print("current_lane.link.predecessor[0].link.successor is None")
                 connecting_lanes = [suc for suc in current_lane.link.predecessor[0].link.successor
                                     if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR] \
-                                    if not current_lane.link.predecessor[0].link.successor is None else [] 
+                                    if not current_lane.link.predecessor[0].link.successor is None else \
+                                    [suc for suc in current_lane.link.successor]
+                if not current_lane.link.predecessor[0].link.successor is None:
+                    print("\n\n\n\n\n\n\nTRIGGERED")
+                    print("connecting_lanes:", connecting_lanes)
             else:
                 raise RuntimeError(f"Junction road {current_lane.parent_road.id} had "
-                                   f"zero or more than one predecessor road.")
+                f"zero or more than one predecessor road.")
 
         for connecting_lane in connecting_lanes:
             if not scenario_map.road_in_roundabout(connecting_lane.parent_road) or len(connecting_lanes) == 1:

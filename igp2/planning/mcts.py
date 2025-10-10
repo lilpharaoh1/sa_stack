@@ -285,9 +285,13 @@ class MCTS:
         """
         actions = []
         for macro_action in MacroActionFactory.get_applicable_actions(frame[agent_id], self.scenario_map):
+            print("macro_action:", macro_action)
             for ma_args in macro_action.get_possible_args(frame[agent_id], self.scenario_map, goal):
+                print("ma_args:", ma_args)
                 actions.append(self.action_type(macro_action, ma_args))
 
+        print("in _create_node -> actions:", actions)
+        
         node = self.node_type(key, frame, actions[::-1])
         node.expand()
         return node

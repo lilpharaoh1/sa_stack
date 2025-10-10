@@ -77,23 +77,7 @@ class CarlaSim:
         self.__client.set_timeout(self.TIMEOUT)  # seconds
         self.__wait_for_server()
 
-        self.__scenario_map = None
-        if isinstance(xodr, Map):
-            self.__scenario_map = xodr
-        if map_name is not None:
-            if self.__scenario_map is None:
-                self.__scenario_map = Map.parse_from_opendrive(f"scenarios/maps/{map_name}.xodr")
-            if not self.__client.get_world().get_map().name.endswith(map_name):
-                self.__client.load_world(map_name)
-        elif xodr is not None:
-            if self.__scenario_map is None:
-                self.__scenario_map = Map.parse_from_opendrive(xodr)
-            self.load_opendrive_world(self.__scenario_map.xodr_path)
-        else:
-            raise RuntimeError("Cannot load a map with the given parameters!")
-
-        self.__fps = fps
-        self.__timestep = 0
+        self.__agents = {} # EMRAN moved up here
 
         self.__world = self.__client.get_world()
         self.__map = self.__world.get_map()
@@ -105,6 +89,29 @@ class CarlaSim:
         settings.no_rendering_mode = not rendering
         self.__world.apply_settings(settings)
 
+        self.__scenario_map = None
+        if isinstance(xodr, Map):
+            self.__scenario_map = xodr
+        
+        print("map_name:", map_name)
+        print("self.__scenario_map:", self.__scenario_map)
+
+        if not map_name is None:
+            if self.__scenario_map is None:
+                self.__scenario_map = Map.parse_from_opendrive(f"scenarios/maps/{map_name}.xodr")
+            if not self.__client.get_world().get_map().name.endswith(map_name):
+                # print("available_maps:", self.__client.get_available_maps())
+                self.__client.load_world(map_name)
+        elif not xodr is None:
+            if self.__scenario_map is None:
+                self.__scenario_map = Map.parse_from_opendrive(xodr)
+            self.load_opendrive_world(self.__scenario_map.xodr_path)
+        else:
+            raise RuntimeError("Cannot load a map with the given parameters!")
+
+        self.__fps = fps
+        self.__timestep = 0
+
         self.__record_path = None
         if self.__record:
             now = datetime.now()
@@ -115,7 +122,7 @@ class CarlaSim:
             self.__record_path = os.path.join(repo_path, "scripts", "experiments", "data", "carla_recordings", log_name)
             logger.info(f"Recording simulation under path: {self.__client.start_recorder(self.__record_path, True)}")
 
-        self.__agents = {}
+        print("init has been run!")
 
         self.__spectator = self.__world.get_spectator()
         self.__spectator_parent = None

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <OpenDRIVE>
-    <header revMajor="1" revMinor="6" name="" version="1" date="2023-04-04T16:38:53" north="9.0000000000000000e+01" south="-9.0000000000000000e+01" east="9.0000000000000000e+01" west="-9.0000000000000000e+01" vendor="MathWorks">
+    <header revMajor="1" revMinor="6" name="scenario2" version="1" date="2023-04-04T16:38:53" north="9.0000000000000000e+01" south="-9.0000000000000000e+01" east="9.0000000000000000e+01" west="-9.0000000000000000e+01" vendor="MathWorks">
         <userData code="vectorScene">
             <vectorScene program="RoadRunner" version="R2022b Update 5 (1.5.5.111ff5fbe33)"/>
         </userData>

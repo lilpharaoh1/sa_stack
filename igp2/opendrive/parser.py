@@ -604,6 +604,11 @@ def load_road_lane_links(road):
     next_contact_point = road.link.successor.contact_point if road.link.successor else None
     num_sections = len(road.lanes.lane_sections)
 
+    if road.id == 144:
+        print("Sorting out Road 144")
+        print("Road 144) previous_element:", previous_element)
+        print("Road 144) next_element:", next_element)
+
     for lane_section_idx, lane_section in enumerate(road.lanes.lane_sections):
         for lane_idx, lane in enumerate(lane_section.right_lanes):
             if lane.link.predecessor_id is not None:
