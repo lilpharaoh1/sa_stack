@@ -226,9 +226,18 @@ class Map(object):
 
         """
         point = Point(point)
-        roads = self.roads_at(point)
+
+        md = Map.ROAD_PRECISION_ERROR
+        while md < 1.0:
+            roads = self.roads_at(point, max_distance=md)
+            if len(roads) == 0:
+                md *=2
+            else:
+                break
+        
         if len(roads) == 0:
             logger.debug(f"No roads found at point: {point}!")
+            print(f"No roads found at point: {point}!")
             return None
         if len(roads) == 1 or heading is None:
             return roads[0]

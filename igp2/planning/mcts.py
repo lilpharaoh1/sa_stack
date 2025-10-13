@@ -248,7 +248,7 @@ class MCTS:
 
             except Exception as e:
                 logger.debug(f"    Rollout failed due to error: {str(e)}")
-                logger.debug(traceback.format_exc())
+                # logger.debug(traceback.format_exc())
                 r = -float("inf")
 
             # Create new node at the end of rollout
