@@ -791,7 +791,7 @@ class Exit(MacroAction):
                                     if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR] \
                                     if not current_lane.link.predecessor[0].link.successor is None else \
                                     [suc for suc in current_lane.link.successor]
-                if not current_lane.link.predecessor[0].link.successor is None:
+                if current_lane.link.predecessor[0].link.successor is None:
                     print("\n\n\n\n\n\n\nTRIGGERED")
                     print("connecting_lanes:", connecting_lanes)
             else:
