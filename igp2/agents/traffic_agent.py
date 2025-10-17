@@ -1,5 +1,6 @@
 from typing import List
 import logging
+import copy
 
 from igp2.agents.macro_agent import MacroAgent
 from igp2.core.agentstate import AgentState
@@ -25,6 +26,29 @@ class TrafficAgent(MacroAgent):
 
     def __repr__(self) -> str:
         return f"TrafficAgent(ID={self.agent_id})"
+
+    def __deepcopy__(self, memo):
+        """Custom deepcopy to avoid cycles through scenario and frame."""
+        if memo is None:
+            memo = {}
+        if id(self) in memo:
+            return memo[id(self)]
+
+        cls = self.__class__
+        dup = cls.__new__(cls)
+        memo[id(self)] = dup
+
+        # Copy primitive and small attributes
+        for k, v in self.__dict__.items():
+            # Skip cyclic or environment-heavy fields
+            if k in ("_frame", "_scenario_map", "_planner", "_macro_actions", "_current_macro"):
+                setattr(dup, k, None)
+            elif k == "_astar":
+                setattr(dup, k, v)  # shallow copy is fine
+            else:
+                setattr(dup, k, copy.deepcopy(v, memo))
+
+        return dup
 
     def set_macro_actions(self, new_macros: List[MacroAction]):
         """ Specify a new set of macro actions to follow. """
@@ -91,8 +115,11 @@ class TrafficAgent(MacroAgent):
                 self._advance_macro(observation)
             else:
                 logger.warning(f"TrafficAgent {self.agent_id} has no macro actions!")
+                logger.debug("in TrafficAgent.next_action -> Returning Action(0, 0)")
                 return Action(0, 0)
 
+        if self._current_macro is None:
+            return Action(0, 0)
         return self._current_macro.next_action(observation)
 
     def reset(self):
@@ -106,6 +133,11 @@ class TrafficAgent(MacroAgent):
 
         self._current_macro_id += 1
         if self._current_macro_id >= len(self._macro_actions):
+            # EMRAN
+            logger.debug(f"self._current_macro_id, len(self._macro_actions): {self._current_macro_id, len(self._macro_actions)}")
+            logger.debug(f"Agent {self.agent_id} has no more macro actions to execute.")
+            logger.debug(f"\n\n\n\n\n\n self._current_macro = {self._current_macro}")
+            return None
             raise RuntimeError(f"Agent {self.agent_id} has no more macro actions to execute.")
         self._current_macro = self._macro_actions[self._current_macro_id]
 

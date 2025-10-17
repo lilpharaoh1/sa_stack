@@ -569,23 +569,10 @@ class Igp2HUD(object):
 
         if world.ego.agent.goal_probabilities is not None:
             for agent_id, predictions in world.ego.agent.goal_probabilities.items():
-                # print("agent_id:", agent_id)
-                # print("world.ego.agent.goal_probabilities:", world.ego.agent.goal_probabilities)
-                # print("self.agents:", self.agents)
-                # print("type(self.agents):", type(self.agents))
-                # print("self.agents.keys:", [k for k in self.agents.keys])
-                # print("self.agent.values:", [v for v in self.agents.values])
-                # print("type(self.agents.values:", [type(v) for v in self.agents.values])
-                # if self.agents[agent_id] is None:
                 if not agent_id in self.agents or self.agents[agent_id] is None:
                     continue
 
-                try:
-                    vehicle = self.agents[agent_id].actor
-                except:
-                    print("self.agents[agent_id]:", self.agents[agent_id])
-                    raise "Caught Error AttributeError: 'NoneType' object has no attribute 'actor"
-
+                vehicle = self.agents[agent_id].actor
                 vehicle_type = get_actor_display_name(vehicle, truncate=22)
                 self._info_text.append(f"Agent {agent_id} - {vehicle_type}:")
 

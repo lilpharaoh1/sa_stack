@@ -77,7 +77,7 @@ class CarlaSim:
         self.__client.set_timeout(self.TIMEOUT)  # seconds
         self.__wait_for_server()
 
-        self.__agents = {} # EMRAN moved up here
+        self.__agents = {}
 
         self.__world = self.__client.get_world()
         self.__map = self.__world.get_map()
@@ -93,14 +93,10 @@ class CarlaSim:
         if isinstance(xodr, Map):
             self.__scenario_map = xodr
         
-        print("map_name:", map_name)
-        print("self.__scenario_map:", self.__scenario_map)
-
         if not map_name is None:
             if self.__scenario_map is None:
                 self.__scenario_map = Map.parse_from_opendrive(f"scenarios/maps/{map_name}.xodr")
             if not self.__client.get_world().get_map().name.endswith(map_name):
-                # print("available_maps:", self.__client.get_available_maps())
                 self.__client.load_world(map_name)
         elif not xodr is None:
             if self.__scenario_map is None:
@@ -121,8 +117,6 @@ class CarlaSim:
             repo_path = str(path.parent.parent)
             self.__record_path = os.path.join(repo_path, "scripts", "experiments", "data", "carla_recordings", log_name)
             logger.info(f"Recording simulation under path: {self.__client.start_recorder(self.__record_path, True)}")
-
-        print("init has been run!")
 
         self.__spectator = self.__world.get_spectator()
         self.__spectator_parent = None

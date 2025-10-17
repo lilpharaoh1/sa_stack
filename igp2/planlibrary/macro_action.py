@@ -142,7 +142,7 @@ class MacroAction(abc.ABC):
         for aid, agent in frame.items():
             if aid != agent_id:
                 state = copy(agent)
-                agent_lane = scenario_map.best_lane_at(agent.position, agent.heading)
+                agent_lane = scenario_map.best_lane_at(agent.position, agent.heading, md_min=0.15, md_max=1.5)
                 if agent_lane is None:
                     continue
                 agent_distance = agent_lane.distance_at(agent.position) + duration * agent.speed
@@ -276,7 +276,7 @@ class Continue(MacroAction):
 
     def get_maneuvers(self) -> List[Maneuver]:
         state = self.start_frame[self.agent_id]
-        current_lane = self.scenario_map.best_lane_at(state.position, state.heading)
+        current_lane = self.scenario_map.best_lane_at(state.position, state.heading, md_min=0.15, md_max=1.5)
         endpoint = self.termination_point
 
         configs = []
@@ -327,7 +327,7 @@ class Continue(MacroAction):
     @staticmethod
     def applicable(state: AgentState, scenario_map: Map) -> bool:
         """ True if vehicle on a lane, and not approaching junction or not in junction"""
-        current_road = scenario_map.best_road_at(state.position, state.heading)
+        current_road = scenario_map.best_road_at(state.position, state.heading, md_min=0.15, md_max=1.5)
         in_junction = current_road.junction is not None
         in_roundabout = scenario_map.road_in_roundabout(current_road)
         return (FollowLane.applicable(state, scenario_map) and
@@ -342,7 +342,7 @@ class Continue(MacroAction):
             return []
 
         if goal is not None:
-            current_lane = scenario_map.best_lane_at(state.position, state.heading)
+            current_lane = scenario_map.best_lane_at(state.position, state.heading, md_min=0.15, md_max=1.5)
             gp = goal.point_on_lane(current_lane)
             if gp is not None and current_lane.boundary.distance(Point(gp)) < Map.ROAD_PRECISION_ERROR:
                 return [{"termination_point": gp}]
@@ -364,7 +364,7 @@ class ChangeLane(MacroAction):
     def get_maneuvers(self) -> List[Maneuver]:
         maneuvers = []
         state = self.start_frame[self.agent_id]
-        current_lane = self.scenario_map.best_lane_at(state.position, state.heading)
+        current_lane = self.scenario_map.best_lane_at(state.position, state.heading, md_min=0.15, md_max=1.5)
         current_distance = current_lane.distance_at(state.position)
 
         if not self.target_sequence:
@@ -441,7 +441,7 @@ class ChangeLane(MacroAction):
     @staticmethod
     def check_applicability(state: AgentState, scenario_map: Map, left: bool) -> bool:
         """ True if current lane not in junction, or at appropriate distance from a junction """
-        current_lane = scenario_map.best_lane_at(state.position, state.heading)
+        current_lane = scenario_map.best_lane_at(state.position, state.heading, md_min=0.15, md_max=1.5)
         ds = current_lane.distance_at(state.position)
         in_junction = current_lane.parent_road.junction is not None
         in_roundabout = scenario_map.road_in_roundabout(current_lane.parent_road)
@@ -470,7 +470,7 @@ class ChangeLane(MacroAction):
             if self.agent_id == aid:
                 continue
 
-            agent_lanes = self.scenario_map.lanes_at(agent.position)
+            agent_lanes = self.scenario_map.lanes_at(agent.position, md_min=0.15, md_max=1.5)
             if any([ll in target_lane_sequence for ll in agent_lanes]):
                 d_speed = state.speed - agent.speed
                 d_distance = target_midline.project(Point(agent.position)) - \
@@ -506,7 +506,7 @@ class ChangeLane(MacroAction):
         """ Returns all possible lane changes when passing through a junction and there are multiple valid
         lane sequences. This will only really be applied when the vehicle is passing through a roundabout. """
         ls = [[]]
-        current_lane = scenario_map.best_lane_at(state.position, state.heading)
+        current_lane = scenario_map.best_lane_at(state.position, state.heading, md_min=0.15, md_max=1.5)
         distance = -current_lane.distance_at(state.position)
         while current_lane is not None and distance <= SwitchLane.TARGET_SWITCH_LENGTH:
             target_lane = ChangeLane.get_target_lane(current_lane, left)
@@ -518,7 +518,7 @@ class ChangeLane(MacroAction):
             in_roundabout = scenario_map.road_in_roundabout(current_lane.parent_road)
             in_junction = current_lane.parent_road.junction is not None
             if distance > 0 and in_junction and in_roundabout:
-                junction_lanes = scenario_map.lanes_at(target_lane.point_at(0.01))
+                junction_lanes = scenario_map.lanes_at(target_lane.point_at(0.01), md_min=0.15, md_max=1.5)
                 for lane in junction_lanes:
                     if not scenario_map.road_in_roundabout(lane.parent_road):
                         target_lane = lane
@@ -673,6 +673,7 @@ class Exit(MacroAction):
         best_distance = np.inf
         for connecting_lane in lane_list:
             distance = np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[-1]))
+            # logger.debug(f"distance, self.turn_target, midline_coords:, {distance, self.turn_target, np.array(connecting_lane.midline.coords[-1])}")
             if distance < self.TURN_TARGET_THRESHOLD and distance < best_distance:
                 best_lane = connecting_lane
                 best_distance = distance
@@ -680,9 +681,14 @@ class Exit(MacroAction):
 
     def _find_current_lane(self, state: AgentState, in_junction: bool) -> Lane:
         if not in_junction:
-            return self.scenario_map.best_lane_at(state.position, state.heading)
-        all_lanes = self.scenario_map.lanes_at(state.position, max_distance=0.5)
-        return self._nearest_lane_to_goal(all_lanes)
+            return self.scenario_map.best_lane_at(state.position, state.heading, md_min=0.15, md_max=1.5)
+        all_lanes = self.scenario_map.lanes_at(state.position, md_min=0.15, md_max=1.5)
+        # if all_lanes == None:
+            # all_lanes = iter_lanes_at(self.scenario_map, state, start_md=0.5, end_md=1.5)
+
+        logger.debug(f"state.position, all_lanes: {state.position, all_lanes}")
+        out = self._nearest_lane_to_goal(all_lanes)
+        return out
 
     def _find_connecting_lane(self, current_lane: Lane) -> Optional[Lane]:
         return self._nearest_lane_to_goal(current_lane.link.successor)
@@ -780,7 +786,7 @@ class Exit(MacroAction):
         """ Return turn endpoint if approaching junction; if in junction
         return all possible turns within angle threshold"""
         targets = []
-        current_lane = scenario_map.best_lane_at(state.position, state.heading)
+        current_lane = scenario_map.best_lane_at(state.position, state.heading, md_min=0.15, md_max=1.5)
         junction = not current_lane.parent_road.junction is None
         connecting_lanes = current_lane.link.successor
         assert current_lane is not None, f"No lane found at={state.position}, heading={state.heading}, goal={goal}"
@@ -790,10 +796,10 @@ class Exit(MacroAction):
                 connecting_lanes = [suc for suc in current_lane.link.predecessor[0].link.successor
                                     if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR] \
                                     if not current_lane.link.predecessor[0].link.successor is None else \
-                                    [suc for suc in current_lane.link.successor]
+                                    [suc for suc in scenario_map.lanes_at(state.position, md_min=0.2, md_max=1.0)]
+                                    # [suc for suc in current_lane.link.successor]
                 if current_lane.link.predecessor[0].link.successor is None:
-                    print("\n\n\n\n\n\n\nTRIGGERED")
-                    print("connecting_lanes:", connecting_lanes)
+                    print("\n\n\n\n\n\n\n TRIGGERED")
             else:
                 raise RuntimeError(f"Junction road {current_lane.parent_road.id} had "
                 f"zero or more than one predecessor road.")
@@ -851,8 +857,8 @@ class StopMA(MacroAction):
             # 1. If already stopped then just stay put for a while.
             return [{"stop_duration": Stop.DEFAULT_STOP_DURATION}]
         elif goal is not None and isinstance(goal, StoppingGoal):
-            current_lane = scenario_map.best_lane_at(state.position, state.heading)
-            goal_lanes = scenario_map.lanes_at(goal.center)
+            current_lane = scenario_map.best_lane_at(state.position, state.heading, md_min=0.15, md_max=1.5)
+            goal_lanes = scenario_map.lanes_at(goal.center, md_min=0.15, md_max=1.5)
             if current_lane in goal_lanes:
                 goal_ds = current_lane.distance_at(goal.center)
                 current_ds = current_lane.distance_at(state.position)
@@ -917,7 +923,7 @@ class MacroActionFactory:
         """
         actions = []
 
-        current_lane = scenario_map.best_lane_at(agent_state.position, agent_state.heading)
+        current_lane = scenario_map.best_lane_at(agent_state.position, agent_state.heading, md_min=0.15, md_max=1.5)
         if current_lane is None:
             return []
 

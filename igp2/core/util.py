@@ -183,6 +183,9 @@ def find_lane_sequence(start_lane: "Lane", end_lane: "Lane", goal: "Goal", max_i
         iterations += 1
         cost, lanes = heapq.heappop(frontier)
         current_lane = lanes[-1]
+        # EMRAN
+        if current_lane is None:
+            print(f"start_lane, end_lane: {start_lane, end_lane}")
         if current_lane == end_lane:
             return lanes
         if current_lane.link.successor is None:
@@ -202,7 +205,6 @@ def list_startswith(list1: list, list2: list) -> bool:
     if len1 >= len2:
         return list1[:len2] == list2
     return False
-
 
 def copy_agents_dict(agents_dict, agent_id):
     # Remove temporarily due to circular dependency

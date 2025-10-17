@@ -33,16 +33,6 @@ def main():
     xodr_path = config["scenario"]["map_path"]
     scenario_map = ip.Map.parse_from_opendrive(xodr_path)
 
-    road = scenario_map.roads.get(7)
-
-    if road is None:
-        print("Road 7 not found in map.")
-    else:
-        print(f"Road 7 road: {road}")
-        print(f"Road 7 road.link: {road.link}")
-        print(f"Road 7 successor: {road.link.successor}")
-        print(f"Road 7 predecessor: {road.link.predecessor}")
-
     frame = generate_random_frame(scenario_map, config)
 
     if args.plot_map_only:

@@ -64,6 +64,7 @@ class Tree:
 
     def select_action(self, node: Node) -> MCTSAction:
         """ Select one of the actions in the node using the specified policy and update node statistics """
+        logger.debug(f"in tree.select_action -> node.actions = {node.actions}")
         action, idx = self._action_policy.select(node)
         node.action_visits[idx] += 1
         return action

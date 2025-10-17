@@ -70,6 +70,9 @@ class GoalRecognition:
         """
         norm_factor = 0.
         current_lane = self._scenario_map.best_lane_at(frame[agent_id].position, frame[agent_id].heading)
+        if current_lane is None:
+            raise f"Could not find best lane for agent at position {frame[agent_id].position}."
+        logger.debug(f"\n\n\n\ncurrent_lane = {current_lane}")  
         logger.info(f"Agent ID {agent_id} goal recognition:")
         for goal_and_type, prob in goals_probabilities.goals_probabilities.items():
             try:
