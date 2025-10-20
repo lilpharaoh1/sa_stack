@@ -322,6 +322,8 @@ class FollowLane(Maneuver):
         termination_lon = lane_ls.project(Point(self.config.termination_point))
         termination_point = lane_ls.interpolate(termination_lon).coords[0]
 
+        # logger.debug(f"current_point, lane_ls, current_lon, self.config.termination_point, termination_lon = {current_point, lane_ls, current_lon, self.config.termination_point, termination_lon}")
+
         lat_dist = lane_ls.distance(current_point)
         margin = self.POINT_SPACING + 2 * lat_dist
 

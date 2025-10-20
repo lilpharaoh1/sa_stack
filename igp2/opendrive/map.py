@@ -23,7 +23,7 @@ class Map(object):
     LPE_MIN = 1e-8 # 0.15
     LPE_MAX = 0.3 # 1.5
     RPE_MIN = 1e-8 # 0.15
-    RPE_MAX = 0.3 # 1.5
+    RPE_MAX = 1.0 # 1.5
     MIN_STEP = 1e-8 # Minimum step between md_min and md_max to ensure search only runs once, must be < md_min
     JUNCTION_PRECISION_ERROR = 1e-8
 
@@ -111,7 +111,7 @@ class Map(object):
         return out
 
     def lanes_at(self, point: Union[Point, Tuple[float, float], np.ndarray], drivable_only: bool = False,
-                 md_min: float = None, md_max: float = None) -> List[Lane]:
+                 max_distance: float = None) -> List[Lane]:
         """ Return all lanes passing through the given point within an error given by Map.LANE_PRECISION_ERROR. The
         default error is 1.5
 
@@ -123,32 +123,22 @@ class Map(object):
         Returns:
             A list of all viable lanes or empty list
         """
-        md_min = Map.LPE_MIN if md_min is None else md_min
-        md_max = Map.LPE_MAX if md_max is None else md_max
-        assert md_min < md_max, "md_min must be less than md_max to perform at least one search."
+        if max_distance is None:
+            max_distance = Map.LANE_PRECISION_ERROR
 
-        max_distance = md_min
-        while max_distance <= md_max:
-            candidates = []
-            point = Point(point)
-            roads = self.roads_at(point, md_min=max_distance, md_max=max_distance+Map.MIN_STEP)
-            for road in roads:
-                for lane_section in road.lanes.lane_sections:
-                    for lane in lane_section.all_lanes:
-                        if (lane.boundary is not None and
-                                not lane.boundary.is_empty and
-                                lane.boundary.distance(point) < max_distance and
-                                (not drivable_only or lane.type == LaneTypes.DRIVING) and
-                                lane not in candidates):
-                            candidates.append(lane)
-            out = candidates
-            if out is None:
-                max_distance *= 2
-            else:
-                return out
-        
-        logger.debug(f"Map->lanes_at failed to find a lane at {Point}.")
-        return out
+        candidates = []
+        point = Point(point)
+        roads = self.roads_at(point, md_min=max_distance, md_max=max_distance+Map.MIN_STEP)
+        for road in roads:
+            for lane_section in road.lanes.lane_sections:
+                for lane in lane_section.all_lanes:
+                    if (lane.boundary is not None and
+                            not lane.boundary.is_empty and
+                            lane.boundary.distance(point) < max_distance and
+                            (not drivable_only or lane.type == LaneTypes.DRIVING) and
+                            lane not in candidates):
+                        candidates.append(lane)
+        return candidates
 
     def roads_within_angle(self, point: Union[Point, Tuple[float, float], np.ndarray],
                            heading: float, threshold: float, max_distance: float = None) -> List[Road]:
@@ -173,7 +163,7 @@ class Map(object):
 
         point = Point(point)
 
-        roads = self.roads_at(point, md_min=max_distance, md_max=max_distance+Map.MIN_STEP)
+        roads = self.roads_at(point, max_distance=max_distance)
         if len(roads) == 1:
             return roads
 
@@ -266,7 +256,7 @@ class Map(object):
             else:
                 break
         
-        if not len(roads) > 0:
+        if len(roads) == 0:
             logger.debug(f"Map->best_road_at failed to find a road at {Point}.")
             return None
         if len(roads) == 1 or heading is None:
@@ -319,8 +309,7 @@ class Map(object):
                      point: Union[Point, Tuple[float, float], np.ndarray],
                      heading: float = None,
                      drivable_only: bool = True,
-                     md_min: float = None, 
-                     md_max: float = None,
+                     max_distance: float = None,
                      goal: "Goal" = None) -> Optional[Lane]:
         """ Get the lane at the given point whose direction is closest to the given heading and whose distance from the
         point is the smallest.
@@ -335,42 +324,32 @@ class Map(object):
         Returns:
             A Lane passing through point with its direction closest to the given heading, or None.
         """
-        md_min = Map.LPE_MIN if md_min is None else md_min
-        md_max = Map.LPE_MAX if md_max is None else md_max
-        assert md_min < md_max, "md_min must be less than md_max to perform at least one search."
+        if max_distance is None:
+            max_distance = Map.LANE_PRECISION_ERROR
 
-        max_distance = md_min
-        while max_distance <= md_max:
-            point = Point(point)
-            road = self.best_road_at(point, heading, goal=goal)
-            if road is None:
-                return None
+        point = Point(point)
+        road = self.best_road_at(point, heading, goal=goal)
+        if road is None:
+            return None
 
-            best = None
-            _, original_angle = road.plan_view.calc(road.midline.project(point))
-            for lane_section in road.lanes.lane_sections:
-                for lane in lane_section.all_lanes:
-                    if lane.boundary is not None and lane.id != 0 and (not drivable_only or lane.type == LaneTypes.DRIVING):
-                        distance = lane.boundary.distance(point)
-                        if distance < max_distance:
-                            angle_diff = 0.0
-                            if heading is not None:
-                                if lane.id > 0:
-                                    angle = normalise_angle(original_angle + np.pi)
-                                else:
-                                    angle = original_angle
-                                angle_diff = np.abs(heading - angle)
-                            if best is None or best[0] > angle_diff + distance:
-                                best = (angle_diff + distance, lane)
+        best = None
+        _, original_angle = road.plan_view.calc(road.midline.project(point))
+        for lane_section in road.lanes.lane_sections:
+            for lane in lane_section.all_lanes:
+                if lane.boundary is not None and lane.id != 0 and (not drivable_only or lane.type == LaneTypes.DRIVING):
+                    distance = lane.boundary.distance(point)
+                    if distance < max_distance:
+                        angle_diff = 0.0
+                        if heading is not None:
+                            if lane.id > 0:
+                                angle = normalise_angle(original_angle + np.pi)
+                            else:
+                                angle = original_angle
+                            angle_diff = np.abs(heading - angle)
+                        if best is None or best[0] > angle_diff + distance:
+                            best = (angle_diff + distance, lane)
 
-            out = best[1] if best is not None else None
-            if out is None:
-                max_distance *= 2
-            else:
-                return out
-
-        logger.debug(f"Map->best_lane_at failed to find a lane at {Point}.")
-        return None
+        return best[1] if best is not None else None
 
     def junction_at(self, point: Union[Point, Tuple[float, float], np.ndarray]) -> Optional[Junction]:
         """ Get the Junction at a given point within an error given by Map.JUNCTION_PRECISION_ERROR

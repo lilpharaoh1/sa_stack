@@ -129,6 +129,15 @@ class TrafficManager:
         agent = CarlaAgentWrapper(agent, vehicle)
 
         self.__find_destination(agent, initial_state)
+        # try_count = 0
+        # while try_count < self._max_spawn_tries:
+        #     try:
+        #         self.__find_destination(agent, initial_state)
+        #         break
+        #     except:
+        #         try_count += 1
+        # else:
+        #     logger.debug("Couldn't find traffic vehicle route!")
 
         # Wrap agent for CARLA control
         self.__agents[agent.agent_id] = agent
