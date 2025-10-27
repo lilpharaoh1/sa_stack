@@ -107,7 +107,7 @@ class Map(object):
             else:
                 return out
         
-        logger.debug(f"Map->roads_at failed to find a road at {point.x, point.y}. md_min, md_max = {md_min, md_max}.")
+        # logger.debug(f"Map->roads_at failed to find a road at {point.x, point.y}. md_min, md_max = {md_min, md_max}.")
         return out
 
     def lanes_at(self, point: Union[Point, Tuple[float, float], np.ndarray], drivable_only: bool = False,
@@ -257,7 +257,7 @@ class Map(object):
                 break
         
         if len(roads) == 0:
-            logger.debug(f"Map->best_road_at failed to find a road at {point.x, point.y}. md_min, md_max = {md_min, md_max}.")
+            # logger.debug(f"Map->best_road_at failed to find a road at {point.x, point.y}. md_min, md_max = {md_min, md_max}.")
             return None
         if len(roads) == 1 or heading is None:
             return roads[0]

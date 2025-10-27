@@ -115,10 +115,12 @@ class TrafficAgent(MacroAgent):
                 self._advance_macro(observation)
             else:
                 logger.warning(f"TrafficAgent {self.agent_id} has no macro actions!")
-                logger.debug("in TrafficAgent.next_action -> Returning Action(0, 0)")
+                logger.debug("in TrafficAgent.next_action -> First returning Action(0, 0)")
                 return Action(0, 0)
 
         if self._current_macro_id >= len(self._macro_actions):
+            logger.warning(f"TrafficAgent {self.agent_id} has no macro actions!")
+            logger.debug("in TrafficAgent.next_action -> First returning Action(0, 0)")
             return Action(0, 0)
         return self._current_macro.next_action(observation)
 

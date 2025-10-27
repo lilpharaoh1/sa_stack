@@ -327,7 +327,7 @@ class Continue(MacroAction):
     @staticmethod
     def applicable(state: AgentState, scenario_map: Map) -> bool:
         """ True if vehicle on a lane, and not approaching junction or not in junction"""
-        current_road = scenario_map.best_road_at(state.position, state.heading) # 0.15, md_max=1.5)
+        current_road = scenario_map.best_road_at(state.position, state.heading, md_max=1.5)
         in_junction = current_road.junction is not None
         in_roundabout = scenario_map.road_in_roundabout(current_road)
         return (FollowLane.applicable(state, scenario_map) and

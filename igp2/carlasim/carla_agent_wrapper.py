@@ -44,6 +44,9 @@ class CarlaAgentWrapper:
                     self.__waypoints, stop_waypoint_creation=True, clean_queue=True)
 
         target_speed = action.target_speed
+        if target_speed is None:
+            print("EMRAN) Setting target_speed to 20.0 km/hr")
+            target_speed = 20.0
         self.__local_planner.set_speed(target_speed * 3.6)
         return self.__local_planner.run_step()
 
