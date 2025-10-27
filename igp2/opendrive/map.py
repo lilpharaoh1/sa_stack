@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 class Map(object):
     """ Define a map object based on the OpenDrive standard """
-    ROAD_PRECISION_ERROR = 1e-8  # Maximum precision error allowed when checking if two geometries contain each other
-    LANE_PRECISION_ERROR = 1e-8
+    ROAD_PRECISION_ERROR = 1.5  # Maximum precision error allowed when checking if two geometries contain each other
+    LANE_PRECISION_ERROR = 1.5
     LPE_MIN = 1e-8 # 0.15
     LPE_MAX = 0.3 # 1.5
     RPE_MIN = 1e-8 # 0.15
@@ -107,7 +107,7 @@ class Map(object):
             else:
                 return out
         
-        logger.debug(f"Map->roads_at failed to find a road at {Point}. md_min, md_max = {md_min, md_max}.")
+        logger.debug(f"Map->roads_at failed to find a road at {point.x, point.y}. md_min, md_max = {md_min, md_max}.")
         return out
 
     def lanes_at(self, point: Union[Point, Tuple[float, float], np.ndarray], drivable_only: bool = False,
@@ -128,7 +128,7 @@ class Map(object):
 
         candidates = []
         point = Point(point)
-        roads = self.roads_at(point, md_min=max_distance, md_max=max_distance+Map.MIN_STEP)
+        roads = self.roads_at(point, md_min=max_distance, md_max=max_distance*1.5)
         for road in roads:
             for lane_section in road.lanes.lane_sections:
                 for lane in lane_section.all_lanes:
@@ -250,14 +250,14 @@ class Map(object):
 
         max_distance = md_min
         while max_distance <= md_max:
-            roads = self.roads_at(point, md_min=max_distance, md_max=max_distance+Map.MIN_STEP)
+            roads = self.roads_at(point, md_min=max_distance, md_max=max_distance*1.5)
             if not len(roads) > 0:
                 max_distance *=2
             else:
                 break
         
         if len(roads) == 0:
-            logger.debug(f"Map->best_road_at failed to find a road at {Point}.")
+            logger.debug(f"Map->best_road_at failed to find a road at {point.x, point.y}. md_min, md_max = {md_min, md_max}.")
             return None
         if len(roads) == 1 or heading is None:
             return roads[0]

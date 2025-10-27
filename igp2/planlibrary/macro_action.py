@@ -682,20 +682,21 @@ class Exit(MacroAction):
         best_lane = None
         best_distance = np.inf
         for connecting_lane in lane_list:
-            distance = np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[-1]))
-            # logger.debug(f"distance, self.turn_target, midline_coords:, {distance, self.turn_target, np.array(connecting_lane.midline.coords[-1])}")
+            distance = min(np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[-1])), \
+                                np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[0])))
             if distance < self.TURN_TARGET_THRESHOLD and distance < best_distance:
                 best_lane = connecting_lane
                 best_distance = distance
+        if best_lane is None:
+            logger.debug(f"best_lane is None -> distance, self.turn_target, end_midline_coords:, {distance, self.turn_target, np.array(connecting_lane.midline.coords[-1])}")    
+            logger.debug(f"best_lane is None -> distance, self.turn_target, start_midline_coords:, {distance, self.turn_target, np.array(connecting_lane.midline.coords[0])}")
         return best_lane
 
     def _find_current_lane(self, state: AgentState, in_junction: bool) -> Lane:
         if not in_junction:
             return self.scenario_map.best_lane_at(state.position, state.heading) # 0.15, md_max=1.5)
         all_lanes = self.scenario_map.lanes_at(state.position) # 0.15, md_max=1.5)
-        # if all_lanes == None:
-            # all_lanes = iter_lanes_at(self.scenario_map, state, start_md=0.5, end_md=1.5)
-
+       
         logger.debug(f"state.position, all_lanes: {state.position, all_lanes}")
         out = self._nearest_lane_to_goal(all_lanes)
         return out
@@ -806,10 +807,8 @@ class Exit(MacroAction):
                 connecting_lanes = [suc for suc in current_lane.link.predecessor[0].link.successor
                                     if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR] \
                                     if not current_lane.link.predecessor[0].link.successor is None else \
-                                    [suc for suc in scenario_map.lanes_at(state.position, max_distance=0.2)] # , md_max=1.0)]
+                                    [suc for suc in scenario_map.lanes_at(state.position, max_distance=1.5)] # , md_max=1.0)]
                                     # [suc for suc in current_lane.link.successor]
-                if current_lane.link.predecessor[0].link.successor is None:
-                    print("\n\n\n\n\n\n\n TRIGGERED")
             else:
                 raise RuntimeError(f"Junction road {current_lane.parent_road.id} had "
                 f"zero or more than one predecessor road.")

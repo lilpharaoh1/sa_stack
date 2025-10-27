@@ -118,7 +118,7 @@ class TrafficAgent(MacroAgent):
                 logger.debug("in TrafficAgent.next_action -> Returning Action(0, 0)")
                 return Action(0, 0)
 
-        if self._current_macro is None:
+        if self._current_macro_id >= len(self._macro_actions):
             return Action(0, 0)
         return self._current_macro.next_action(observation)
 
@@ -133,12 +133,8 @@ class TrafficAgent(MacroAgent):
 
         self._current_macro_id += 1
         if self._current_macro_id >= len(self._macro_actions):
-            # EMRAN
-            logger.debug(f"self._current_macro_id, len(self._macro_actions): {self._current_macro_id, len(self._macro_actions)}")
-            logger.debug(f"Agent {self.agent_id} has no more macro actions to execute.")
-            logger.debug(f"\n\n\n\n\n\n self._current_macro = {self._current_macro}")
-            self._current_macro = None
-            # raise RuntimeError(f"Agent {self.agent_id} has no more macro actions to execute.")
+            logger.debug(f"self._current_macro, self._current_macro_id, len(self._macro_actions): {self._current_macro, self._current_macro_id, len(self._macro_actions)}")
+            logger.debug(f"Agent {self.agent_id} has no more macro actions to execute. Setting self._current_macro to None.")
         else:
             self._current_macro = self._macro_actions[self._current_macro_id]
 

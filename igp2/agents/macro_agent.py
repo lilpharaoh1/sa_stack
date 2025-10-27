@@ -36,9 +36,8 @@ class MacroAgent(Agent):
 
     def done(self, observation: Observation) -> bool:
         """ Returns true if the current macro action has reached a completion state. """
-        assert self._current_macro is not None, f"Macro action of Agent {self.agent_id} is None!"
-        return self._current_macro.done(observation)
-
+        # assert self._current_macro is not None, f"Macro action of Agent {self.agent_id} is None!"
+        return self._current_macro is not None and self._current_macro.done(observation)
     def next_action(self, observation: Observation) -> Action:
         """ Get the next action from the macro action.
 
