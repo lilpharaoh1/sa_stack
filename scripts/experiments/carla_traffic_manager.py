@@ -91,7 +91,7 @@ def main():
                               heading=np.pi / 2)
     }
 
-    simulation = ip.simcarla.CarlaSim(server=config["server"],
+    simulation = ip.carlasim.CarlaSim(server=config["server"],
                                       port=config["port"],
                                       map_name=scenario,
                                       xodr=xodr_path,
@@ -122,7 +122,7 @@ def main():
     tm.update(simulation)
 
     if config["visualiser"]:
-        visualiser = ip.simcarla.Visualiser(simulation)
+        visualiser = ip.carlasim.Visualiser(simulation)
         visualiser.run(config["max_iter"])
     else:
         simulation.run(config["max_iter"])

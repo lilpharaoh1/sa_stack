@@ -660,6 +660,26 @@ class Exit(MacroAction):
             maneuvers.append(man)
             frame = Maneuver.play_forward_maneuver(self.agent_id, self.scenario_map, frame, man)
 
+        # try:
+        #     # Add turn
+        #     config_dict = {
+        #         "type": "turn",
+        #         "termination_point": self.turn_target,
+        #         "junction_road_id": connecting_lane.parent_road.id,
+        #         "junction_lane_id": connecting_lane.id,
+        #         "fps": self.config.fps
+        #     }
+        #     config = ManeuverConfig(config_dict)
+        #     if self.open_loop:
+        #         man = Turn(config, self.agent_id, frame, self.scenario_map)
+        #     else:
+        #         man = CLManeuverFactory.create(config, self.agent_id, frame, self.scenario_map)
+        #     maneuvers.append(man)
+        #     self.final_frame = Maneuver.play_forward_maneuver(self.agent_id, self.scenario_map, frame, maneuvers[-1], 0.1)
+        # except:
+        #     logger.debug(f"Couldn't make Turn Maneuver")
+        #     self.final_frame = frame
+        
         # Add turn
         config_dict = {
             "type": "turn",
@@ -684,6 +704,7 @@ class Exit(MacroAction):
         for connecting_lane in lane_list:
             distance = min(np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[-1])), \
                                 np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[0])))
+            # distance = np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[-1]))
             if distance < self.TURN_TARGET_THRESHOLD and distance < best_distance:
                 best_lane = connecting_lane
                 best_distance = distance
@@ -696,8 +717,6 @@ class Exit(MacroAction):
         if not in_junction:
             return self.scenario_map.best_lane_at(state.position, state.heading) # 0.15, md_max=1.5)
         all_lanes = self.scenario_map.lanes_at(state.position) # 0.15, md_max=1.5)
-       
-        logger.debug(f"state.position, all_lanes: {state.position, all_lanes}")
         out = self._nearest_lane_to_goal(all_lanes)
         return out
 
@@ -806,9 +825,8 @@ class Exit(MacroAction):
             if not current_lane.link.predecessor is None and len(current_lane.link.predecessor) == 1:
                 connecting_lanes = [suc for suc in current_lane.link.predecessor[0].link.successor
                                     if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR] \
-                                    if not current_lane.link.predecessor[0].link.successor is None else \
-                                    [suc for suc in scenario_map.lanes_at(state.position, max_distance=1.5)] # , md_max=1.0)]
-                                    # [suc for suc in current_lane.link.successor]
+                                    if not current_lane.link.predecessor[0].link.successor is None else [] #\
+                                    # [suc for suc in scenario_map.lanes_at(state.position, max_distance=1.5)]
             else:
                 raise RuntimeError(f"Junction road {current_lane.parent_road.id} had "
                 f"zero or more than one predecessor road.")
@@ -931,9 +949,9 @@ class MacroActionFactory:
             A list of applicable macro action types
         """
         actions = []
-
-        current_lane = scenario_map.best_lane_at(agent_state.position, agent_state.heading) # 0.15, md_max=1.5)
+        current_lane = scenario_map.best_lane_at(agent_state.position, agent_state.heading, max_distance=1.5) # 0.15, md_max=1.5)
         if current_lane is None:
+            logger.debug(f"current_lane is None in get_applicable_actions, so returning an empty list.")
             return []
 
         if goal is not None:
@@ -942,7 +960,9 @@ class MacroActionFactory:
                     current_lane.distance_at(agent_state.position) < current_lane.distance_at(goal_point):
                 actions = [Continue]
 
+        # logger.debug("----------------------------------------------------")
         for name, macro_action in cls.macro_action_types.items():
+            # logger.debug(f"macro_action, macro_action not in actions, macro_action.applicable(agent_state, scenario_map): {macro_action, macro_action not in actions, macro_action.applicable(agent_state, scenario_map)}")
             if macro_action not in actions and macro_action.applicable(agent_state, scenario_map):
                 actions.append(macro_action)
         return actions

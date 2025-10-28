@@ -21,6 +21,12 @@ for actor in client.world.get_actors().filter("*vehicle*"):
     actor.destroy()
 client.world.tick()
 
+# Set spectator view point in the server rendering screen.
+location = carla.Location(x=92, y=101.1, z=50)
+rotation = carla.Rotation(pitch=-70, yaw=-90)
+transform = carla.Transform(location, rotation)
+client.spectator.set_transform(transform)
+
 tm = client.get_traffic_manager()
 tm.set_agents_count(10)
 tm.set_spawn_filter("vehicle.audi.a2")

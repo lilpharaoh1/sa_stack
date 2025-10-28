@@ -88,7 +88,7 @@ heckstrasse_goals = {
 colors = "rgbyk"
 
 # CHANGE SCENARIOS HERE
-scenario_map = SCENARIOS["town1"]
+scenario_map = SCENARIOS["heckstrasse"]
 frame = heckstrasse_frame
 goals = heckstrasse_goals
 ego_id = 0

@@ -59,7 +59,7 @@ goals = heckstrasse_goals
 ego_id = 2
 fps = 20  # Simulator frequency
 T = 2  # MCTS update period
-carla_sim = ip.simcarla.CarlaSim(xodr='scenarios/maps/heckstrasse.xodr',
+carla_sim = ip.carlasim.CarlaSim(xodr='scenarios/maps/heckstrasse.xodr',
                                  launch_process=True)
 
 # TODO: think of cleaner way

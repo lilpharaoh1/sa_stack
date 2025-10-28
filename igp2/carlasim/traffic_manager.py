@@ -67,11 +67,16 @@ class TrafficManager:
                 ego_position = self.__ego.state.position
                 distance_to_ego = np.linalg.norm(agent.state.position - ego_position)
                 if distance_to_ego > self.__spawn_radius:
+                    logger.debug(f"Removing Agent {agent} because too close to ego")
                     self.__remove_agent(agent, simulation)
                     continue
 
             if observation is not None and agent.done(observation):
-                self.__find_destination(agent, agent.state)
+                try:
+                    self.__find_destination(agent, agent.state)
+                except:
+                    logger.debug(f"Could not find destination for {agent} at {agent.state}. Removing and respawning.")
+                    self.__remove_agent(agent, simulation)
 
         agents_existing = len([agent for agent in self.__agents.values() if agent is not None])
         if agents_existing < self.__n_agents:
@@ -129,16 +134,7 @@ class TrafficManager:
         agent = CarlaAgentWrapper(agent, vehicle)
 
         self.__find_destination(agent, initial_state)
-        # try_count = 0
-        # while try_count < self._max_spawn_tries:
-        #     try:
-        #         self.__find_destination(agent, initial_state)
-        #         break
-        #     except:
-        #         try_count += 1
-        # else:
-        #     logger.debug("Couldn't find traffic vehicle route!")
-
+    
         # Wrap agent for CARLA control
         self.__agents[agent.agent_id] = agent
         simulation.agents[agent.agent_id] = agent
@@ -154,6 +150,20 @@ class TrafficManager:
         agent.set_destination(Observation({agent.agent_id: state}, self.__scenario_map), goal)
 
         logger.debug(f"Destination set to {goal} for Agent {agent.agent_id}")
+
+        # for spawn in random.sample(self.spawns, len(self.spawns)):  # random order
+        #     destination = spawn.location
+        #     goal = PointGoal(np.array([destination.x, -destination.y]), 1.0)
+
+        #     try:
+        #         logger.debug("set_destination in __find_destination")
+        #         agent.set_destination(Observation({agent.agent_id: state}, self.__scenario_map), goal)
+        #         return  # success — exit the function
+        #     except Exception as e:
+        #         logger.warning(f"Failed to set destination {goal} for Agent {agent.agent_id}: {e}")
+
+        # # If we reach here, all destinations failed
+        # raise RuntimeError(f"Unable to set a valid destination for Agent {agent.agent_id}")
 
     def __remove_agent(self, agent_wrapper: CarlaAgentWrapper, simulation):
         self.__agents[agent_wrapper.agent_id] = None

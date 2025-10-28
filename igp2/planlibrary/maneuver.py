@@ -501,7 +501,7 @@ class Turn(FollowLane):
         Returns:
             Boolean indicating whether the maneuver is applicable
         """
-        currently_in_junction = scenario_map.junction_at(state.position) is not None
+        currently_in_junction = scenario_map.junction_at(state.position, max_distance=0.5) is not None
         current_lane = scenario_map.best_lane_at(state.position, state.heading)
         next_lanes = current_lane.link.successor
         next_lane_is_junction = (next_lanes is not None and
@@ -868,7 +868,7 @@ class Stop(FollowLane):
     @staticmethod
     def applicable(state: AgentState, scenario_map: Map) -> bool:
         """ We do not allow stopping in a junction. """
-        return not scenario_map.junction_at(state.position)
+        return not scenario_map.junction_at(state.position, max_distance=0.5)
 
 
 class TrajectoryManeuver(Maneuver):

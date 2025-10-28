@@ -86,6 +86,7 @@ class TrafficAgent(MacroAgent):
         goal_reached = self.goal.reached(observation.frame[self.agent_id].position) if self.goal is not None else True
         if done and not goal_reached:
             try:
+                logger.debug("set_destination in done")
                 self.set_destination(observation)
             except RuntimeError:
                 # If goal can't be reached, then just follow lane until end of episode.
@@ -108,20 +109,25 @@ class TrafficAgent(MacroAgent):
     def next_action(self, observation: Observation) -> Action:
         if self.current_macro is None:
             if len(self._macro_actions) == 0:
+                logger.debug("set_destination in next_action")
                 self.set_destination(observation)
 
         if self._current_macro.done(observation):
+            logger.debug(f"Macro actions for Agent {self.agent_id}) self._macro_actions, self._current_macro: {self._macro_actions, self._current_macro, self._current_macro_id}")
             if self._current_macro_id < len(self._macro_actions):
-                self._advance_macro(observation)
+                try:
+                    self._advance_macro(observation)
+                except:
+                    return Action(0, 0)
             else:
                 logger.warning(f"TrafficAgent {self.agent_id} has no macro actions!")
-                logger.debug("in TrafficAgent.next_action -> First returning Action(0, 0)")
+                logger.debug("in TrafficAgent.next_action -> Returning Action(0, 0)")
                 return Action(0, 0)
 
-        if self._current_macro_id >= len(self._macro_actions):
-            logger.warning(f"TrafficAgent {self.agent_id} has no macro actions!")
-            logger.debug("in TrafficAgent.next_action -> First returning Action(0, 0)")
-            return Action(0, 0)
+        # if self._current_macro_id >= len(self._macro_actions):
+        #     logger.warning(f"TrafficAgent {self.agent_id} has no macro actions!")
+        #     logger.debug("in TrafficAgent.next_action -> Second returning Action(0, 0)")
+        #     return Action(0, 0)
         return self._current_macro.next_action(observation)
 
     def reset(self):
@@ -135,8 +141,10 @@ class TrafficAgent(MacroAgent):
 
         self._current_macro_id += 1
         if self._current_macro_id >= len(self._macro_actions):
-            logger.debug(f"self._current_macro, self._current_macro_id, len(self._macro_actions): {self._current_macro, self._current_macro_id, len(self._macro_actions)}")
-            logger.debug(f"Agent {self.agent_id} has no more macro actions to execute. Setting self._current_macro to None.")
+            # logger.debug(f"self._current_macro, self._current_macro_id, len(self._macro_actions): {self._current_macro, self._current_macro_id, len(self._macro_actions)}")
+            # logger.debug(f"Agent {self.agent_id} has no more macro actions to execute. Setting self._current_macro to None.")
+            # self._current_macro = None
+            raise RuntimeError(f"Agent {self.agent_id} has no more macro actions to execute.")
         else:
             self._current_macro = self._macro_actions[self._current_macro_id]
 

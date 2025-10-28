@@ -285,6 +285,9 @@ class MCTS:
             goal: Goal of the agent with agent_id
         """
         actions = []
+        logger.debug("-----------------------------------------")
+        logger.debug(f"agent_id {agent_id} macro_actions")
+        logger.debug(f"[macro_actions, (ma_args,)]: {[(macro_action, [ma_args for ma_args in macro_action.get_possible_args(frame[agent_id], self.scenario_map, goal)])for macro_action in MacroActionFactory.get_applicable_actions(frame[agent_id], self.scenario_map)]}")
         for macro_action in MacroActionFactory.get_applicable_actions(frame[agent_id], self.scenario_map):
             for ma_args in macro_action.get_possible_args(frame[agent_id], self.scenario_map, goal):
                 actions.append(self.action_type(macro_action, ma_args))

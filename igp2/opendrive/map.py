@@ -330,14 +330,19 @@ class Map(object):
         point = Point(point)
         road = self.best_road_at(point, heading, goal=goal)
         if road is None:
+            logger.debug(f"In best_lane_at, can't find best_road with point, max_distance={point, max_distance}. Returning None.")
             return None
 
+        # logger.debug("------------------------------")
         best = None
         _, original_angle = road.plan_view.calc(road.midline.project(point))
         for lane_section in road.lanes.lane_sections:
             for lane in lane_section.all_lanes:
+                # logger.debug(f"lane_section, lane = {lane_section, lane}")
+                # logger.debug(f"lane.boundary, lane.id = {lane.boundary, lane.id}")
                 if lane.boundary is not None and lane.id != 0 and (not drivable_only or lane.type == LaneTypes.DRIVING):
                     distance = lane.boundary.distance(point)
+                    # logger.debug(f"point, distance, max_distance = {point, distance, max_distance}")
                     if distance < max_distance:
                         angle_diff = 0.0
                         if heading is not None:
@@ -349,9 +354,11 @@ class Map(object):
                         if best is None or best[0] > angle_diff + distance:
                             best = (angle_diff + distance, lane)
 
+        if best is None:
+            logger.debug(f"In best_lane_at, can't find any lanes with point, max_distance={point, max_distance}. Returning None.")
         return best[1] if best is not None else None
 
-    def junction_at(self, point: Union[Point, Tuple[float, float], np.ndarray]) -> Optional[Junction]:
+    def junction_at(self, point: Union[Point, Tuple[float, float], np.ndarray], max_distance: float = None) -> Optional[Junction]:
         """ Get the Junction at a given point within an error given by Map.JUNCTION_PRECISION_ERROR
 
         Args:
@@ -360,9 +367,13 @@ class Map(object):
         Returns:
             A Junction object or None
         """
+        max_distance = max_distance if not max_distance is None else Map.JUNCTION_PRECISION_ERROR
+
         point = Point(point)
         for junction_id, junction in self.junctions.items():
-            if junction.boundary is not None and junction.boundary.distance(point) < Map.JUNCTION_PRECISION_ERROR:
+            # if junction.boundary.distance(point) < max_distance and junction.boundary.distance(point) > 1e-8:
+                # logger.debug(f"junction_at would have failed at {point}, distance to junction = {junction.boundary.distance(point)}")
+            if junction.boundary is not None and junction.boundary.distance(point) < max_distance:
                 return junction
         return None
 

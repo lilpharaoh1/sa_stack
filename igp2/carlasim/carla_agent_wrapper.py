@@ -2,6 +2,7 @@ import numpy as np
 
 import carla
 from typing import Optional
+import logging
 
 from igp2.carlasim.local_planner import LocalPlanner, RoadOption
 from igp2.core.vehicle import Observation
@@ -9,6 +10,7 @@ from igp2.core.agentstate import AgentState
 from igp2.core.trajectory import VelocityTrajectory
 from igp2.agents.agent import Agent
 
+logger = logging.getLogger(__name__)
 
 class CarlaAgentWrapper:
     """ Wrapper class that provides a simple way to retrieve control for the attached actor. """
@@ -34,6 +36,7 @@ class CarlaAgentWrapper:
         action = self.__agent.next_action(limited_observation)
         self.agent.vehicle.execute_action(action, observation.frame[self.agent_id])
         if action is None or self.__agent.done(observation):
+            logger.debug("Returning None for next_control.")
             return None
 
         if hasattr(self.agent, "current_macro"):
@@ -45,7 +48,7 @@ class CarlaAgentWrapper:
 
         target_speed = action.target_speed
         if target_speed is None:
-            print("EMRAN) Setting target_speed to 20.0 km/hr")
+            logger.debug("EMRAN) Setting target_speed to 20.0 km/hr")
             target_speed = 20.0
         self.__local_planner.set_speed(target_speed * 3.6)
         return self.__local_planner.run_step()
