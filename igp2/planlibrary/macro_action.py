@@ -607,15 +607,11 @@ class Exit(MacroAction):
         maneuvers = []
         state = self.start_frame[self.agent_id]
 
-        in_junction = self.scenario_map.junction_at(state.position) is not None
+        in_junction = self.scenario_map.junction_at(state.position, max_distance=0.1) is not None
         current_lane = self._find_current_lane(state, in_junction)
         current_distance = current_lane.distance_at(state.position)
 
         frame = self.start_frame
-
-        # logger.debug("-----------------BEFORE------------------")
-        # logger.debug(f"start_frame[self.agent_id] = {frame[self.agent_id]}")
-        # logger.debug(f"current_lane.midline.coords[-1] = {current_lane.midline.coords[-1]}")
 
         connecting_lane = current_lane
         if not in_junction:
@@ -647,10 +643,6 @@ class Exit(MacroAction):
                 "junction_lane_id": connecting_lane.id,
                 "fps": self.config.fps
             }
-
-            # logger.debug("-----------------AFTER------------------")
-            # logger.debug(f"start_frame[self.agent_id] = {frame[self.agent_id]}")
-            # logger.debug(f"current_lane.midline.coords[-1] = {current_lane.midline.coords[-1]}")
 
             config = ManeuverConfig(config_dict)
             if self.open_loop:
@@ -727,7 +719,7 @@ class Exit(MacroAction):
     def applicable(state: AgentState, scenario_map: Map) -> bool:
         """ True if either Turn (in junction) or GiveWay is applicable (ahead of junction) and not on
          a roundabout road. """
-        in_junction = scenario_map.junction_at(state.position) is not None
+        in_junction = scenario_map.junction_at(state.position, max_distance=0.1) is not None
         can_turn = Turn.applicable(state, scenario_map)
         if in_junction:
             return can_turn
