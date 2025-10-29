@@ -1,6 +1,7 @@
 import random
 import logging
 from typing import List, Dict
+import traceback
 
 import carla
 import numpy as np
@@ -73,6 +74,7 @@ class TrafficManager:
 
             if observation is not None and agent.done(observation):
                 try:
+                    logger.debug(f"agents_existing, self.__n_agents: {len([agent for agent in self.__agents.values() if agent is not None]), self.__n_agents}")
                     self.__find_destination(agent, agent.state)
                 except:
                     logger.debug(f"Could not find destination for {agent} at {agent.state}. Removing and respawning.")
@@ -145,25 +147,26 @@ class TrafficManager:
         agent = agent_wrapper.agent
         # agent_wrapper.reset_waypoints()
 
-        destination = random.choice(self.spawns).location
-        goal = PointGoal(np.array([destination.x, -destination.y]), 1.0)
-        agent.set_destination(Observation({agent.agent_id: state}, self.__scenario_map), goal)
+        # destination = random.choice(self.spawns).location
+        # goal = PointGoal(np.array([destination.x, -destination.y]), 1.0)
+        # agent.set_destination(Observation({agent.agent_id: state}, self.__scenario_map), goal)
 
-        logger.debug(f"Destination set to {goal} for Agent {agent.agent_id}")
+        # logger.debug(f"Destination set to {goal} for Agent {agent.agent_id}")
 
-        # for spawn in random.sample(self.spawns, len(self.spawns)):  # random order
-        #     destination = spawn.location
-        #     goal = PointGoal(np.array([destination.x, -destination.y]), 1.0)
+        for spawn in random.sample(self.spawns, len(self.spawns)):  # random order
+            destination = spawn.location
+            goal = PointGoal(np.array([destination.x, -destination.y]), 1.0)
 
-        #     try:
-        #         logger.debug("set_destination in __find_destination")
-        #         agent.set_destination(Observation({agent.agent_id: state}, self.__scenario_map), goal)
-        #         return  # success — exit the function
-        #     except Exception as e:
-        #         logger.warning(f"Failed to set destination {goal} for Agent {agent.agent_id}: {e}")
+            try:
+                logger.debug("set_destination in __find_destination")
+                agent.set_destination(Observation({agent.agent_id: state}, self.__scenario_map), goal)
+                return  # success — exit the function
+            except Exception as e:
+                logger.warning(f"Failed to set destination {goal} for Agent {agent.agent_id}: {e}")
+                logger.debug(traceback.format_exc())    
 
-        # # If we reach here, all destinations failed
-        # raise RuntimeError(f"Unable to set a valid destination for Agent {agent.agent_id}")
+        # If we reach here, all destinations failed
+        raise RuntimeError(f"Unable to set a valid destination for Agent {agent.agent_id}")
 
     def __remove_agent(self, agent_wrapper: CarlaAgentWrapper, simulation):
         self.__agents[agent_wrapper.agent_id] = None
@@ -211,6 +214,9 @@ class TrafficManager:
     #     """ Set the behaviour of all agents as given by the behaviour types.
     #     If set to random, then each vehicle will be randomly assigned a behaviour type. """
     #     pass
+
+    def remove_agent(self, agent_wrapper: CarlaAgentWrapper, simulation):
+        self.__remove_agent(agent_wrapper, simulation)
 
     @property
     def ego(self) -> Agent:

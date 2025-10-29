@@ -266,7 +266,8 @@ class CarlaSim:
             control = agent.next_control(observation)
             if control is None:
                 logger.debug("Removing agent because control is None")
-                self.remove_agent(agent.agent_id)
+                # self.remove_agent(agent.agent_id)
+                self.__traffic_manager.remove_agent(agent, self)
                 continue
             controls[agent_id] = control
             command = carla.command.ApplyVehicleControl(agent.actor, control)

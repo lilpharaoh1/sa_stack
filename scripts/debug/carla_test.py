@@ -48,7 +48,7 @@ for i, (aid, agent_wrapper) in enumerate(client.agents.items()):
     avels = vels[aid]
     color = colors[i % len(colors)]
     plt.plot(range(len(avels)), avels, label=f"{aid} State Speed", c=color)
-    plt.plot(range(len(avels)), agent_wrapper.target_speeds[:len(avels)], "--", c=color, label=f"{aid} Target Speed")
+    # plt.plot(range(len(avels)), agent_wrapper.target_speeds[:len(avels)], "--", c=color, label=f"{aid} Target Speed")
     plt.legend()
     plt.show()
 
