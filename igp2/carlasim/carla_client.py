@@ -191,7 +191,7 @@ class CarlaSim:
         transform = Transform(Location(x=state.position[0], y=-state.position[1], z=0.1),
                               Rotation(yaw=yaw, roll=0.0, pitch=0.0))
         actor = self.__world.spawn_actor(blueprint, transform)
-        # actor.set_target_velocity(Vector3D(state.velocity[0], -state.velocity[1], 0.))
+        actor.set_target_velocity(Vector3D(state.velocity[0], -state.velocity[1], 0.))
 
         carla_agent = CarlaAgentWrapper(agent, actor)
         self.agents[carla_agent.agent_id] = carla_agent
