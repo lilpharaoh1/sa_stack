@@ -1,7 +1,6 @@
 import random
 import logging
 from typing import List, Dict
-import traceback
 
 import carla
 import numpy as np
@@ -163,7 +162,6 @@ class TrafficManager:
                 return  # success — exit the function
             except Exception as e:
                 logger.warning(f"Failed to set destination {goal} for Agent {agent.agent_id}: {e}")
-                logger.debug(traceback.format_exc())    
 
         # If we reach here, all destinations failed
         raise RuntimeError(f"Unable to set a valid destination for Agent {agent.agent_id}")
