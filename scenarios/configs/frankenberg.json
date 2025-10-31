@@ -1,6 +1,6 @@
 {
   "scenario": {
-    "map_path": "scenarios\\maps\\frankenberg.xodr",
+    "map_path": "scenarios/maps/frankenberg.xodr",
     "max_speed": 15.0,
     "fps": 20,
     "seed": 42,

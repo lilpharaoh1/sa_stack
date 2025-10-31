@@ -1,6 +1,6 @@
 {
   "scenario": {
-    "map_path": "scenarios\\maps\\neuweiler.xodr",
+    "map_path": "scenarios/maps/neuweiler.xodr",
     "max_speed": 15.0,
     "fps": 20,
     "seed": 42,
