@@ -82,13 +82,6 @@ class CarlaSim:
         self.__world = self.__client.get_world()
         self.__map = self.__world.get_map()
 
-        self.__original_settings = self.__world.get_settings()
-        settings = self.__world.get_settings()
-        settings.fixed_delta_seconds = 1 / fps
-        settings.synchronous_mode = True
-        settings.no_rendering_mode = not rendering
-        self.__world.apply_settings(settings)
-
         self.__scenario_map = None
         if isinstance(xodr, Map):
             self.__scenario_map = xodr
@@ -104,6 +97,13 @@ class CarlaSim:
             self.load_opendrive_world(self.__scenario_map.xodr_path)
         else:
             raise RuntimeError("Cannot load a map with the given parameters!")
+
+        self.__original_settings = self.__world.get_settings()
+        settings = self.__world.get_settings()
+        settings.fixed_delta_seconds = 1 / fps
+        settings.synchronous_mode = True
+        settings.no_rendering_mode = not rendering
+        self.__world.apply_settings(settings)
 
         self.__fps = fps
         self.__timestep = 0
