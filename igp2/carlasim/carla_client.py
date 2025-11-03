@@ -89,8 +89,13 @@ class CarlaSim:
         if not map_name is None:
             if self.__scenario_map is None:
                 self.__scenario_map = Map.parse_from_opendrive(f"scenarios/maps/{map_name}.xodr")
-            if not self.__client.get_world().get_map().name.endswith(map_name):
+            # if map_name in self.__client.get_available_maps():
+            # if not self.__client.get_world().get_map().name.endswith(map_name):
+            try:
                 self.__client.load_world(map_name)
+            except RuntimeError as e:
+                logger.debug(f"Failed to load world {map_name}: {e}")
+                self.load_opendrive_world(self.__scenario_map.xodr_path)
         elif not xodr is None:
             if self.__scenario_map is None:
                 self.__scenario_map = Map.parse_from_opendrive(xodr)
