@@ -152,7 +152,7 @@ def plot_vector_map(odr_map: Dataset, ax: plt.Axes = None, scenario_config=None,
     
     for lane_node_id, lane_node in odr_map.nodes.items():
         ax.plot(lane_node["pose"][0], lane_node["pose"][1], 'bo')#  if not lane_node["feats"]["junction"] else "ro")
-        ax.text(lane_node["pose"][0], lane_node["pose"][1], lane_node_id)
+        # ax.text(lane_node["pose"][0], lane_node["pose"][1], lane_node_id)
 
     for edge_start, edge_end in odr_map.edges:
         start, end = odr_map.nodes[edge_start]["pose"], odr_map.nodes[edge_end]["pose"]
@@ -164,8 +164,8 @@ def plot_vector_map(odr_map: Dataset, ax: plt.Axes = None, scenario_config=None,
 
 
 if __name__ == '__main__':
-    scenario = Map.parse_from_opendrive(f"scenarios/maps/heckstrasse.xodr")
-    dataset = Dataset.parse_from_opendrive(f"scenarios/maps/heckstrasse.xodr")
+    # scenario = Map.parse_from_opendrive(f"scenarios/maps/heckstrasse.xodr")
+    dataset = Dataset.parse_from_opendrive(f"scenarios/maps/bendplatz.xodr")
     # plot_map(scenario, markings=True, midline=True)
     plot_vector_map(dataset, markings=True)
     
