@@ -1,5 +1,6 @@
 import imageio
 import matplotlib.pyplot as plt
+from matplotlib.patches import Polygon
 import numpy as np
 
 from igp2.opendrive import Map
@@ -160,13 +161,45 @@ def plot_vector_map(odr_map: Dataset, ax: plt.Axes = None, scenario_config=None,
         dy = end[1] - start[1]
         ax.arrow(start[0], start[1], dx, dy, head_width=1, width=0.5, length_includes_head=True)
 
+    
+    if kwargs.get("agent", False):
+        if odr_map.agent and odr_map.bounds:
+            cx, cy, heading = odr_map.agent
+            left, right, back, front = odr_map.bounds
+
+            # Define corners in local vehicle frame (x forward, y left)
+            corners_local = np.array([
+                [front,  left],     # front-left
+                [front,  right],    # front-right
+                [back,   right],    # back-right
+                [back,   left],     # back-left
+            ])
+
+            # Rotation matrix (local → world)
+            rot = np.array([
+                [np.cos(heading), -np.sin(heading)],
+                [np.sin(heading),  np.cos(heading)],
+            ])
+
+            # Rotate and translate
+            corners_world = (rot @ corners_local.T).T + np.array([cx, cy])
+
+            print(corners_local)
+            print(corners_world)
+
+            # Plot as polygon
+            poly = Polygon(corners_world, closed=True, alpha=0.2)
+            ax.add_patch(poly)
+            ax.plot(cx, cy, 'ro')
+
     return ax
 
 
 if __name__ == '__main__':
     # scenario = Map.parse_from_opendrive(f"scenarios/maps/heckstrasse.xodr")
-    dataset = Dataset.parse_from_opendrive(f"scenarios/maps/bendplatz.xodr")
+    dataset = Dataset.parse_from_opendrive(f"scenarios/maps/heckstrasse.xodr")
+    dataset.generate_graph(agent=[50, -38, np.pi * 1.8])
     # plot_map(scenario, markings=True, midline=True)
-    plot_vector_map(dataset, markings=True)
+    plot_vector_map(dataset, markings=True, agent=True)
     
     plt.show()

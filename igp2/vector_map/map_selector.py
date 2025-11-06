@@ -1,9 +1,8 @@
 import logging
 import numpy as np
-import copy
 
 from typing import Union, Tuple, List, Dict, Optional
-from shapely.geometry import Point, LineString, Polygon
+from shapely.geometry import Point
 
 from lxml import etree
 
@@ -18,36 +17,14 @@ from igp2.opendrive.map import Map
 logger = logging.getLogger(__name__)
 
 
-class Dataset(Map):
-    POLYLINE_LENGTH = 5
-    DEFAULT_BOUNDS = [-15, 15, -10, 40]
-
-    def __init__(self, opendrive: OpenDrive = None, process_graph=False, bounds=None):
+class MapSelector(Map):
+    def __init__(self, opendrive: OpenDrive = None):
         """ Create a map object given the parsed OpenDrive file
 
         Args:
             opendrive: A class describing the parsed contents of the OpenDrive file
         """
         super().__init__(opendrive)
-        self.__orig_opendrive = OpenDrive()
-        self.__orig_opendrive.header = opendrive.header
-        self.__orig_opendrive._roads = list(opendrive.roads)  # Shallow copy of roads
-        self.__orig_opendrive._junctions = list(opendrive.junctions)
-        self.__orig_opendrive._junction_groups = list(opendrive.junction_groups)
-
-        self.agent = None
-        self.bounds = bounds if not bounds is None else Dataset.DEFAULT_BOUNDS
-    
-        if process_graph:
-            self.__process_graph()
-
-    def generate_graph(
-        self, 
-        agent: Tuple[float, float, float] = None,
-        ):
-        if not agent is None:
-            self.agent = agent
-            self.filter_opendrive_around_point(agent)
         self.__process_graph()
 
     def __process_graph(self):
@@ -55,6 +32,11 @@ class Dataset(Map):
         edges = []
 
         for road_id, road in self.roads.items():
+            # print(f"Road {road_id}: {road}")
+            # print(f"Lanes: {road.lanes}")
+            # print(f"Lane Sections: {road.lanes.lane_sections}")     
+            # print(f"Midline: {road.midline.xy}")    
+            # print("-------------------------------------------------------")
             for lane_section in road.lanes.lane_sections:
                 # Process nodes
                 lane_ids = [lane.id for lane in lane_section.all_lanes if lane.id != 0]
@@ -222,123 +204,7 @@ class Dataset(Map):
 
         return lane_change_edges
 
-    def filter_opendrive_around_point(self, agent: Tuple[float, float, float]):
-        """
-        Filters an OpenDrive object using a vehicle-centric bounding box defined by heading and asymmetrical extents.
-        - Keeps only roads intersecting the ROI
-        - Clips midlines to fit within the ROI polygon
-        - Cleans up successor/predecessor references to removed roads
-        """
-        cx, cy, heading = agent
-        left, right, back, front = self.bounds
-
-        # Define box corners in vehicle frame (x forward, y left)
-        corners_local = np.array([
-            [front,  left],     # front-left
-            [front,  right],    # front-right
-            [back,   right],    # back-right
-            [back,   left],     # back-left
-        ])
-
-        # Rotation matrix (heading in world frame, rotate local → world)
-        rot = np.array([
-            [np.cos(heading), -np.sin(heading)],
-            [np.sin(heading),  np.cos(heading)],
-        ])
-        corners_world = (rot @ corners_local.T).T + np.array([cx, cy])
-
-        # Build polygon
-        roi_poly = Polygon(corners_world)
-
-        # --- Filter roads and clip midlines ---
-        filtered_roads = []
-        for road in self.__orig_opendrive.roads:
-            midline_coords = list(zip(*road.midline.xy))
-            if not midline_coords:
-                continue
-
-            midline_geom = LineString(midline_coords)
-            clipped = midline_geom.intersection(roi_poly)
-
-            # Skip if completely outside
-            if clipped.is_empty:
-                continue
-
-            # If multiple disjoint line parts, keep the longest segment
-            if clipped.geom_type == "MultiLineString":
-                clipped = max(clipped.geoms, key=lambda g: g.length)
-
-            # Skip if invalid or single-point
-            if not isinstance(clipped, LineString) or len(clipped.coords) < 2:
-                continue
-
-            # Update the road's midline with the clipped geometry
-            road_copy = copy.copy(road)
-            road_copy._midline = LineString(clipped.coords)
-            filtered_roads.append(road_copy)
-
-
-        kept_road_ids = {road.id for road in filtered_roads}
-
-        # --- Clean up road-level and lane-level links ---
-        for road in filtered_roads:
-            # Clean road predecessor/successor
-            if road.link.predecessor and road.link.predecessor.element.id not in kept_road_ids:
-                road.link.predecessor = None
-            if road.link.successor and road.link.successor.element.id not in kept_road_ids:
-                road.link.successor = None
-
-            # Clean lane links
-            for lane_section in road.lanes.lane_sections:
-                for lane in lane_section.all_lanes:
-                    if lane.link:
-                        # Clean lane successors
-                        if lane.link.successor:
-                            lane.link.successor = [
-                                succ for succ in lane.link.successor
-                                if succ.parent_road.id in kept_road_ids
-                            ]
-                            if not lane.link.successor:
-                                lane.link.successor = None
-
-                        # Clean lane predecessors
-                        if lane.link.predecessor:
-                            lane.link.predecessor = [
-                                pred for pred in lane.link.predecessor
-                                if pred.parent_road.id in kept_road_ids
-                            ]
-                            if not lane.link.predecessor:
-                                lane.link.predecessor = None
-
-        # --- Filter junctions ---
-        filtered_junctions = [
-            j for j in self.__orig_opendrive.junctions
-            if any(
-                conn.incoming_road.id in kept_road_ids or conn.connecting_road.id in kept_road_ids
-                for conn in j.connections
-            )
-        ]
-
-        # --- Build filtered OpenDrive object ---
-        filtered_map = OpenDrive()
-        filtered_map.header = self.__orig_opendrive.header
-        filtered_map._roads = filtered_roads
-        filtered_map._junctions = filtered_junctions
-
-        # --- Update Map internal OpenDrive object and reprocess ---
-        self._Map__opendrive = filtered_map
-        super()._Map__process_header()
-        super()._Map__process_road_layout()
-
-    def reset_opendrive(self):
-        self._Map__opendrive = self.__orig_opendrive
-        super()._Map__process_header()
-        super()._Map__process_road_layout()
-
-    def set_bounds(self, bounds: List[float]):
-        assert not bounds is None
-        self.bounds = bounds
-
+    
     def __has_successor(self, lane):
         return not lane.link is None and not lane.link.successor is None
 
@@ -356,4 +222,21 @@ class Dataset(Map):
     def edges(self):
         """ Edges in lane graph """
         return self.__graph["edges"]
+
+    @classmethod
+    def parse_from_opendrive(cls, file_path: str):
+        """ Parse the OpenDrive file and create a new Map instance
+
+        Args:
+            file_path: The absolute/relative path to the OpenDrive file
+
+        Returns:
+            A new instance of the Map class
+        """
+        logger.info(f"Parsing map {file_path}.")
+        tree = etree.parse(file_path)
+        odr = parse_opendrive(tree.getroot())
+        new_map = cls(odr)
+        new_map.__xodr_path = file_path
+        return new_map
                 
