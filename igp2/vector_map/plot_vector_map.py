@@ -184,9 +184,6 @@ def plot_vector_map(odr_map: Dataset, ax: plt.Axes = None, scenario_config=None,
             # Rotate and translate
             corners_world = (rot @ corners_local.T).T + np.array([cx, cy])
 
-            print(corners_local)
-            print(corners_world)
-
             # Plot as polygon
             poly = Polygon(corners_world, closed=True, alpha=0.2)
             ax.add_patch(poly)
