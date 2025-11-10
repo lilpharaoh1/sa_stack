@@ -9,7 +9,7 @@ from igp2.opendrive.elements.road_lanes import LaneTypes
 from dataset import Dataset
 
 
-def plot_vector_map(odr_map: Dataset, ax: plt.Axes = None, scenario_config=None, **kwargs) -> plt.Axes:
+def plot_vector_map(dataset: Dataset, odr_map: Map, ax: plt.Axes = None, scenario_config=None, **kwargs) -> plt.Axes:
     """ Draw the road layout of the map
     Args:
         odr_map: The Map to plot
@@ -151,21 +151,21 @@ def plot_vector_map(odr_map: Dataset, ax: plt.Axes = None, scenario_config=None,
                         polygon.boundary.xy[1],
                         color=kwargs.get("junction_color", (0.941, 1.0, 0.420, 0.5)))
     
-    for lane_node_id, lane_node in odr_map.nodes.items():
+    for lane_node_id, lane_node in dataset.nodes.items():
         ax.plot(lane_node["pose"][0], lane_node["pose"][1], 'bo')#  if not lane_node["feats"]["junction"] else "ro")
         ax.text(lane_node["pose"][0], lane_node["pose"][1], lane_node_id)
 
-    for edge_start, edge_end in odr_map.edges:
-        start, end = odr_map.nodes[edge_start]["pose"], odr_map.nodes[edge_end]["pose"]
+    for edge_start, edge_end in dataset.edges:
+        start, end = dataset.nodes[edge_start]["pose"], dataset.nodes[edge_end]["pose"]
         dx = end[0] - start[0]
         dy = end[1] - start[1]
         ax.arrow(start[0], start[1], dx, dy, head_width=1, width=0.5, length_includes_head=True)
 
     
     if kwargs.get("agent", False):
-        if odr_map.agent and odr_map.bounds:
-            cx, cy, heading = odr_map.agent
-            left, right, back, front = odr_map.bounds
+        if dataset.agent and dataset.bounds:
+            cx, cy, heading = dataset.agent
+            left, right, back, front = dataset.bounds
 
             # Define corners in local vehicle frame (x forward, y left)
             corners_local = np.array([
@@ -193,11 +193,12 @@ def plot_vector_map(odr_map: Dataset, ax: plt.Axes = None, scenario_config=None,
 
 
 if __name__ == '__main__':
-    # scenario = Map.parse_from_opendrive(f"scenarios/maps/heckstrasse.xodr")
-    dataset = Dataset.parse_from_opendrive(f"scenarios/maps/heckstrasse.xodr")
+    xodr_file = f"scenarios/maps/Town01.xodr"
+    odr_map = Map.parse_from_opendrive(xodr_file)
+    dataset = Dataset.parse_from_opendrive(xodr_file)
     dataset.generate_graph(agent_pose=[90, -75, np.pi / 2])
     # dataset.generate_graph(agent_pose=[64, 0, np.pi/2])
-    # plot_map(scenario, markings=True, midline=True)
-    plot_vector_map(dataset, markings=True, agent=True)
+    # plot_map(odr_map, markings=True, midline=True)
+    plot_vector_map(dataset, odr_map, markings=True, agent=True)
     
     plt.show()
