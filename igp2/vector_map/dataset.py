@@ -51,7 +51,7 @@ class Dataset(Map):
         for road_id, road in self.roads.items():
             for lane_section in road.lanes.lane_sections:
                 # Process nodes
-                lanes = [lane for lane in lane_section.all_lanes if lane.type == "driving"]
+                lanes = [lane for lane in lane_section.all_lanes if not lane.id == 0 and lane.type == "driving"]
                 lane_ids = [lane.id for lane in lanes]
 
                 lane_feats = self.get_lane_feats(road, lanes)
