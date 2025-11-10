@@ -20,6 +20,14 @@ from igp2.opendrive.elements.junction import Junction
 
 logger = logging.getLogger(__name__)
 
+def safe_union(geoms):
+    valid_geoms = []
+    for g in geoms:
+        if not g.is_valid:
+            g = g.buffer(0)  # fixes minor self-intersections
+        if g.is_valid:
+            valid_geoms.append(g)
+    return unary_union(valid_geoms)
 
 class Road:
     """ Road object of the OpenDrive standard
@@ -161,7 +169,8 @@ class Road:
                 lane_boundary, reference_segment, segment_widths = \
                     lane.sample_geometry(sample_distances, start_segment, reference_segment, reference_widths)
 
-                boundary = unary_union([boundary, lane_boundary])
+                # boundary = unary_union([boundary, lane_boundary])
+                boundary = safe_union([boundary, lane_boundary])
                 previous_direction = current_direction
                 reference_widths += segment_widths
 

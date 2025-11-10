@@ -1,19 +1,14 @@
 import logging
 import numpy as np
 import copy
-
-from typing import Union, Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict
 from shapely.geometry import Point, LineString, Polygon
 
-from lxml import etree
 
-from igp2.opendrive.elements.geometry import normalise_angle
-from igp2.opendrive.elements.junction import Junction, JunctionGroup
 from igp2.opendrive.elements.opendrive import OpenDrive
-from igp2.opendrive.elements.road import Road
-from igp2.opendrive.elements.road_lanes import Lane, LaneTypes
-from igp2.opendrive.parser import parse_opendrive
+from igp2.opendrive.elements.road_lanes import LeftLanes, CenterLanes, RightLanes
 from igp2.opendrive.map import Map
+
 
 logger = logging.getLogger(__name__)
 
@@ -21,166 +16,117 @@ logger = logging.getLogger(__name__)
 class Dataset(Map):
     POLYLINE_LENGTH = 10
     DEFAULT_BOUNDS = [-50, 50, -20, 80]
+    # DEFAULT_BOUNDS = [-5, 5, -20, 70]
+    # DEFAULT_BOUNDS = [-15, 15, -10, 60]
     # DEFAULT_BOUNDS = [-15, 15, -10, 40]
     # DEFAULT_BOUNDS = [-100, 100, -100, 100]
     # DEFAULT_BOUNDS = [-10, 10, -5, 18]
 
     def __init__(self, opendrive: OpenDrive = None, process_graph=False, bounds=None):
-        """ Create a map object given the parsed OpenDrive file
-
-        Args:
-            opendrive: A class describing the parsed contents of the OpenDrive file
-        """
         super().__init__(opendrive)
+
+        # Save original OpenDrive state
         self.__orig_opendrive = OpenDrive()
         self.__orig_opendrive.header = opendrive.header
-        self.__orig_opendrive._roads = list(opendrive.roads)  # Shallow copy of roads
+        self.__orig_opendrive._roads = list(opendrive.roads)
         self.__orig_opendrive._junctions = list(opendrive.junctions)
         self.__orig_opendrive._junction_groups = list(opendrive.junction_groups)
 
         self.agent = None
-        self.bounds = bounds if not bounds is None else Dataset.DEFAULT_BOUNDS
-    
+        self.bounds = bounds if bounds is not None else self.DEFAULT_BOUNDS
+
         if process_graph:
             self.__process_graph()
 
-    def generate_graph(
-        self, 
-        agent: Tuple[float, float, float] = None,
-        ):
-        if not agent is None:
-            self.agent = agent
-            self.filter_opendrive_around_point(agent)
+    def generate_graph(self, agent_pose: Tuple[float, float, float] = None):
+        if agent_pose:
+            self.agent = agent_pose
+            self.filter_opendrive_around_point(agent_pose)
         self.__process_graph()
 
     def __process_graph(self):
-        nodes = {}
-        edges = []
+        nodes, edges = {}, []
+
 
         for road_id, road in self.roads.items():
             for lane_section in road.lanes.lane_sections:
                 # Process nodes
-                lane_ids = [lane.id for lane in lane_section.all_lanes if lane.id != 0]
                 lanes = [lane for lane in lane_section.all_lanes if lane.id != 0]
+                lane_ids = [lane.id for lane in lanes]
 
                 lane_feats = self.get_lane_feats(road, lanes)
-                lane_nodes, internal_edges = self.split_lanes(lanes, lane_ids, lane_feats, road_id, max_length=Dataset.POLYLINE_LENGTH) 
-                
-                nodes = nodes | lane_nodes  
+
+
+                lane_nodes, internal_edges = self.split_lanes(
+                    lanes, lane_ids, lane_feats, road_id, self.POLYLINE_LENGTH
+                )
+
+
+                nodes.update(lane_nodes)
                 edges.extend(internal_edges)
+                edges.extend(self.get_edges(road, lanes, lane_ids))
 
-                # Process external edges
-                external_edges = self.get_edges(road, lanes, lane_ids)
-                edges.extend(external_edges)
 
-                # Process lane change eges
-                lane_change_edges = self.add_lane_change_edges(nodes)
-                edges.extend(lane_change_edges)
+        edges.extend(self.add_lane_change_edges(nodes))
+        self.__graph = {"nodes": nodes, "edges": edges}
 
-        self.__graph = {
-            "nodes": nodes,
-            "edges": edges
-        }
-            
+
     def get_lane_feats(self, road, lanes):
-        flags = []
-        for lane_num, lane in enumerate(lanes):
-            flags.append({
-                "type": lane.type,
-                "junction": road.junction != -1,
-            })
-        
-        return flags
+        return [{"type": lane.type, "junction": road.junction != -1} for lane in lanes]
 
-    def split_lanes(self, lanes, lane_ids, lane_feats, road_id, max_length): # EMRAN split length might need to be the same size as PGP
-        lane_segments = {}
-        internal_edges = []
+    def split_lanes(self, lanes, lane_ids, lane_feats, road_id, max_length):
+        lane_segments, internal_edges = {}, []
+
         for idx, lane in enumerate(lanes):
+            x_resampled, y_resampled = self.resample_midline(
+            lane.midline.xy[0], lane.midline.xy[1], max_length
+            )
+
             previous_seg = None
-            # Resample lanes with a uniform-ish distance between them
-            x_resampled, y_resampled = self.resample_midline(lane.midline.xy[0], lane.midline.xy[1], max_length)
             for seg_id, (x, y) in enumerate(zip(x_resampled, y_resampled)):
-                # If last node in lane and successor exisst, forget the last node as we will link to the successor anyways
                 if seg_id == len(x_resampled) - 1 and self.__has_successor(lane):
                     continue
 
-                # Add nodes
                 segment_name = f"{road_id}:{lane_ids[idx]}:{seg_id}"
-                lane_segments[segment_name] = {
-                        "pose": (x, y),
-                        "feats": lane_feats[idx]
-                    }
+                lane_segments[segment_name] = {"pose": (x, y), "feats": lane_feats[idx]}
 
-                # Add straight internal edges
-                if not previous_seg is None:
+                if previous_seg:
                     internal_edges.append((previous_seg, segment_name))
+
                 previous_seg = segment_name
-                
+
         return lane_segments, internal_edges
 
-    def resample_midline(self, x: List[float], y: List[float], max_dist: float) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Resample a polyline so that distance between points does not exceed `max_dist`.
-
-        Args:
-            x: list of x coordinates of the midline
-            y: list of y coordinates of the midline
-            max_dist: maximum allowed distance between resampled points
-
-        Returns:
-            Tuple of (resampled_x, resampled_y) as numpy arrays
-        """
+    def resample_midline(self, x: List[float], y: List[float], max_dist: float):
         coords = np.stack([x, y], axis=1)
-        # Compute distances between points
-        deltas = np.diff(coords, axis=0)
-        dists = np.linalg.norm(deltas, axis=1)
+        dists = np.linalg.norm(np.diff(coords, axis=0), axis=1)
         cum_dists = np.insert(np.cumsum(dists), 0, 0.0)
 
-        total_length = cum_dists[-1]
-        if total_length == 0.0:
-            return np.array(x), np.array(y)  # single-point lane
 
-        # Number of points needed
-        num_points = int(np.ceil(total_length / max_dist)) + 1
-        new_distances = np.linspace(0.0, total_length, num_points)
+        if cum_dists[-1] == 0.0:
+            return np.array(x), np.array(y)
 
-        # Interpolate new points
-        new_x = np.interp(new_distances, cum_dists, x)
-        new_y = np.interp(new_distances, cum_dists, y)
 
-        return new_x, new_y
+        num_points = int(np.ceil(cum_dists[-1] / max_dist)) + 1
+        new_d = np.linspace(0.0, cum_dists[-1], num_points)
+
+
+        return np.interp(new_d, cum_dists, x), np.interp(new_d, cum_dists, y)
 
 
     def get_edges(self, road, lanes, lane_ids):
-        predecessor_road_id = road.link.predecessor.element.id if not road.link.predecessor is None else None 
-        successor_road_id = road.link.successor.element.id if not road.link.successor is None else None
-
         edges = []
         for idx, lane in enumerate(lanes):
-            if not lane.link is None:
-                if not predecessor_road_id is None:
-                    pass
-                if not lane.link.successor is None:
-                    for succ in lane.link.successor:
-                        last_seg_id = self.get_last_seg_id(*lane.midline.xy, Dataset.POLYLINE_LENGTH) - 1
-                        successor_road_id, successor_lane_id = succ.parent_road.id, succ.id
-                        edges.append((f"{road.id}:{lane_ids[idx]}:{last_seg_id}", f"{successor_road_id}:{successor_lane_id}:0"))
-
+            if lane.link and lane.link.successor:
+                for succ in lane.link.successor:
+                    last_seg_id = self.get_last_seg_id(*lane.midline.xy, self.POLYLINE_LENGTH) - 1
+                    edges.append((
+                        f"{road.id}:{lane_ids[idx]}:{last_seg_id}",
+                        f"{succ.parent_road.id}:{succ.id}:0"
+                    ))
         return edges
 
     def get_last_seg_id(self, x: List[float], y: List[float], max_dist: float) -> int:
-        """
-        Given a midline (x, y) and a max segment length, compute the last segment ID
-        after resampling to ensure even spacing.
-
-        Args:
-            x: list of x coordinates of the midline
-            y: list of y coordinates of the midline
-            max_dist: maximum allowed distance between resampled points
-
-        Returns:
-            int: The last segment index after resampling
-        """
         coords = np.stack([x, y], axis=1)
 
         # Compute cumulative arc-length
@@ -196,53 +142,28 @@ class Dataset(Map):
         return num_points - 1
 
     def add_lane_change_edges(self, nodes: Dict[str, dict]):
-        """
-        Adds lateral connections to allow lane changes between adjacent same-direction lanes.
-        """
-        lane_change_edges = []
-        for node_id, node_data in nodes.items():
-            road_id, lane_id, seg_id = node_id.split(":")
-            road_id = int(road_id)
-            lane_id = int(lane_id)
-            seg_id = int(seg_id)
-
-            # Only check adjacent lanes (±1) in same direction
+        edges = []
+        for node_id in nodes:
+            road_id, lane_id, seg_id = map(int, node_id.split(":"))
             for delta_lane in [-1, 1]:
-                neighbor_lane_id = lane_id + delta_lane
-
-                # Check if direction matches (same sign)
-                if np.sign(neighbor_lane_id) != np.sign(lane_id):
+                if np.sign(lane_id + delta_lane) != np.sign(lane_id):
                     continue
-
-                # Check segment ahead and same segment
-                # for delta_seg in [0, 1]:
-                for delta_seg in [1]:
-                    neighbor_seg_id = seg_id + delta_seg
-                    neighbor_node_id = f"{road_id}:{neighbor_lane_id}:{neighbor_seg_id}"
-
-                    if neighbor_node_id in nodes:
-                        lane_change_edges.append((node_id, neighbor_node_id))
-
-        return lane_change_edges
+                neighbor_id = f"{road_id}:{lane_id + delta_lane}:{seg_id + 1}"
+                if neighbor_id in nodes:
+                    edges.append((node_id, neighbor_id))
+        return edges
 
     def filter_opendrive_around_point(self, agent: Tuple[float, float, float]):
-        """
-        Filters an OpenDrive object using a vehicle-centric bounding box.
-        Keeps roads only if at least one lane has part of its midline inside the box,
-        and clips **lane midlines** to only include points inside.
-        """
         import copy
-        from shapely.geometry import Polygon, LineString, Point
+        from shapely.geometry import Polygon, LineString
 
         cx, cy, heading = agent
         left, right, back, front = self.bounds
 
-        # Define ROI polygon
+        # --- Build ROI polygon ---
         corners_local = np.array([
-            [front,  left],
-            [front,  right],
-            [back,   right],
-            [back,   left],
+            [front, left], [front, right],
+            [back, right], [back, left],
         ])
         rot = np.array([
             [np.cos(heading), -np.sin(heading)],
@@ -251,80 +172,130 @@ class Dataset(Map):
         corners_world = (rot @ corners_local.T).T + np.array([cx, cy])
         roi_poly = Polygon(corners_world)
 
-        # --- Filter roads by clipping lanes ---
-        filtered_roads = []
-        clipped_midlines = {}
+        filtered_roads, clipped_midlines = [], {}
+
         for road in self.__orig_opendrive.roads:
-            road_copy = copy.deepcopy(road)  # <-- this is key
+            road_copy = copy.copy(road)
+            road_copy._lanes = copy.copy(road.lanes)
+            road_copy._lanes._lane_sections = []
 
             keep_road = False
-            for lane_section in road_copy.lanes.lane_sections:
-                for lane in lane_section.all_lanes:
-                    coords = list(zip(*lane.midline.xy))
-                    if not coords:
-                        continue
-
-                    midline_geom = LineString(coords)
-                    clipped = midline_geom.intersection(roi_poly)
-
-                    if isinstance(clipped, LineString) and len(clipped.coords) >= 2:
-                        clipped_midlines[(road.id, lane.id)] = LineString(clipped.coords)
-                        keep_road = True
+            for section in road.lanes.lane_sections:
+                section_copy = self._filter_lane_section_by_roi(section, road.id, roi_poly, clipped_midlines)
+                if len(section_copy.all_lanes) > 1:
+                    road_copy._lanes._lane_sections.append(section_copy)
+                    keep_road = True
 
             if keep_road:
                 filtered_roads.append(road_copy)
 
-        kept_road_ids = {r.id for r in filtered_roads}
 
-        # Clean road/lane links
+
+        kept_ids = {r.id for r in filtered_roads}
+
+        # Clean road-level and lane-level links
         for road in filtered_roads:
-            if road.link.predecessor and road.link.predecessor.element.id not in kept_road_ids:
+            if road.link.predecessor and road.link.predecessor.element.id not in kept_ids:
                 road.link.predecessor = None
-            if road.link.successor and road.link.successor.element.id not in kept_road_ids:
+            if road.link.successor and road.link.successor.element.id not in kept_ids:
                 road.link.successor = None
 
-            for lane_section in road.lanes.lane_sections:
-                for lane in lane_section.all_lanes:
+            for section in road.lanes.lane_sections:
+                for lane in section.all_lanes:
                     if lane.link:
                         if lane.link.successor:
                             lane.link.successor = [
-                                succ for succ in lane.link.successor
-                                if succ.parent_road.id in kept_road_ids
+                                s for s in lane.link.successor if s.parent_road.id in kept_ids
                             ] or None
                         if lane.link.predecessor:
                             lane.link.predecessor = [
-                                pred for pred in lane.link.predecessor
-                                if pred.parent_road.id in kept_road_ids
+                                p for p in lane.link.predecessor if p.parent_road.id in kept_ids
                             ] or None
 
-        # Filter junctions based on kept roads
         filtered_junctions = [
             j for j in self.__orig_opendrive.junctions
             if any(
-                conn.incoming_road.id in kept_road_ids or conn.connecting_road.id in kept_road_ids
+                conn.incoming_road.id in kept_ids or conn.connecting_road.id in kept_ids
                 for conn in j.connections
             )
         ]
 
-        # Rebuild filtered OpenDrive
+        # Rebuild and assign filtered map
         filtered_map = OpenDrive()
         filtered_map.header = self.__orig_opendrive.header
         filtered_map._roads = filtered_roads
         filtered_map._junctions = filtered_junctions
 
-        # Set and reprocess
         self._Map__opendrive = filtered_map
         super()._Map__process_header()
         super()._Map__process_road_layout()
 
-        for (road_id, lane_id), clipped_midline in clipped_midlines.items():
-            road = self.roads.get(road_id)
-            if not road:
+        # --- Re-apply clipped midlines (important!) ---
+        for road in self.roads.values():
+            for section in road.lanes.lane_sections:
+                # Keep only the lanes that have been clipped
+                kept_lanes = []
+                for lane in section.all_lanes:
+                    key = (road.id, lane.id)
+                    if key in clipped_midlines:
+                        lane._midline = clipped_midlines[key]
+                        kept_lanes.append(lane)
+                section._lanes = kept_lanes  # Replace original lanes with filtered ones
+
+    def _filter_lane_section_by_roi(self, section, road_id, roi_poly, clipped_midlines):
+        import copy
+        from shapely.geometry import LineString
+
+        section_copy = copy.copy(section)
+
+        # Prepare fresh containers
+        left = LeftLanes()
+        center = CenterLanes()
+        right = RightLanes()
+
+        # Inside _filter_lane_section_by_roi
+        has_center = False
+
+        for lane in section.all_lanes:
+            coords = list(zip(*lane.midline.xy))
+            if not coords:
                 continue
-            for lane_section in road.lanes.lane_sections:
-                for lane in lane_section.all_lanes:
-                    if lane.id == lane_id:
-                        lane._midline = clipped_midline
+
+            midline_geom = LineString(coords)
+            clipped = midline_geom.intersection(roi_poly)
+
+            if isinstance(clipped, LineString) and len(clipped.coords) >= 2:
+                lane_copy = copy.copy(lane)
+                lane_copy._midline = LineString(clipped.coords)
+                clipped_midlines[(road_id, lane.id)] = lane_copy._midline
+
+                if lane.id < 0:
+                    left._lanes.append(lane_copy)
+                elif lane.id == 0:
+                    center._lanes.append(lane_copy)
+                    has_center = True
+                else:
+                    right._lanes.append(lane_copy)
+            elif lane.id == 0:
+                # Always keep center lane (even if it's outside ROI)
+                lane_copy = copy.copy(lane)
+                center._lanes.append(lane_copy)
+                has_center = True
+
+        # Ensure at least one center lane exists (fallback)
+        if not has_center:
+            print(f"WARNING: LaneSection on road {road_id} had no center lane. Inserting dummy.")
+            dummy_center = copy.copy(section.center_lanes[0]) if section.center_lanes else Lane()
+            center._lanes.append(dummy_center)
+
+        # Replace original lane containers
+        section_copy._left_lanes = left
+        section_copy._center_lanes = center
+        section_copy._right_lanes = right
+
+        return section_copy
+
+
 
     def reset_opendrive(self):
         self._Map__opendrive = self.__orig_opendrive
@@ -332,24 +303,25 @@ class Dataset(Map):
         super()._Map__process_road_layout()
 
     def set_bounds(self, bounds: List[float]):
-        assert not bounds is None
+        assert bounds is not None
         self.bounds = bounds
 
     def __has_successor(self, lane):
-        return not lane.link is None and not lane.link.successor is None
+        return lane.link is not None and lane.link.successor is not None
+
+    @property
+    def original_opendrive(self):
+        return self.__orig_opendrive
 
     @property
     def graph(self):
-        """ Whole lane graph """
         return self.__graph
 
     @property
     def nodes(self):
-        """ Nodes in lane graph """
         return self.__graph["nodes"]
 
     @property
     def edges(self):
-        """ Edges in lane graph """
         return self.__graph["edges"]
                 
