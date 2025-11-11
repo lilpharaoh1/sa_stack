@@ -15,6 +15,7 @@ import igp2 as ip
 import numpy as np
 import argparse
 import json
+import time
 from shapely.geometry import Polygon
 from datetime import datetime
 from typing import List, Tuple, Dict
@@ -183,6 +184,7 @@ def generate_random_frame(ego: int,
     for i, (spawn, vel) in enumerate(spawn_vel_ranges, ego):
         poly = Polygon(spawn.boundary)
         print(spawn)
+        print(layout)
         best_lane = layout.best_lane_at(spawn.center, max_distance=500.0)
         print(best_lane, spawn.center)
 
@@ -229,14 +231,14 @@ if __name__ == '__main__':
     ego_vel_range = (5.0, max_speed)
     veh1_spawn_box = ip.Box(np.array([-70.0, 1.7]), 10, 3.5, 0.0)
     veh1_vel_range = (5.0, max_speed)
-    veh2_spawn_box = ip.Box(np.array([-18.34, -25.5]), 3.5, 10, 0.0)
+    veh2_spawn_box = ip.Box(np.array([52.0, -42.5]), 10, 3.5, np.pi / 2)
     veh2_vel_range = (5.0, max_speed)
 
     # Vehicle goals
     goals = {
-        ego_id: ip.BoxGoal(ip.Box(np.array([-6.0, 0.0]), 5, 7, 0.0)),
-        ego_id + 1: ip.BoxGoal(ip.Box(np.array([-22, -25.5]), 3.5, 5, 0.0)),
-        ego_id + 2: ip.BoxGoal(ip.Box(np.array([-6.0, 0.0]), 5, 7, 0.0))
+        ego_id: ip.BoxGoal(ip.Box(np.array([90.0, 0.0]), 5, 7, 0.0)),
+        ego_id + 1: ip.BoxGoal(ip.Box(np.array([50, -25.5]), 5, 7, np.pi * 3 / 2)),
+        ego_id + 2: ip.BoxGoal(ip.Box(np.array([90.0, 0.0]), 5, 7, 0.0))
     }
 
     scenario_path = "scenarios/maps/scenario1.xodr"
@@ -284,7 +286,9 @@ if __name__ == '__main__':
                                        store_results="all")
             carla_sim.add_agent(agents[aid], "ego")
             carla_sim.spectator.set_location(
-                carla.Location(frame[aid].position[0], -frame[aid].position[1], 5.0))
+                # carla.Location(frame[aid].position[0], -frame[aid].position[1], 5.0)
+                carla.Location(50.0, 0.0, 5.0)
+                )
         else:
             agents[aid] = ip.TrafficAgent(aid, frame[aid], goal, fps)
             carla_sim.add_agent(agents[aid], None)
@@ -297,33 +301,35 @@ if __name__ == '__main__':
         observations.append(obs)
         actions.append(acts)
 
-        logger.info(f'Step {t}')
-        logger.info('Vehicle actions were:')
-        for aid, act in acts.items():
-            logger.info(f'Throttle: {act.throttle}; Steering: {act.steer}')
+        time.sleep(0.1)
 
-        xs = np.arange(t + 1)
-        fix, axes = plt.subplots(1, 3)
+        # logger.info(f'Step {t}')
+        # logger.info('Vehicle actions were:')
+        # for aid, act in acts.items():
+        #     logger.info(f'Throttle: {act.throttle}; Steering: {act.steer}')
 
-        logger.info(f'Vehicle status:')
-        for aid, agent in obs.frame.items():
-            c = colors[aid % len(colors)]
-            logger.info(f'Agent {aid}: v={agent.speed} @ ({agent.position[0]:.2f}, {agent.position[1]:.2f}); theta={agent.heading}')
+        # xs = np.arange(t + 1)
+        # fix, axes = plt.subplots(1, 3)
 
-            # Plot observed velocity
-            ax = axes[0]
-            vels = np.array([ob.frame[aid].speed for ob in observations])
-            ax.plot(xs, vels, c=c)
-            ax.set_title('Velocity')
-            ax.set_xlabel('Timestep')
-            ax.set_ylabel('Velocity (m/s)')
+        # logger.info(f'Vehicle status:')
+        # for aid, agent in obs.frame.items():
+        #     c = colors[aid % len(colors)]
+        #     logger.info(f'Agent {aid}: v={agent.speed} @ ({agent.position[0]:.2f}, {agent.position[1]:.2f}); theta={agent.heading}')
 
-            # Plot throttle
-            ax = axes[1]
-            throttles = np.array([act[aid].throttle for act in actions])
-            ax.plot(xs, throttles, c=c)
-            ax.set_title('Throttle')
-            ax.set_xlabel('Timestep')
-            ax.set_ylabel('Throttle')
+        #     # Plot observed velocity
+        #     ax = axes[0]
+        #     vels = np.array([ob.frame[aid].speed for ob in observations])
+        #     ax.plot(xs, vels, c=c)
+        #     ax.set_title('Velocity')
+        #     ax.set_xlabel('Timestep')
+        #     ax.set_ylabel('Velocity (m/s)')
 
-        plt.show()
+        #     # Plot throttle
+        #     ax = axes[1]
+        #     throttles = np.array([act[aid].throttle for act in actions])
+        #     ax.plot(xs, throttles, c=c)
+        #     ax.set_title('Throttle')
+        #     ax.set_xlabel('Timestep')
+        #     ax.set_ylabel('Throttle')
+
+        # plt.show()
