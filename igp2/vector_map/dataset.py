@@ -7,6 +7,7 @@ from shapely.geometry import Point, LineString, Polygon
 
 from igp2.opendrive.elements.opendrive import OpenDrive
 from igp2.opendrive.elements.road_lanes import LeftLanes, CenterLanes, RightLanes
+from igp2.opendrive.elements.geometry import normalise_angle
 from igp2.opendrive.map import Map
 
 
@@ -78,17 +79,18 @@ class Dataset(Map):
         lane_segments, internal_edges = {}, []
 
         for idx, lane in enumerate(lanes):
-            x_resampled, y_resampled = self.resample_midline(
+            x_world, y_world, yaw_world = self.resample_midline(
             lane.midline.xy[0], lane.midline.xy[1], max_length
             )
+            x_ego, y_ego, yaw_ego = self.world_to_ego_frame(x_world, y_world, yaw_world)
 
             previous_seg = None
-            for seg_id, (x, y) in enumerate(zip(x_resampled, y_resampled)):
-                if seg_id == len(x_resampled) - 1 and self.__has_successor(lane):
+            for seg_id, (x, y, yaw) in enumerate(zip(x_ego, y_ego, yaw_ego)):
+                if seg_id == len(x_ego) - 1 and self.__has_successor(lane):
                     continue
 
                 segment_name = f"{road_id}:{lane_ids[idx]}:{seg_id}"
-                lane_segments[segment_name] = {"pose": (x, y), "feats": lane_feats[idx]}
+                lane_segments[segment_name] = {"pose": (x, y), "feats": [x, y, yaw, 0.0, 0.0]}# , "feats": lane_feats[idx]}
 
                 if previous_seg:
                     internal_edges.append((previous_seg, segment_name))
@@ -97,21 +99,60 @@ class Dataset(Map):
 
         return lane_segments, internal_edges
 
-    def resample_midline(self, x: List[float], y: List[float], max_dist: float):
+    def resample_midline(self, x: List[float], y: List[float], max_dist: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         coords = np.stack([x, y], axis=1)
         dists = np.linalg.norm(np.diff(coords, axis=0), axis=1)
         cum_dists = np.insert(np.cumsum(dists), 0, 0.0)
 
-
         if cum_dists[-1] == 0.0:
-            return np.array(x), np.array(y)
-
+            # Single point: no yaw possible
+            return np.array(x), np.array(y), np.array([0.0])
 
         num_points = int(np.ceil(cum_dists[-1] / max_dist)) + 1
         new_d = np.linspace(0.0, cum_dists[-1], num_points)
 
+        x_new = np.interp(new_d, cum_dists, x)
+        y_new = np.interp(new_d, cum_dists, y)
 
-        return np.interp(new_d, cum_dists, x), np.interp(new_d, cum_dists, y)
+        # Compute yaw from one point to the next
+        dx = np.diff(x_new)
+        dy = np.diff(y_new)
+        yaw = np.arctan2(dy, dx)
+
+        # Append last yaw by repeating the second last one
+        yaw = np.append(yaw, yaw[-1])
+
+        return x_new, y_new, yaw
+
+    def world_to_ego_frame(self, x: np.ndarray, y: np.ndarray, yaw: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Transform (x, y, yaw) world-frame coordinates to ego-frame coordinates.
+
+        Args:
+            x (np.ndarray): World x coordinates.
+            y (np.ndarray): World y coordinates.
+            yaw (np.ndarray): World yaw angles (in radians).
+
+        Returns:
+            Tuple of (x_ego, y_ego, yaw_ego)
+        """
+        assert self.agent is not None, "Ego pose (self.agent) must be set before calling this method."
+
+        cx, cy, chead = self.agent
+        # Translate to ego position
+        dx = x - cx
+        dy = y - cy
+
+        # Rotate into ego frame
+        cos_h, sin_h = np.cos(-chead), np.sin(-chead)
+        x_ego = cos_h * dx - sin_h * dy
+        y_ego = sin_h * dx + cos_h * dy
+
+        # Adjust yaw to ego frame
+        yaw_ego = normalise_angle(yaw - chead)
+
+        return x_ego, y_ego, yaw_ego
+
 
 
     def get_edges(self, road, lanes, lane_ids):
