@@ -12,6 +12,8 @@ import logging
 
 from carla import Transform, Location, Rotation, Vector3D
 from igp2.opendrive import Map
+from igp2.vector_map import Dataset
+from igp2.pgp.carlapgp import CarlaPGP
 from igp2.agents.agent import Agent
 from igp2.carlasim.traffic_manager import TrafficManager
 from igp2.carlasim.carla_agent_wrapper import CarlaAgentWrapper
@@ -89,6 +91,7 @@ class CarlaSim:
         if not map_name is None:
             if self.__scenario_map is None:
                 self.__scenario_map = Map.parse_from_opendrive(f"scenarios/maps/{map_name}.xodr")
+                self.__pgp = CarlaPGP(f"scenarios/maps/{map_name}.xodr")
             # if map_name in self.__client.get_available_maps():
             # if not self.__client.get_world().get_map().name.endswith(map_name):
             try:
@@ -96,9 +99,11 @@ class CarlaSim:
             except RuntimeError as e:
                 logger.debug(f"Failed to load world {map_name}: {e}")
                 self.load_opendrive_world(self.__scenario_map.xodr_path)
+            self.__pgp = CarlaPGP(self.__scenario_map.xodr_path)
         elif not xodr is None:
             if self.__scenario_map is None:
                 self.__scenario_map = Map.parse_from_opendrive(xodr)
+                self.__pgp = CarlaPGP(xodr)
             self.load_opendrive_world(self.__scenario_map.xodr_path)
         else:
             raise RuntimeError("Cannot load a map with the given parameters!")
@@ -301,6 +306,7 @@ class CarlaSim:
             else:
                 agent_id = vehicle.id
             frame[agent_id] = state
+        self.__pgp.update(frame)
         return Observation(frame, self.scenario_map)
 
     def __wait_for_server(self):
