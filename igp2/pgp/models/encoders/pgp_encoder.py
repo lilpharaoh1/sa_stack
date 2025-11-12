@@ -91,11 +91,11 @@ class PGPEncoder(PredictionEncoder):
         :return:
         """
 
-        # # Encode target agent
-        # target_agent_feats = inputs['target_agent_representation']
-        # target_agent_embedding = self.leaky_relu(self.target_agent_emb(target_agent_feats))
-        # _, target_agent_enc = self.target_agent_enc(target_agent_embedding)
-        # target_agent_enc = target_agent_enc.squeeze(0)
+        # Encode target agent
+        target_agent_feats = inputs['target_agent_representation']
+        target_agent_embedding = self.leaky_relu(self.target_agent_emb(target_agent_feats))
+        _, target_agent_enc = self.target_agent_enc(target_agent_embedding)
+        target_agent_enc = target_agent_enc.squeeze(0)
 
         # Encode lane nodes
         lane_node_feats = inputs['map_representation']['lane_node_feats']

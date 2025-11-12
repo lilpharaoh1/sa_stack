@@ -47,20 +47,20 @@ class CarlaPGP:
         batched_inputs, agent_inputs = None, []
         for agent_id, agent_state in frame.items():
             if not agent_id in self.__agent_history:
-                self.__agent_history[agent_id] = deque([self.state2vector(agent_id, agent_state, first=True)], maxlen=int(self.t_h*self.fps))
+                self.__agent_history[agent_id] = deque([self.state2vector(agent_id, agent_state, first=True)], maxlen=16) # int(self.t_h*self.fps))
             else:
                 self.__agent_history[agent_id].append(self.state2vector(agent_id, agent_state))
             
-            if len(self.__agent_history[agent_id]) == self.t_h * self.fps:
+            if len(self.__agent_history[agent_id]) == 16: # self.t_h * self.fps:
                 self.__dataset.generate_graph(agent_pose=[*agent_state.position, agent_state.heading])
                 # Add to inputs
                 agent_inputs.append({
+                    "target_agent_representation": np.array(list(self.__agent_history[agent_id])),
                     "map_representation": self.__dataset.get_map_representation()
                 })
         
         if len(agent_inputs) > 0:
             batched_inputs = stack_dicts(agent_inputs)
-            print(batched_inputs)
             trajectories = self.__model(batched_inputs)
 
         for agent_id, agent_state in frame.items():
@@ -69,12 +69,11 @@ class CarlaPGP:
         
     def state2vector(self, agent_id, agent_state, first=False):
         x, y = agent_state.position
-        speed = agent_state.velocity # Might need to be scalar # Actually I think so
-        acceleration = agent_state.acceleration # Might need to be scalar # Actually I think so
+        speed = np.linalg.norm(agent_state.velocity) # Might need to be scalar # Actually I think so
+        acceleration = np.linalg.norm(agent_state.acceleration) # Might need to be scalar # Actually I think so
         yaw_rate = 0.0 if first else agent_state.heading - self.__agent_history[agent_id][-1][4]
-        is_pedestrian = 0.0
 
-        return [x, y, speed, acceleration, yaw_rate, is_pedestrian]
+        return [x, y, speed, acceleration, yaw_rate]
 
 def stack_dicts(dict_list):
     if not dict_list:
