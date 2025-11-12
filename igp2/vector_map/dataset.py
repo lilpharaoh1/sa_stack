@@ -35,6 +35,7 @@ class Dataset(Map):
 
         self.agent = None
         self.bounds = bounds if bounds is not None else self.DEFAULT_BOUNDS
+        self.max_nodes = 128 # EMRAN make some compute_stats-esque function for this
 
         if process_graph:
             self.__process_graph()
@@ -69,8 +70,8 @@ class Dataset(Map):
 
 
         edges.extend(self.add_lane_change_edges(nodes))
-        self.__graph = {"nodes": nodes, "edges": edges}
 
+        self.__graph = {"nodes": nodes, "edges": edges}
 
     def get_lane_feats(self, road, lanes):
         return [{"type": lane.type, "junction": road.junction != -1} for lane in lanes]
@@ -90,7 +91,7 @@ class Dataset(Map):
                     continue
 
                 segment_name = f"{road_id}:{lane_ids[idx]}:{seg_id}"
-                lane_segments[segment_name] = {"pose": (x, y), "feats": [x, y, yaw, 0.0, 0.0]}# , "feats": lane_feats[idx]}
+                lane_segments[segment_name] = {"pose": (x, y), "feats": [x, y, yaw, 0.0, 0.0, seg_id < len(x_ego) - 1 or self.__has_successor(lane)]}
 
                 if previous_seg:
                     internal_edges.append((previous_seg, segment_name))
@@ -152,8 +153,6 @@ class Dataset(Map):
         yaw_ego = normalise_angle(yaw - chead)
 
         return x_ego, y_ego, yaw_ego
-
-
 
     def get_edges(self, road, lanes, lane_ids):
         edges = []
@@ -336,7 +335,74 @@ class Dataset(Map):
 
         return section_copy
 
+    def get_map_representation(self):
+        node_id_mapping = {}
+        lane_node_feats = np.array([node["feats"] for node in self.nodes.values()])
+        # Convert list of lane node feats to fixed size numpy array and masks
+        lane_node_feats, lane_node_masks = self.list_to_tensor(lane_node_feats, self.max_nodes, Dataset.POLYLINE_LENGTH, 6)
+        
+        s_next, edge_type = self.get_edge_lookup()
 
+        map_representation = {
+            'lane_node_feats': lane_node_feats,
+            'lane_node_masks': lane_node_masks,
+            's_next': s_next,
+            'edge_type': edge_type
+        }
+
+        return map_representation
+
+    def get_edge_lookup(self):
+        node_ids = list(self.nodes.keys())
+        id_to_idx = {seg_id: idx for idx, seg_id in enumerate(node_ids)}
+        N = len(node_ids)
+
+        s_next = np.zeros((self.max_nodes, self.max_nodes + 1))
+        edge_type = np.zeros((self.max_nodes, self.max_nodes + 1), dtype=int)
+
+        for edge in self.edges:
+            start, end = edge
+            start_road, start_lane, start_seg = start.split(":")
+            end_road, end_lane, end_seg = end.split(":")
+
+            nbr_idx = self.first_zero_index(s_next[id_to_idx[start]])
+            s_next[id_to_idx[start], nbr_idx] = id_to_idx[end]
+            edge_type[id_to_idx[start], nbr_idx] = 1 if start_road == end_road else 2
+
+        s_next[:len(self.edges), -1] = np.arange(len(self.edges)) + self.max_nodes
+        edge_type[:len(self.edges), -1] = 3
+
+        return s_next, edge_type
+
+
+    @staticmethod
+    def first_zero_index(arr):
+        for idx, val in enumerate(arr):
+            if val == 0:
+                return idx
+        return None  # if no zero found
+
+    @staticmethod
+    def list_to_tensor(feat_list: List[np.ndarray], max_num: int, max_len: int,
+                       feat_size: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Converts a list of sequential features (e.g. lane polylines or agent history) to fixed size numpy arrays for
+        forming mini-batches
+
+        :param feat_list: List of sequential features
+        :param max_num: Maximum number of sequences in List
+        :param max_len: Maximum length of each sequence
+        :param feat_size: Feature dimension
+        :return: 1) ndarray of features of shape [max_num, max_len, feat_dim]. Has zeros where elements are missing,
+            2) ndarray of binary masks of shape [max_num, max_len, feat_dim]. Has ones where elements are missing.
+        """
+        feat_array = np.zeros((max_num, max_len, feat_size))
+        mask_array = np.ones((max_num, max_len, feat_size))
+        for n, feats in enumerate(feat_list):
+            feat_array[n, :len(feats), :] = feats
+            mask_array[n, :len(feats), :] = 0
+
+        return feat_array, mask_array
 
     def reset_opendrive(self):
         self._Map__opendrive = self.__orig_opendrive
