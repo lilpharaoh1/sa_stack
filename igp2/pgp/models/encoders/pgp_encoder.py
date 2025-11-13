@@ -155,7 +155,7 @@ class PGPEncoder(PredictionEncoder):
         # Pass on initial nodes and edge structure to aggregator if included in inputs
         if 'init_node' in inputs:
             encodings['init_node'] = inputs['init_node']
-            encodings['node_seq_gt'] = inputs['node_seq_gt']
+            # encodings['node_seq_gt'] = inputs['node_seq_gt']
             encodings['s_next'] = inputs['map_representation']['s_next']
             encodings['edge_type'] = inputs['map_representation']['edge_type']
 

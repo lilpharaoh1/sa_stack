@@ -56,16 +56,25 @@ class CarlaPGP:
         for agent_id, agent_state in frame.items():
             if len(self.__agent_history[agent_id]) == 16: # self.t_h * self.fps:
                 self.__dataset.generate_graph(agent_pose=[*agent_state.position, agent_state.heading])
+
+                target_agent_representation = np.array(list(self.__agent_history[agent_id]))
+                map_representation = self.__dataset.get_map_representation()
+                surrounding_agent_representation = self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # This could be done in a batch
+                agent_node_masks = self.__dataset.get_agent_node_masks(map_representation, surrounding_agent_representation)
+
                 # Add to inputs
                 agent_inputs.append({
-                    "target_agent_representation": np.array(list(self.__agent_history[agent_id])),
-                    "map_representation": self.__dataset.get_map_representation(),
-                    "surrounding_agent_representation": self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # This could be done in a batch
+                    "target_agent_representation": target_agent_representation,
+                    "map_representation": map_representation,
+                    "surrounding_agent_representation": surrounding_agent_representation,
+                    "agent_node_masks": agent_node_masks,
+                    "init_node": self.__dataset.get_initial_node(map_representation)
                 })
         
         if len(agent_inputs) > 0:
             batched_inputs = stack_dicts(agent_inputs)
             trajectories = self.__model(batched_inputs)
+            print(trajectories)
 
         for agent_id, agent_state in frame.items():
             # Assign trajectories to self.__trajectories

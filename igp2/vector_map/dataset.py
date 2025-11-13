@@ -387,7 +387,6 @@ class Dataset(Map):
         #     return len(vehicles), len(pedestrians)
 
         # Convert to fixed size arrays for batching
-        print("self.max_vehicles:",)
         vehicles, vehicle_masks = self.list_to_tensor(vehicles, self.max_vehicles, self.t_h * 2 + 1, 5)
         pedestrians, pedestrian_masks = self.list_to_tensor(pedestrians, self.max_pedestrians, self.t_h * 2 + 1, 5)
 
@@ -424,6 +423,98 @@ class Dataset(Map):
 
 
     @staticmethod
+    def get_agent_node_masks(map_representation, surrounding_agent_representation, dist_thresh=10) -> Dict:
+        """
+        Returns key/val masks for agent-node attention layers. All agents except those within a distance threshold of
+        the lane node are masked. The idea is to incorporate local agent context at each lane node.
+        """
+
+        lane_node_feats = map_representation['lane_node_feats']
+        lane_node_masks = map_representation['lane_node_masks']
+        vehicle_feats = surrounding_agent_representation['vehicles']
+        vehicle_masks = surrounding_agent_representation['vehicle_masks']
+        ped_feats = surrounding_agent_representation['pedestrians']
+        ped_masks = surrounding_agent_representation['pedestrian_masks']
+
+        vehicle_node_masks = np.ones((len(lane_node_feats), len(vehicle_feats)))
+        ped_node_masks = np.ones((len(lane_node_feats), len(ped_feats)))
+
+        for i, node_feat in enumerate(lane_node_feats):
+            if (lane_node_masks[i] == 0).any():
+                node_pose_idcs = np.where(lane_node_masks[i][:, 0] == 0)[0]
+                node_locs = node_feat[node_pose_idcs, :2]
+
+                for j, vehicle_feat in enumerate(vehicle_feats):
+                    if (vehicle_masks[j] == 0).any():
+                        vehicle_loc = vehicle_feat[-1, :2]
+                        dist = np.min(np.linalg.norm(node_locs - vehicle_loc, axis=1))
+                        if dist <= dist_thresh:
+                            vehicle_node_masks[i, j] = 0
+
+                for j, ped_feat in enumerate(ped_feats):
+                    if (ped_masks[j] == 0).any():
+                        ped_loc = ped_feat[-1, :2]
+                        dist = np.min(np.linalg.norm(node_locs - ped_loc, axis=1))
+                        if dist <= dist_thresh:
+                            ped_node_masks[i, j] = 0
+
+        agent_node_masks = {'vehicles': vehicle_node_masks, 'pedestrians': ped_node_masks}
+        return agent_node_masks
+
+    def get_initial_node(self, map_representation) -> np.ndarray:
+        """
+        Returns initial node probabilities for initializing the graph traversal policy
+        :param lane_graph: lane graph dictionary with lane node features and edge look-up tables
+        """
+
+        # Unpack lane node poses
+        node_feats = map_representation['lane_node_feats']
+        node_feat_lens = np.sum(1 - map_representation['lane_node_masks'][:, :, 0], axis=1)
+        node_poses = []
+        for i, node_feat in enumerate(node_feats):
+            if node_feat_lens[i] != 0:
+                node_poses.append(node_feat[:int(node_feat_lens[i]), :3])
+
+        assigned_nodes = self.assign_pose_to_node(node_poses, np.asarray([0, 0, 0]), dist_thresh=3,
+                                                  yaw_thresh=np.pi / 4, return_multiple=True)
+
+        init_node = np.zeros(self.max_nodes)
+        init_node[assigned_nodes] = 1/len(assigned_nodes)
+        return init_node
+
+    @staticmethod
+    def assign_pose_to_node(node_poses, query_pose, dist_thresh=5, yaw_thresh=np.pi/3, return_multiple=False):
+        """
+        Assigns a given agent pose to a lane node. Takes into account distance from the lane centerline as well as
+        direction of motion.
+        """
+        dist_vals = []
+        yaw_diffs = []
+
+        for i in range(len(node_poses)):
+            distances = np.linalg.norm(node_poses[i][:, :2] - query_pose[:2], axis=1)
+            dist_vals.append(np.min(distances))
+            idx = np.argmin(distances)
+            yaw_lane = node_poses[i][idx, 2]
+            yaw_query = query_pose[2]
+            yaw_diffs.append(np.arctan2(np.sin(yaw_lane - yaw_query), np.cos(yaw_lane - yaw_query)))
+
+        idcs_yaw = np.where(np.absolute(np.asarray(yaw_diffs)) <= yaw_thresh)[0]
+        idcs_dist = np.where(np.asarray(dist_vals) <= dist_thresh)[0]
+        idcs = np.intersect1d(idcs_dist, idcs_yaw)
+
+        if len(idcs) > 0:
+            if return_multiple:
+                return idcs
+            assigned_node_id = idcs[int(np.argmin(np.asarray(dist_vals)[idcs]))]
+        else:
+            assigned_node_id = np.argmin(np.asarray(dist_vals))
+            if return_multiple:
+                assigned_node_id = np.asarray([assigned_node_id])
+
+        return assigned_node_id
+
+    @staticmethod
     def first_zero_index(arr):
         for idx, val in enumerate(arr):
             if val == 0:
@@ -444,7 +535,6 @@ class Dataset(Map):
         :return: 1) ndarray of features of shape [max_num, max_len, feat_dim]. Has zeros where elements are missing,
             2) ndarray of binary masks of shape [max_num, max_len, feat_dim]. Has ones where elements are missing.
         """
-        print("max_num, max_len, feat_size:", max_num, max_len, feat_size)
         feat_array = np.zeros((max_num, max_len, feat_size))
         mask_array = np.ones((max_num, max_len, feat_size))
         for n, feats in enumerate(feat_list):
