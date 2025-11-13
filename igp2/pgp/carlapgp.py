@@ -21,7 +21,9 @@ class CarlaPGP:
         self.__xodr_path = xodr_path
         self.__dataset = Dataset.parse_from_opendrive(xodr_path)
     
-        self.t_h, self.t_f, self.fps = 2.0, 6.0, 20.0
+        self.t_h, self.t_f, self.fps = 2, 6, 20
+        self.__dataset.t_h, self.__dataset.t_f, self.__dataset.fps = \
+            self.t_h, self.t_f, self.fps 
         self.__agent_history = {}
         self.__trajectories = {}
 
@@ -51,12 +53,14 @@ class CarlaPGP:
             else:
                 self.__agent_history[agent_id].append(self.state2vector(agent_id, agent_state))
             
+        for agent_id, agent_state in frame.items():
             if len(self.__agent_history[agent_id]) == 16: # self.t_h * self.fps:
                 self.__dataset.generate_graph(agent_pose=[*agent_state.position, agent_state.heading])
                 # Add to inputs
                 agent_inputs.append({
                     "target_agent_representation": np.array(list(self.__agent_history[agent_id])),
-                    "map_representation": self.__dataset.get_map_representation()
+                    "map_representation": self.__dataset.get_map_representation(),
+                    "surrounding_agent_representation": self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # This could be done in a batch
                 })
         
         if len(agent_inputs) > 0:

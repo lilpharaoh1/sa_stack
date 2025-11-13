@@ -35,7 +35,10 @@ class Dataset(Map):
 
         self.agent = None
         self.bounds = bounds if bounds is not None else self.DEFAULT_BOUNDS
+
         self.max_nodes = 128 # EMRAN make some compute_stats-esque function for this
+        self.max_vehicles = 64 # EMRAN make some compute_stats-esque function for this
+        self.max_pedestrians = 64 # EMRAN make some compute_stats-esque function for this
 
         if process_graph:
             self.__process_graph()
@@ -374,6 +377,51 @@ class Dataset(Map):
 
         return s_next, edge_type
 
+    def get_surrounding_agent_representation(self, agent_id, agent_history):
+        # Discard poses outside map extent
+        vehicles = self.get_poses_inside_bounds(agent_history)
+        pedestrians = [] # self.get_poses_inside_bounds(agent_history)
+
+        # # While running the dataset class in 'compute_stats' mode:
+        # if self.mode == 'compute_stats':
+        #     return len(vehicles), len(pedestrians)
+
+        # Convert to fixed size arrays for batching
+        print("self.max_vehicles:",)
+        vehicles, vehicle_masks = self.list_to_tensor(vehicles, self.max_vehicles, self.t_h * 2 + 1, 5)
+        pedestrians, pedestrian_masks = self.list_to_tensor(pedestrians, self.max_pedestrians, self.t_h * 2 + 1, 5)
+
+        surrounding_agent_representation = {
+            'vehicles': vehicles,
+            'vehicle_masks': vehicle_masks,
+            'pedestrians': pedestrians,
+            'pedestrian_masks': pedestrian_masks
+        }
+
+        return surrounding_agent_representation
+
+    def get_poses_inside_bounds(self, agent_history, ids=None):
+        updated_pose_set = []
+        updated_ids = []
+
+        for m, (agent_id, agent_states) in enumerate(agent_history.items()):
+            flag = False
+            for n, agent_state in enumerate(agent_states):
+                pose = agent_state[:2]
+                if self.bounds[0] <= pose[0] <= self.bounds[1] and \
+                        self.bounds[2] <= pose[1] <= self.bounds[3]:
+                    flag = True
+
+            if flag:
+                updated_pose_set.append(poses)
+                if ids is not None:
+                    updated_ids.append(ids[m])
+
+        if ids is not None:
+            return updated_pose_set, updated_ids
+        else:
+            return updated_pose_set
+
 
     @staticmethod
     def first_zero_index(arr):
@@ -396,6 +444,7 @@ class Dataset(Map):
         :return: 1) ndarray of features of shape [max_num, max_len, feat_dim]. Has zeros where elements are missing,
             2) ndarray of binary masks of shape [max_num, max_len, feat_dim]. Has ones where elements are missing.
         """
+        print("max_num, max_len, feat_size:", max_num, max_len, feat_size)
         feat_array = np.zeros((max_num, max_len, feat_size))
         mask_array = np.ones((max_num, max_len, feat_size))
         for n, feats in enumerate(feat_list):
