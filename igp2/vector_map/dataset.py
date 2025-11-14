@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class Dataset(Map):
-    POLYLINE_LENGTH = 10
+    POLYLINE_LENGTH = 20
     DEFAULT_BOUNDS = [-50, 50, -20, 80]
     # DEFAULT_BOUNDS = [-5, 5, -20, 70]
     # DEFAULT_BOUNDS = [-15, 15, -10, 60]
@@ -39,6 +39,9 @@ class Dataset(Map):
         self.max_nodes = 128 # EMRAN make some compute_stats-esque function for this
         self.max_vehicles = 64 # EMRAN make some compute_stats-esque function for this
         self.max_pedestrians = 64 # EMRAN make some compute_stats-esque function for this
+
+        self.t_h, self.t_f, self.fps = None, None, None
+        self.interval = None
 
         if process_graph:
             self.__process_graph()
@@ -382,13 +385,9 @@ class Dataset(Map):
         vehicles = self.get_poses_inside_bounds(agent_history)
         pedestrians = [] # self.get_poses_inside_bounds(agent_history)
 
-        # # While running the dataset class in 'compute_stats' mode:
-        # if self.mode == 'compute_stats':
-        #     return len(vehicles), len(pedestrians)
-
         # Convert to fixed size arrays for batching
-        vehicles, vehicle_masks = self.list_to_tensor(vehicles, self.max_vehicles, self.t_h * 2 + 1, 5)
-        pedestrians, pedestrian_masks = self.list_to_tensor(pedestrians, self.max_pedestrians, self.t_h * 2 + 1, 5)
+        vehicles, vehicle_masks = self.list_to_tensor(vehicles, self.max_vehicles, self.interval + 1, 5)
+        pedestrians, pedestrian_masks = self.list_to_tensor(pedestrians, self.max_pedestrians, self.interval * 2 + 1, 5)
 
         surrounding_agent_representation = {
             'vehicles': vehicles,
@@ -412,7 +411,7 @@ class Dataset(Map):
                     flag = True
 
             if flag:
-                updated_pose_set.append(poses)
+                updated_pose_set.append(list(agent_states))
                 if ids is not None:
                     updated_ids.append(ids[m])
 

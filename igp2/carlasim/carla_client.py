@@ -219,6 +219,7 @@ class CarlaSim:
         actor.destroy()
         self.agents[agent_id].agent.alive = False
         self.agents[agent_id] = None
+        self.__pgp.remove(agent_id)
 
     def get_traffic_manager(self) -> "TrafficManager":
         """ Enables and returns the internal traffic manager of the simulation."""
@@ -291,7 +292,7 @@ class CarlaSim:
         vehicle_list = actor_list.filter("*vehicle*")
         agent_id_lookup = dict([(a.actor_id, a.agent_id) for a in self.agents.values() if a is not None])
         frame = {}
-        for vehicle in vehicle_list:
+        for idx, vehicle in enumerate(vehicle_list):
             transform = vehicle.get_transform()
             heading = np.deg2rad(-transform.rotation.yaw)
             velocity = vehicle.get_velocity()
@@ -307,6 +308,8 @@ class CarlaSim:
                 agent_id = vehicle.id
             frame[agent_id] = state
         self.__pgp.update(frame)
+        if self.__timestep % self.__pgp.interval == 0:
+            self.__pgp.predict_trajectories()
         return Observation(frame, self.scenario_map)
 
     def __wait_for_server(self):
@@ -344,6 +347,16 @@ class CarlaSim:
     def scenario_map(self) -> Map:
         """The current road layout. """
         return self.__scenario_map
+    
+    @property
+    def dataset(self) -> Dataset:
+        """The lane graph handler layout. """
+        return self.__dataset
+
+    @property
+    def pgp(self):
+        """The CarlaPGP module. """
+        return self.__pgp
 
     @property
     def agents(self) -> Dict[int, CarlaAgentWrapper]:

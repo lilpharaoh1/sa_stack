@@ -23,9 +23,10 @@ class CarlaPGP:
     
         self.t_h, self.t_f, self.fps = 2, 6, 20
         self.__dataset.t_h, self.__dataset.t_f, self.__dataset.fps = \
-            self.t_h, self.t_f, self.fps 
+            self.t_h, self.t_f, self.fps
+        self.__dataset.interval = self.interval 
         self.__agent_history = {}
-        self.__trajectories = {}
+        self.__trajectories = None
 
         yaml_path = "/home/emran/IGP2/igp2/pgp/configs/pgp_gatx2_lvm_traversal.yml"
         # Load model config file
@@ -46,23 +47,27 @@ class CarlaPGP:
         print("Model:", self.__model)
 
     def update(self, frame):
-        batched_inputs, agent_inputs = None, []
         for agent_id, agent_state in frame.items():
             if not agent_id in self.__agent_history:
-                self.__agent_history[agent_id] = deque([self.state2vector(agent_id, agent_state, first=True)], maxlen=16) # int(self.t_h*self.fps))
+                self.__agent_history[agent_id] = deque([self.state2vector(agent_id, agent_state, first=True)], maxlen=self.interval)
             else:
                 self.__agent_history[agent_id].append(self.state2vector(agent_id, agent_state))
             
-        for agent_id, agent_state in frame.items():
-            if len(self.__agent_history[agent_id]) == 16: # self.t_h * self.fps:
-                self.__dataset.generate_graph(agent_pose=[*agent_state.position, agent_state.heading])
+    def predict_trajectories(self):
+        agent_ids, agent_inputs = [], []
+        for agent_id, agent_history in self.__agent_history.items():
+            if len(agent_history) >= self.interval:
+                agent_state = agent_history[-1]
+                self.__dataset.generate_graph( \
+                    agent_pose=[*agent_state[:2], heading_from_history(agent_history)])
 
-                target_agent_representation = np.array(list(self.__agent_history[agent_id]))
+                target_agent_representation = np.array(list(agent_history))
                 map_representation = self.__dataset.get_map_representation()
                 surrounding_agent_representation = self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # This could be done in a batch
                 agent_node_masks = self.__dataset.get_agent_node_masks(map_representation, surrounding_agent_representation)
 
                 # Add to inputs
+                agent_ids.append(agent_id)
                 agent_inputs.append({
                     "target_agent_representation": target_agent_representation,
                     "map_representation": map_representation,
@@ -74,19 +79,44 @@ class CarlaPGP:
         if len(agent_inputs) > 0:
             batched_inputs = stack_dicts(agent_inputs)
             trajectories = self.__model(batched_inputs)
-            print(trajectories)
 
-        for agent_id, agent_state in frame.items():
-            # Assign trajectories to self.__trajectories
-            pass
-        
+            self.__trajectories = {}
+            for traj_id, agent_id in enumerate(agent_ids):
+                # Assign trajectories to self.__trajectories                    
+                self.__trajectories[agent_id] = trajectories['traj'][traj_id]
+
     def state2vector(self, agent_id, agent_state, first=False):
         x, y = agent_state.position
         speed = np.linalg.norm(agent_state.velocity) # Might need to be scalar # Actually I think so
         acceleration = np.linalg.norm(agent_state.acceleration) # Might need to be scalar # Actually I think so
         yaw_rate = 0.0 if first else agent_state.heading - self.__agent_history[agent_id][-1][4]
 
+        if agent_id == 0:
+            print(x, y)
         return [x, y, speed, acceleration, yaw_rate]
+
+    def remove(self, agent_id):
+        del self.__agent_history[agent_id]
+        del self.__trajectories[agent_id]
+
+    @property
+    def dataset(self):
+        return self.__dataset
+
+    @property
+    def agent_history(self):
+        return self.__agent_history
+
+    @property
+    def trajectories(self):
+        return self.__trajectories
+
+    @property
+    def interval(self):
+        return int(self.t_h*self.fps)
+
+def heading_from_history(agent_history):
+    return np.arctan2(agent_history[-1][1] - agent_history[-2][1], agent_history[-1][0] - agent_history[-2][0])
 
 def stack_dicts(dict_list):
     if not dict_list:

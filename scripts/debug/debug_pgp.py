@@ -19,6 +19,7 @@ import time
 from shapely.geometry import Polygon
 from datetime import datetime
 from typing import List, Tuple, Dict
+from igp2.pgp.plot_pgp_trajectories import plot_pgp_trajectories
 
 
 logger = logging.getLogger(__name__)
@@ -250,17 +251,17 @@ if __name__ == '__main__':
                                    (veh1_spawn_box, veh1_vel_range),
                                    (veh2_spawn_box, veh2_vel_range)])
 
-    ip.plot_map(scenario_map, markings=True, midline=True)
-    plt.plot(*list(zip(*ego_spawn_box.boundary)))
-    plt.plot(*list(zip(*veh1_spawn_box.boundary)))
-    plt.plot(*list(zip(*veh2_spawn_box.boundary)))
-    for aid, state in frame.items():
-        plt.plot(*state.position, marker="x")
-        plt.text(*state.position, aid)
-    for goal in goals.values():
-        plt.plot(*list(zip(*goal.box.boundary)), c="g")
-    plt.gca().add_patch(plt.Circle(frame[0].position, 100, color='b', fill=False))
-    plt.show()
+    # ip.plot_map(scenario_map, markings=True, midline=True)
+    # plt.plot(*list(zip(*ego_spawn_box.boundary)))
+    # plt.plot(*list(zip(*veh1_spawn_box.boundary)))
+    # plt.plot(*list(zip(*veh2_spawn_box.boundary)))
+    # for aid, state in frame.items():
+    #     plt.plot(*state.position, marker="x")
+    #     plt.text(*state.position, aid)
+    # for goal in goals.values():
+    #     plt.plot(*list(zip(*goal.box.boundary)), c="g")
+    # plt.gca().add_patch(plt.Circle(frame[0].position, 100, color='b', fill=False))
+    # # plt.show()
 
     cost_factors = {"time": 0.1, "velocity": 0.0, "acceleration": 0.1, "jerk": 0., "heading": 0.0,
                     "angular_velocity": 0.1, "angular_acceleration": 0.1, "curvature": 0.0, "safety": 0.}
@@ -301,7 +302,15 @@ if __name__ == '__main__':
         observations.append(obs)
         actions.append(acts)
 
-        time.sleep(0.1)
+        agent_history = carla_sim.pgp.agent_history
+        trajectories = carla_sim.pgp.trajectories
+        
+        if trajectories is None or t % carla_sim.pgp.interval != 0:
+            continue
+        
+        ax = plot_pgp_trajectories(trajectories, agent_history, carla_sim.scenario_map, markings=True)
+        plt.show()
+
 
         # logger.info(f'Step {t}')
         # logger.info('Vehicle actions were:')
