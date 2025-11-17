@@ -82,6 +82,9 @@ class PGP(PredictionAggregator):
             init_node = encodings['init_node']
             sampled_traversals = self.sample_policy(torch.exp(pi), s_next, init_node)
 
+        print(sampled_traversals)
+        torch.save(sampled_traversals, "sampled_traversals.pt")
+
         # Selectively aggregate context along traversed paths
         agg_enc = self.aggregate(sampled_traversals, node_encodings, target_agent_encoding)
 

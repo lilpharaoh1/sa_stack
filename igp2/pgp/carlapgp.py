@@ -61,7 +61,7 @@ class CarlaPGP:
                 self.__dataset.generate_graph( \
                     agent_pose=[*agent_state[:2], heading_from_history(agent_history)])
 
-                target_agent_representation = np.array(list(agent_history))
+                target_agent_representation = transform_states_to_vehicle_frame(np.array(list(agent_history)))
                 map_representation = self.__dataset.get_map_representation()
                 surrounding_agent_representation = self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # This could be done in a batch
                 agent_node_masks = self.__dataset.get_agent_node_masks(map_representation, surrounding_agent_representation)
@@ -91,8 +91,6 @@ class CarlaPGP:
         acceleration = np.linalg.norm(agent_state.acceleration) # Might need to be scalar # Actually I think so
         yaw_rate = 0.0 if first else agent_state.heading - self.__agent_history[agent_id][-1][4]
 
-        if agent_id == 0:
-            print(x, y)
         return [x, y, speed, acceleration, yaw_rate]
 
     def remove(self, agent_id):
@@ -114,6 +112,41 @@ class CarlaPGP:
     @property
     def interval(self):
         return int(self.t_h*self.fps)
+
+def transform_states_to_vehicle_frame(states: np.ndarray) -> np.ndarray:
+    """
+    Transforms a sequence of vehicle states into the ego (vehicle) frame,
+    where the most recent state (last in the array) is at the origin, facing +x.
+
+    Args:
+        states (np.ndarray): Array of shape (T, 5) where each row is
+                             [x, y, speed, acceleration, yaw_rate].
+
+    Returns:
+        np.ndarray: Transformed states of shape (T, 5) in ego frame.
+    """
+    assert states.shape[1] == 5, "Each state must have 5 elements: [x, y, speed, acceleration, yaw_rate]"
+    
+    # Extract the reference state (latest state)
+    x0, y0, _, _, yaw0 = states[-1]
+
+    # Shift positions
+    dx = states[:, 0] - x0
+    dy = states[:, 1] - y0
+
+    # Rotate positions by -yaw0 to align with ego heading
+    cos_yaw = np.cos(-yaw0)
+    sin_yaw = np.sin(-yaw0)
+    x_ego = cos_yaw * dx - sin_yaw * dy
+    y_ego = sin_yaw * dx + cos_yaw * dy
+
+    # Copy other values unchanged
+    transformed_states = states.copy()
+    transformed_states[:, 0] = x_ego
+    transformed_states[:, 1] = y_ego
+
+    return transformed_states
+
 
 def heading_from_history(agent_history):
     return np.arctan2(agent_history[-1][1] - agent_history[-2][1], agent_history[-1][0] - agent_history[-2][0])

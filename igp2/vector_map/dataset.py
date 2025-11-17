@@ -200,9 +200,6 @@ class Dataset(Map):
         return edges
 
     def filter_opendrive_around_point(self, agent: Tuple[float, float, float]):
-        import copy
-        from shapely.geometry import Polygon, LineString
-
         cx, cy, heading = agent
         left, right, back, front = self.bounds
 
@@ -235,8 +232,6 @@ class Dataset(Map):
             if keep_road:
                 filtered_roads.append(road_copy)
 
-
-
         kept_ids = {r.id for r in filtered_roads}
 
         # Clean road-level and lane-level links
@@ -265,6 +260,49 @@ class Dataset(Map):
                 for conn in j.connections
             )
         ]
+
+        # Reconnect lanes through junctions if both roads exist
+        for junction in filtered_junctions:
+            for connection in junction.connections:
+                incoming_id = connection.incoming_road.id
+                connecting_id = connection.connecting_road.id
+
+                if incoming_id in kept_ids and connecting_id in kept_ids:
+                    incoming_road = next((r for r in filtered_roads if r.id == incoming_id), None)
+                    connecting_road = next((r for r in filtered_roads if r.id == connecting_id), None)
+                    if incoming_road is None or connecting_road is None:
+                        continue
+
+                    for lane_link in connection.lane_links:
+                        from_lane_id = lane_link.from_id
+                        to_lane_id = lane_link.to_id
+
+                        # Find source lane
+                        for section in incoming_road.lanes.lane_sections:
+                            from_lane = section.get_lane(from_lane_id)
+                            if from_lane is not None:
+                                break
+                        else:
+                            continue  # skip if lane not found
+
+                        # Find target lane
+                        for section in connecting_road.lanes.lane_sections:
+                            to_lane = section.get_lane(to_lane_id)
+                            if to_lane is not None:
+                                break
+                        else:
+                            continue  # skip if lane not found
+
+                        # Add as successor/predecessor
+                        if from_lane.link is not None:
+                            if from_lane.link.successor is None:
+                                from_lane.link.successor = []
+                            from_lane.link.successor.append(to_lane)
+
+                        if to_lane.link is not None:
+                            if to_lane.link.predecessor is None:
+                                to_lane.link.predecessor = []
+                            to_lane.link.predecessor.append(from_lane)
 
         # Rebuild and assign filtered map
         filtered_map = OpenDrive()
@@ -361,6 +399,7 @@ class Dataset(Map):
     def get_edge_lookup(self):
         node_ids = list(self.nodes.keys())
         id_to_idx = {seg_id: idx for idx, seg_id in enumerate(node_ids)}
+        idx_to_id = {idx: seg_id for idx, seg_id in enumerate(node_ids)}
         N = len(node_ids)
 
         s_next = np.zeros((self.max_nodes, self.max_nodes + 1))
@@ -373,7 +412,7 @@ class Dataset(Map):
 
             nbr_idx = self.first_zero_index(s_next[id_to_idx[start]])
             s_next[id_to_idx[start], nbr_idx] = id_to_idx[end]
-            edge_type[id_to_idx[start], nbr_idx] = 1 if start_road == end_road else 2
+            edge_type[id_to_idx[start], nbr_idx] = 2 if start_road == end_road and start_lane != end_lane else 1
 
         s_next[:len(self.edges), -1] = np.arange(len(self.edges)) + self.max_nodes
         edge_type[:len(self.edges), -1] = 3
