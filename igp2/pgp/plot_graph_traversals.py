@@ -43,7 +43,6 @@ def heading_from_history(agent_history):
 def plot_graph_traversals(traversals, agent_history, dataset, odr_map, ax: plt.Axes = None, scenario_config=None, **kwargs):
     for agent_idx, (traversal, single_history) in enumerate(zip(traversals, agent_history.values())):
         dataset.generate_graph(agent_pose=[*single_history[-1][:2], heading_from_history(single_history)])
-        print("\n\n\n\n\n\naaaaaa", {idx: seg_id for idx, seg_id in enumerate(dataset.nodes.keys())})
         ax = plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax=ax, scenario_config=scenario_config, **kwargs)
         plt.show()
     
@@ -187,7 +186,7 @@ def plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax:
     max_visited = 0
     visited_nodes = {}
     for sampled_traversal in traversal:
-        for node_idx in sampled_traversal:
+        for idx, node_idx in enumerate(sampled_traversal):
             if node_idx >= dataset.max_nodes:
                 continue
             node_id = idx_to_id[node_idx]
@@ -195,12 +194,13 @@ def plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax:
                 visited_nodes[node_id] += 1
             else:
                 visited_nodes[node_id] = 1
-            max_visited = max(max_visited, visited_nodes[node_id]) if node_idx != 1 else max_visited
+            max_visited = max(max_visited, visited_nodes[node_id])
 
     for node_id, num_visited in visited_nodes.items():
     # for node_id, node in dataset.nodes.items():
         x, y = dataset.nodes[node_id]["pose"]
-        ax.scatter(x, y, c=num_visited/max_visited, cmap='viridis', marker='o', linewidths=2.0)
+        print(f"{node_id}: {num_visited} / {max_visited}")
+        ax.scatter(x, y, c=[num_visited/max_visited], cmap='inferno', marker='o', linewidths=2.0, vmin=0.0, vmax=1.0)
         # ax.plot(x, y, "bo")
         ax.text(x, y, id_to_idx[node_id], fontsize=13)
         # ax.text(x, y, node_id, fontsize=13)
