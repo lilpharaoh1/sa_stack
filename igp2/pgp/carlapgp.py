@@ -27,6 +27,7 @@ class CarlaPGP:
         self.__dataset.interval = self.interval 
         self.__agent_history = {}
         self.__trajectories = None
+        self.__probabilities = None
 
         yaml_path = "/home/emran/IGP2/igp2/pgp/configs/pgp_gatx2_lvm_traversal.yml"
         # Load model config file
@@ -81,9 +82,11 @@ class CarlaPGP:
             trajectories = self.__model(batched_inputs)
 
             self.__trajectories = {}
+            self.__probabilities = {}
             for traj_id, agent_id in enumerate(agent_ids):
                 # Assign trajectories to self.__trajectories                    
-                self.__trajectories[agent_id] = trajectories['traj'][traj_id]
+                self.__trajectories[agent_id] = trajectories['traj'][traj_id].cpu().detach().numpy()
+                self.__probabilities[agent_id] = trajectories['probs'][traj_id].cpu().detach().numpy()
 
     def state2vector(self, agent_id, agent_state, first=False):
         x, y = agent_state.position
@@ -96,6 +99,7 @@ class CarlaPGP:
     def remove(self, agent_id):
         del self.__agent_history[agent_id]
         del self.__trajectories[agent_id]
+        del self.__probabilities[agent_id]
 
     @property
     def dataset(self):
@@ -108,6 +112,10 @@ class CarlaPGP:
     @property
     def trajectories(self):
         return self.__trajectories
+    
+    @property   
+    def probabilities(self):
+        return self.__probabilities
 
     @property
     def interval(self):
@@ -149,7 +157,7 @@ def transform_states_to_vehicle_frame(states: np.ndarray) -> np.ndarray:
 
 
 def heading_from_history(agent_history):
-    return np.arctan2(agent_history[-1][1] - agent_history[-2][1], agent_history[-1][0] - agent_history[-2][0])
+    return np.arctan2(agent_history[-1][0] - agent_history[-2][0], agent_history[-1][1] - agent_history[-2][1])
 
 def stack_dicts(dict_list):
     if not dict_list:

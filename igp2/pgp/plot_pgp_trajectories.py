@@ -35,8 +35,10 @@ def ego_to_world_batch(xs, ys, agent_pose):
     
     return x_world, y_world
 
+def heading_from_history(agent_history):
+    return np.arctan2(agent_history[-1][0] - agent_history[-2][0], agent_history[-1][1] - agent_history[-2][1])
 
-def plot_pgp_trajectories(trajectories, agent_history, odr_map, ax: plt.Axes = None, scenario_config=None, **kwargs) -> plt.Axes:
+def plot_pgp_trajectories(trajectories, probabilities, agent_history, odr_map, ax: plt.Axes = None, scenario_config=None, **kwargs) -> plt.Axes:
     """Plot OpenDRIVE map, optionally transformed to the ego frame."""
     colors = plt.get_cmap("tab10").colors
 
@@ -167,15 +169,14 @@ def plot_pgp_trajectories(trajectories, agent_history, odr_map, ax: plt.Axes = N
         ax.plot(x_history, y_history, color=base_color, marker='o')
 
         # Plot predicted agent futures
-        traj_preds = trajectories[agent_id]
-        for traj_pred in traj_preds:
-            x_pred = traj_pred[:, 0].cpu().detach().numpy()
-            y_pred = traj_pred[:, 1].cpu().detach().numpy()
+        traj_preds, prob_preds = trajectories[agent_id], probabilities[agent_id]
+        for traj_pred, prob_pred in zip(traj_preds, prob_preds):
+            x_pred = traj_pred[:, 1] - 1.7 # EMRAN don't know why they appear ahead of car?
+            y_pred = -traj_pred[:, 0]
             x_pred, y_pred = ego_to_world_batch(x_pred, y_pred, [agent_states[-1][0], agent_states[-1][1], \
                 np.arctan2(agent_states[-1][1] - agent_states[-2][1], agent_states[-1][0] - agent_states[-2][0])])
-            ax.plot(x_pred, y_pred, color=base_color, alpha=0.6, marker='x')
-
-        
+            ax.plot(x_pred, y_pred, color=base_color, alpha=prob_pred, marker='x')
+            # print(f"probability: {prob_pred}")        
 
     return ax
 
