@@ -169,8 +169,8 @@ def plot_pgp_trajectories(trajectories, agent_history, odr_map, ax: plt.Axes = N
         # Plot predicted agent futures
         traj_preds = trajectories[agent_id]
         for traj_pred in traj_preds:
-            y_pred = traj_pred[:, 0].cpu().detach().numpy()
-            x_pred = traj_pred[:, 1].cpu().detach().numpy()
+            x_pred = traj_pred[:, 0].cpu().detach().numpy()
+            y_pred = traj_pred[:, 1].cpu().detach().numpy()
             x_pred, y_pred = ego_to_world_batch(x_pred, y_pred, [agent_states[-1][0], agent_states[-1][1], \
                 np.arctan2(agent_states[-1][1] - agent_states[-2][1], agent_states[-1][0] - agent_states[-2][0])])
             ax.plot(x_pred, y_pred, color=base_color, alpha=0.6, marker='x')

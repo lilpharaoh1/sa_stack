@@ -419,9 +419,9 @@ class Dataset(Map):
 
         return s_next, edge_type
 
-    def get_surrounding_agent_representation(self, agent_id, agent_history):
+    def get_surrounding_agent_representation(self, ego_id, agent_history):
         # Discard poses outside map extent
-        vehicles = self.get_poses_inside_bounds(agent_history)
+        vehicles = [] # self.get_poses_inside_bounds(ego_id, agent_history) # EMRAN consider there's no other vehicles in the scene
         pedestrians = [] # self.get_poses_inside_bounds(agent_history)
 
         # Convert to fixed size arrays for batching
@@ -437,7 +437,7 @@ class Dataset(Map):
 
         return surrounding_agent_representation
 
-    def get_poses_inside_bounds(self, agent_history, ids=None):
+    def get_poses_inside_bounds(self, ego_id, agent_history, ids=None):
         updated_pose_set = []
         updated_ids = []
 
@@ -458,6 +458,37 @@ class Dataset(Map):
             return updated_pose_set, updated_ids
         else:
             return updated_pose_set
+
+    # def get_poses_inside_bounds(self, ego_id, agent_history, ids=None):
+    #     updated_pose_set = []
+    #     updated_ids = []
+
+    #     for m, (agent_id, agent_states_world) in enumerate(agent_history.items()):
+    #         if ego_id == agent_id:
+    #             continue
+    #         flag = False
+    #         x_world, y_world = np.array(agent_states_world)[:, :2].T # EMRAN so mindboggling inefficient why
+    #         x_ego, y_ego = self.world_to_ego_batch(x_world, y_world, [*agent_history[ego_id][-1][:2], self.heading_from_history(agent_history[ego_id])])
+    #         agent_states_ego = agent_states_world
+    #         print(np.array(agent_states_ego).shape, x_ego, y_ego)
+    #         for i in range(len(agent_states_ego)): # EMRAN once this is numpy I wont have to do this nonsense
+    #             agent_states_ego[i][0] = x_ego[i]
+    #             agent_states_ego[i][1] = y_ego[i]
+    #         for n, agent_state in enumerate(agent_states_ego):
+    #             pose = agent_state[:2]
+    #             if self.bounds[0] <= pose[0] <= self.bounds[1] and \
+    #                     self.bounds[2] <= pose[1] <= self.bounds[3]:
+    #                 flag = True
+
+    #         if flag:
+    #             updated_pose_set.append(list(agent_states_ego))
+    #             if ids is not None:
+    #                 updated_ids.append(ids[m])
+
+    #     if ids is not None:
+    #         return updated_pose_set, updated_ids
+    #     else:
+    #         return updated_pose_set
 
 
     @staticmethod
@@ -581,6 +612,21 @@ class Dataset(Map):
 
         return feat_array, mask_array
 
+    @staticmethod
+    def heading_from_history(agent_history):
+        return np.arctan2(agent_history[-1][1] - agent_history[-2][1], agent_history[-1][0] - agent_history[-2][0])
+
+    @staticmethod
+    def world_to_ego_batch(xs, ys, agent_pose):
+        cx, cy, heading = agent_pose
+        dx = np.array(xs) - cx
+        dy = np.array(ys) - cy
+        cos_h = np.cos(-heading)
+        sin_h = np.sin(-heading)
+        x_ego = cos_h * dx - sin_h * dy
+        y_ego = sin_h * dx + cos_h * dy
+        return x_ego, y_ego
+
     def reset_opendrive(self):
         self._Map__opendrive = self.__orig_opendrive
         super()._Map__process_header()
@@ -608,4 +654,6 @@ class Dataset(Map):
     @property
     def edges(self):
         return self.__graph["edges"]
+
+    
                 
