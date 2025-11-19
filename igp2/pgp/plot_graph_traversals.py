@@ -14,8 +14,10 @@ def world_to_ego_batch(xs, ys, agent_pose):
     cx, cy, heading = agent_pose
     dx = np.array(xs) - cx
     dy = np.array(ys) - cy
-    cos_h = np.cos(-heading)
-    sin_h = np.sin(-heading)
+    # So rotate by -(heading - π/2)
+    theta = -(heading - np.pi/2)
+    cos_h = np.cos(theta)
+    sin_h = np.sin(theta)
     x_ego = cos_h * dx - sin_h * dy
     y_ego = sin_h * dx + cos_h * dy
     return x_ego, y_ego
@@ -24,8 +26,10 @@ def ego_to_world_batch(xs, ys, agent_pose):
     cx, cy, heading = agent_pose
     
     # Rotation by +heading (ego → world)
-    cos_h = np.cos(heading)
-    sin_h = np.sin(heading)
+    # So rotate by -(heading - π/2)
+    theta = -(heading - np.pi/2)
+    cos_h = np.cos(theta)
+    sin_h = np.sin(theta)
     
     # Apply rotation
     x_rot = cos_h * np.array(xs) - sin_h * np.array(ys)
@@ -43,8 +47,7 @@ def heading_from_history(agent_history):
 def plot_graph_traversals(traversals, agent_history, dataset, odr_map, ax: plt.Axes = None, scenario_config=None, **kwargs):
     for agent_idx, (traversal, single_history) in enumerate(zip(traversals, agent_history.values())):
         dataset.generate_graph(agent_pose=[*single_history[-1][:2], heading_from_history(single_history)])
-        ax = plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax=ax, scenario_config=scenario_config, **kwargs)
-        plt.show()
+        plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax=ax, scenario_config=scenario_config, **kwargs)
     
 def plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax: plt.Axes = None, scenario_config=None, **kwargs) -> plt.Axes:
     """Plot OpenDRIVE map, optionally transformed to the ego frame."""
@@ -182,9 +185,11 @@ def plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax:
     idx_to_id = {idx: seg_id for idx, seg_id in enumerate(node_ids)}
     id_to_idx = {seg_id: idx for idx, seg_id in enumerate(node_ids)}
     N = len(node_ids)
+    print("in plot:", idx_to_id)
 
     max_visited = 0
     visited_nodes = {}
+    print(traversal)
     for sampled_traversal in traversal:
         for idx, node_idx in enumerate(sampled_traversal):
             if node_idx >= dataset.max_nodes:
@@ -196,46 +201,43 @@ def plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax:
                 visited_nodes[node_id] = 1
             max_visited = max(max_visited, visited_nodes[node_id])
 
-    for node_id, num_visited in visited_nodes.items():
-    # for node_id, node in dataset.nodes.items():
-        x, y = dataset.nodes[node_id]["pose"]
-        print(f"{node_id}: {num_visited} / {max_visited}")
-        ax.scatter(x, y, c=[num_visited/max_visited], cmap='inferno', marker='o', linewidths=2.0, vmin=0.0, vmax=1.0)
-        # ax.plot(x, y, "bo")
-        ax.text(x, y, id_to_idx[node_id], fontsize=13)
-        # ax.text(x, y, node_id, fontsize=13)
-
     for start_id, end_id in dataset.edges:
         if not start_id in visited_nodes or not end_id in visited_nodes:
             continue 
         s = dataset.nodes[start_id]["pose"]
         e = dataset.nodes[end_id]["pose"]
         dx, dy = e[0] - s[0], e[1] - s[1]
-        ax.arrow(s[0], s[1], dx, dy, head_width=0.5, width=0.25, length_includes_head=True) 
+        ax.arrow(s[0], s[1], dx, dy, color='k', head_width=0.2, width=0.1, length_includes_head=True) 
+
+    for node_id, num_visited in visited_nodes.items():
+    # for node_id, node in dataset.nodes.items():
+        x, y = dataset.nodes[node_id]["pose"]
+        print(f"{node_id}: {num_visited} / {max_visited}")
+        ax.scatter(x, y, c=[num_visited/max_visited], cmap='inferno', marker='o', linewidths=2.0, vmin=0.0, vmax=1.0)
+        ax.text(x, y, id_to_idx[node_id], fontsize=13)
 
     # # --- Draw ego box ---
-    # if dataset.agent and dataset.bounds and kwargs.get("agent", False):
-    #     cx, cy, heading = dataset.agent
-    #     left, right, back, front = dataset.bounds
-    #     corners_local = np.array([[front, left], [front, right], [back, right], [back, left]])
-    #     # Plot as polygon
-    #     poly = Polygon(corners_local, closed=True, alpha=0.2)
-    #     ax.add_patch(poly)
+    # cx, cy, heading = single_history[-1][0], single_history[-1][1], heading_from_history(single_history)
+    # left, right, back, front = dataset.bounds
+    # corners_local = np.array([[front, left], [front, right], [back, right], [back, left]])
+    # # Plot as polygon
+    # poly = Polygon(corners_local, closed=True, alpha=0.2)
+    # ax.add_patch(poly)
 
-    #     # Vehicle dimensions (in meters)
-    #     width = 2.0   # side-to-side
-    #     length = 4.5  # front-to-back
+    # # Vehicle dimensions (in meters)
+    # width = 2.0   # side-to-side
+    # length = 4.5  # front-to-back
 
-    #     # Draw rectangle centered at origin
-    #     rect = Rectangle((-length/2, -width/2), length, width,
-    #                     edgecolor='red', facecolor='none', linestyle='--', linewidth=2)
-    #     ax.add_patch(rect)
+    # # Draw rectangle centered at origin
+    # rect = Rectangle((-length/2, -width/2), length, width,
+    #                 edgecolor='red', facecolor='none', linestyle='--', linewidth=2)
+    # ax.add_patch(rect)
 
-    #     # Draw arrow pointing forward (right, in ego frame)
-    #     arrow = FancyArrow(0, 0, length/2, 0,
-    #                     width=0.5, head_width=1.0, head_length=1.0,
-    #                     color='RED')
-    #     ax.add_patch(arrow)
+    # # Draw arrow pointing forward (right, in ego frame)
+    # arrow = FancyArrow(0, 0, length/2, 0,
+    #                 width=0.5, head_width=1.0, head_length=1.0,
+    #                 color='RED')
+    # ax.add_patch(arrow)
 
     return ax
 

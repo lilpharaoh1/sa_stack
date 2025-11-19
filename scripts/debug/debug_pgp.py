@@ -5,6 +5,7 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 import logging
+import torch
 
 import sys
 import os
@@ -20,6 +21,7 @@ from shapely.geometry import Polygon
 from datetime import datetime
 from typing import List, Tuple, Dict
 from igp2.pgp.plot_pgp_trajectories import plot_pgp_trajectories
+from igp2.pgp.plot_graph_traversals import plot_graph_traversals
 
 
 logger = logging.getLogger(__name__)
@@ -297,20 +299,32 @@ if __name__ == '__main__':
     observations = []
     actions = []
     colors = ['r', 'g', 'b', 'y', 'k']
+    if os.path.exists("sampled_traversals.pt"):
+        os.remove("sampled_traversals.pt")
     for t in range(500):
         obs, acts = carla_sim.step()
         observations.append(obs)
         actions.append(acts)
 
+        if t % carla_sim.pgp.interval != 0:
+            continue
+
         agent_history = carla_sim.pgp.agent_history
         trajectories = carla_sim.pgp.trajectories
-        
-        if trajectories is None or t % carla_sim.pgp.interval != 0:
-            continue
-        
-        ax = plot_pgp_trajectories(trajectories, agent_history, carla_sim.scenario_map, markings=True)
-        plt.show()
+        probabilities = carla_sim.pgp.probabilities
+        try:
+            traversals = torch.load("sampled_traversals.pt").cpu().numpy()
+        except Exception as e:
+            print(e)
+            traversals = None
 
+
+        if not trajectories is None:
+            plot_pgp_trajectories(trajectories, probabilities, agent_history, carla_sim.scenario_map, markings=True)
+        if not traversals is None:
+            plot_graph_traversals(traversals, carla_sim.pgp.agent_history, carla_sim.pgp.dataset, carla_sim.scenario_map, markings=True)
+
+        plt.show()
 
         # logger.info(f'Step {t}')
         # logger.info('Vehicle actions were:')

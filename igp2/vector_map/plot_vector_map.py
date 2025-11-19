@@ -15,8 +15,9 @@ def world_to_ego_batch(xs, ys, agent_pose):
     cx, cy, heading = agent_pose
     dx = np.array(xs) - cx
     dy = np.array(ys) - cy
-    cos_h = np.cos(-heading)
-    sin_h = np.sin(-heading)
+    theta = -(heading - np.pi/2)
+    cos_h = np.cos(theta)
+    sin_h = np.sin(theta)
     x_ego = cos_h * dx - sin_h * dy
     y_ego = sin_h * dx + cos_h * dy
     return x_ego, y_ego
@@ -155,7 +156,7 @@ def plot_vector_map(dataset, odr_map, ax: plt.Axes = None, scenario_config=None,
     for node_id, node in dataset.nodes.items():
         x, y = node["pose"]
         ax.plot(x, y, "bo")
-        ax.text(x, y, node_id, fontsize=8)
+        ax.text(x, y, node_id, fontsize=20)
 
     for start_id, end_id in dataset.edges:
         s = dataset.nodes[start_id]["pose"]
@@ -190,42 +191,13 @@ def plot_vector_map(dataset, odr_map, ax: plt.Axes = None, scenario_config=None,
     return ax
 
 
-    
-    if kwargs.get("agent", False):
-        if dataset.agent and dataset.bounds:
-            cx, cy, heading = dataset.agent
-            left, right, back, front = dataset.bounds
-
-            # Define corners in local vehicle frame (x forward, y left)
-            corners_local = np.array([
-                [front,  left],     # front-left
-                [front,  right],    # front-right
-                [back,   right],    # back-right
-                [back,   left],     # back-left
-            ])
-
-            # Rotation matrix (local → world)
-            rot = np.array([
-                [np.cos(heading), -np.sin(heading)],
-                [np.sin(heading),  np.cos(heading)],
-            ])
-
-            # Rotate and translate
-            corners_world = (rot @ corners_local.T).T + np.array([cx, cy])
-
-            # Plot as polygon
-            poly = Polygon(corners_world, closed=True, alpha=0.2)
-            ax.add_patch(poly)
-            ax.plot(cx, cy, 'ro')
-
-
 if __name__ == '__main__':
     xodr_file = f"scenarios/maps/scenario1.xodr"
     odr_map = Map.parse_from_opendrive(xodr_file)
     dataset = Dataset.parse_from_opendrive(xodr_file)
     # dataset.generate_graph(agent_pose=[90, -75, np.pi / 2])
-    dataset.generate_graph(agent_pose=[35.0, -1.8, np.pi / 2])
-    # dataset.generate_graph(agent_pose=[64, 0, np.pi/2])
+    # dataset.generate_graph(agent_pose=[35.0, -1.8, np.pi / 2])
+    dataset.generate_graph(agent_pose=[52.0, -42.5, np.pi / 2])
     # plot_map(odr_map, markings=True, midline=True)
     plot_vector_map(dataset, odr_map, markings=True, agent=True)
     

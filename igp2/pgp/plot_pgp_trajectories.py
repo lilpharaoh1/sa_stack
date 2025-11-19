@@ -12,8 +12,9 @@ def world_to_ego_batch(xs, ys, agent_pose):
     cx, cy, heading = agent_pose
     dx = np.array(xs) - cx
     dy = np.array(ys) - cy
-    cos_h = np.cos(-heading)
-    sin_h = np.sin(-heading)
+    theta = -(heading - np.pi/2)
+    cos_h = np.cos(theta)
+    sin_h = np.sin(theta)
     x_ego = cos_h * dx - sin_h * dy
     y_ego = sin_h * dx + cos_h * dy
     return x_ego, y_ego
@@ -171,10 +172,12 @@ def plot_pgp_trajectories(trajectories, probabilities, agent_history, odr_map, a
         # Plot predicted agent futures
         traj_preds, prob_preds = trajectories[agent_id], probabilities[agent_id]
         for traj_pred, prob_pred in zip(traj_preds, prob_preds):
-            x_pred = traj_pred[:, 1] - 1.7 # EMRAN don't know why they appear ahead of car?
+            x_pred = traj_pred[:, 1] - 2.0 # EMRAN don't know why they appear ahead of car?
             y_pred = -traj_pred[:, 0]
             x_pred, y_pred = ego_to_world_batch(x_pred, y_pred, [agent_states[-1][0], agent_states[-1][1], \
                 np.arctan2(agent_states[-1][1] - agent_states[-2][1], agent_states[-1][0] - agent_states[-2][0])])
+            # x_pred = traj_pred[:, 0]
+            # y_pred = traj_pred[:, 1]
             ax.plot(x_pred, y_pred, color=base_color, alpha=prob_pred, marker='x')
             # print(f"probability: {prob_pred}")        
 

@@ -12,6 +12,7 @@ from igp2.opendrive.elements.road_lanes import LeftLanes, CenterLanes, RightLane
 from igp2.opendrive.map import Map
 from igp2.vector_map import Dataset
 from igp2.pgp.train_eval.initialization import initialize_prediction_model
+from igp2.vector_map.plot_vector_map import plot_vector_map
 
 # Initialize device:
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -62,6 +63,9 @@ class CarlaPGP:
                 self.__dataset.generate_graph( \
                     agent_pose=[*agent_state[:2], heading_from_history(agent_history)])
 
+                print(f"agent_pose used in generate_graph; {[*agent_state[:2], heading_from_history(agent_history)]}")
+                # plot_vector_map(self.__dataset, self.__dataset, markings=True, agent=True)
+
                 target_agent_representation = transform_states_to_vehicle_frame(np.array(list(agent_history)))
                 map_representation = self.__dataset.get_map_representation()
                 surrounding_agent_representation = self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # This could be done in a batch
@@ -92,7 +96,18 @@ class CarlaPGP:
         x, y = agent_state.position
         speed = np.linalg.norm(agent_state.velocity) # Might need to be scalar # Actually I think so
         acceleration = np.linalg.norm(agent_state.acceleration) # Might need to be scalar # Actually I think so
-        yaw_rate = 0.0 if first else agent_state.heading - self.__agent_history[agent_id][-1][4]
+
+        if first:
+            yaw_rate = 0.0
+        else:
+            prev_x, prev_y = self.__agent_history[agent_id][-1][:2]
+            delta_heading = np.arctan2(y - prev_y, x - prev_x)
+            
+            # Compute delta (unwrap needed only on arrays — we use angle diff trick instead)
+            yaw_rate = -(agent_state.heading - delta_heading + np.pi) % (2 * np.pi) - np.pi  # angle diff
+            yaw_rate *= self.fps
+
+        print(f"state {agent_id}:", agent_state.velocity)# [x, y, speed, acceleration, yaw_rate])
 
         return [x, y, speed, acceleration, yaw_rate]
 
@@ -124,7 +139,8 @@ class CarlaPGP:
 def transform_states_to_vehicle_frame(states: np.ndarray) -> np.ndarray:
     """
     Transforms a sequence of vehicle states into the ego (vehicle) frame,
-    where the most recent state (last in the array) is at the origin, facing +x.
+    where the most recent state (last in the array) is at the origin, facing +y (forward),
+    and +x points to the right of the vehicle.
 
     Args:
         states (np.ndarray): Array of shape (T, 5) where each row is
@@ -134,21 +150,28 @@ def transform_states_to_vehicle_frame(states: np.ndarray) -> np.ndarray:
         np.ndarray: Transformed states of shape (T, 5) in ego frame.
     """
     assert states.shape[1] == 5, "Each state must have 5 elements: [x, y, speed, acceleration, yaw_rate]"
-    
-    # Extract the reference state (latest state)
-    x0, y0, _, _, yaw0 = states[-1]
 
-    # Shift positions
+    # Get last two positions to estimate heading (in world frame)
+    x0, y0 = states[-1, 0], states[-1, 1]
+    x1, y1 = states[-2, 0], states[-2, 1]
+    
+    # Estimate heading angle (yaw) in world frame
+    heading = np.arctan2(y0 - y1, x0 - x1)  # in radians
+
+    # Translate positions relative to most recent position
     dx = states[:, 0] - x0
     dy = states[:, 1] - y0
 
-    # Rotate positions by -yaw0 to align with ego heading
-    cos_yaw = np.cos(-yaw0)
-    sin_yaw = np.sin(-yaw0)
-    x_ego = cos_yaw * dx - sin_yaw * dy
-    y_ego = sin_yaw * dx + cos_yaw * dy
+    # Rotate positions into ego frame (+y forward, +x right)
+    # So rotate by -(heading - π/2)
+    theta = -(heading - np.pi / 2)
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
 
-    # Copy other values unchanged
+    x_ego = cos_theta * dx - sin_theta * dy
+    y_ego = sin_theta * dx + cos_theta * dy
+
+    # Copy rest of features (optional: you can also rotate velocity vector if needed)
     transformed_states = states.copy()
     transformed_states[:, 0] = x_ego
     transformed_states[:, 1] = y_ego
@@ -156,8 +179,9 @@ def transform_states_to_vehicle_frame(states: np.ndarray) -> np.ndarray:
     return transformed_states
 
 
+
 def heading_from_history(agent_history):
-    return np.arctan2(agent_history[-1][0] - agent_history[-2][0], agent_history[-1][1] - agent_history[-2][1])
+    return np.arctan2(agent_history[-1][1] - agent_history[-2][1], agent_history[-1][0] - agent_history[-2][0])
 
 def stack_dicts(dict_list):
     if not dict_list:

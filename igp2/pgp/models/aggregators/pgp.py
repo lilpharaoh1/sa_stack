@@ -82,6 +82,7 @@ class PGP(PredictionAggregator):
             init_node = encodings['init_node']
             sampled_traversals = self.sample_policy(torch.exp(pi), s_next, init_node)
 
+        # EMRAN Saving for visualisation, make better later
         torch.save(sampled_traversals, "sampled_traversals.pt")
 
         # Selectively aggregate context along traversed paths

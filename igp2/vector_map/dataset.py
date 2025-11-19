@@ -9,6 +9,7 @@ from igp2.opendrive.elements.opendrive import OpenDrive
 from igp2.opendrive.elements.road_lanes import LeftLanes, CenterLanes, RightLanes
 from igp2.opendrive.elements.geometry import normalise_angle
 from igp2.opendrive.map import Map
+from igp2.pgp.plot_map_representation import plot_map_representation
 
 
 logger = logging.getLogger(__name__)
@@ -131,34 +132,29 @@ class Dataset(Map):
 
         return x_new, y_new, yaw
 
-    def world_to_ego_frame(self, x: np.ndarray, y: np.ndarray, yaw: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Transform (x, y, yaw) world-frame coordinates to ego-frame coordinates.
-
-        Args:
-            x (np.ndarray): World x coordinates.
-            y (np.ndarray): World y coordinates.
-            yaw (np.ndarray): World yaw angles (in radians).
-
-        Returns:
-            Tuple of (x_ego, y_ego, yaw_ego)
-        """
-        assert self.agent is not None, "Ego pose (self.agent) must be set before calling this method."
+    def world_to_ego_frame(self, x: np.ndarray, y: np.ndarray, yaw: np.ndarray):
+        assert self.agent is not None
 
         cx, cy, chead = self.agent
-        # Translate to ego position
+
+        # Translate
         dx = x - cx
         dy = y - cy
 
-        # Rotate into ego frame
-        cos_h, sin_h = np.cos(-chead), np.sin(-chead)
-        x_ego = cos_h * dx - sin_h * dy
-        y_ego = sin_h * dx + cos_h * dy
+        # Rotate world → ego, but ego frame has y-forward, x-right
+        # So rotate by -(heading - π/2)
+        theta = -(chead - np.pi/2)
+        cos_h = np.cos(theta)
+        sin_h = np.sin(theta)
 
-        # Adjust yaw to ego frame
-        yaw_ego = normalise_angle(yaw - chead)
+        x_ego = cos_h * dx - sin_h * dy   # right
+        y_ego = sin_h * dx + cos_h * dy   # forward
+
+        # Yaw: convert to new frame (also rotated by - (heading - π/2))
+        yaw_ego = normalise_angle(yaw - (chead - np.pi/2))
 
         return x_ego, y_ego, yaw_ego
+
 
     def get_edges(self, road, lanes, lane_ids):
         edges = []
@@ -189,30 +185,52 @@ class Dataset(Map):
 
     def add_lane_change_edges(self, nodes: Dict[str, dict]):
         edges = []
-        for node_id in nodes:
-            road_id, lane_id, seg_id = map(int, node_id.split(":"))
+        for node_id, node_data in nodes.items():
+            road_id, lane_id, seg_id = node_id.split(":")
+            road_id = int(road_id)
+            lane_id = int(lane_id)
+            seg_id = int(seg_id)
+
+            # Only check adjacent lanes (±1) in same direction
             for delta_lane in [-1, 1]:
-                if np.sign(lane_id + delta_lane) != np.sign(lane_id):
+                neighbor_lane_id = lane_id + delta_lane
+
+                # Check if direction matches (same sign)
+                if np.sign(neighbor_lane_id) != np.sign(lane_id):
                     continue
-                neighbor_id = f"{road_id}:{lane_id + delta_lane}:{seg_id + 1}"
-                if neighbor_id in nodes:
-                    edges.append((node_id, neighbor_id))
+
+                # Check segment ahead and same segment
+                for delta_seg in [1]: # [0, 1]: # EMRAN Whether side by side proximal edges should exist
+                    neighbor_seg_id = seg_id + delta_seg
+                    neighbor_node_id = f"{road_id}:{neighbor_lane_id}:{neighbor_seg_id}"
+
+                    if neighbor_node_id in nodes:
+                        edges.append((node_id, neighbor_node_id))
         return edges
 
     def filter_opendrive_around_point(self, agent: Tuple[float, float, float]):
         cx, cy, heading = agent
         left, right, back, front = self.bounds
 
-        # --- Build ROI polygon ---
+        # Build ROI polygon in new ego frame (y forward, x right)
+        # corners in ego frame (x right, y forward)
         corners_local = np.array([
-            [front, left], [front, right],
-            [back, right], [back, left],
+            [left,  front],
+            [right, front],
+            [right, back],
+            [left,  back],
         ])
+
+        # world rotation = heading - π/2
+        theta = heading - np.pi/2
         rot = np.array([
-            [np.cos(heading), -np.sin(heading)],
-            [np.sin(heading),  np.cos(heading)],
+            [np.cos(theta), -np.sin(theta)],
+            [np.sin(theta),  np.cos(theta)],
         ])
+
+        # transform to world coords
         corners_world = (rot @ corners_local.T).T + np.array([cx, cy])
+
         roi_poly = Polygon(corners_world)
 
         filtered_roads, clipped_midlines = [], {}
@@ -394,6 +412,8 @@ class Dataset(Map):
             'edge_type': edge_type
         }
 
+        plot_map_representation(map_representation, self.nodes, self.edges)
+
         return map_representation
 
     def get_edge_lookup(self):
@@ -401,6 +421,8 @@ class Dataset(Map):
         id_to_idx = {seg_id: idx for idx, seg_id in enumerate(node_ids)}
         idx_to_id = {idx: seg_id for idx, seg_id in enumerate(node_ids)}
         N = len(node_ids)
+        
+        print("in dataset:", idx_to_id)
 
         s_next = np.zeros((self.max_nodes, self.max_nodes + 1))
         edge_type = np.zeros((self.max_nodes, self.max_nodes + 1), dtype=int)
@@ -411,11 +433,14 @@ class Dataset(Map):
             end_road, end_lane, end_seg = end.split(":")
 
             nbr_idx = self.first_zero_index(s_next[id_to_idx[start]])
-            s_next[id_to_idx[start], nbr_idx] = id_to_idx[end]
-            edge_type[id_to_idx[start], nbr_idx] = 2 if start_road == end_road and start_lane != end_lane else 1
+            if start in id_to_idx and end in id_to_idx:
+                s_next[id_to_idx[start], nbr_idx] = id_to_idx[end]
+                edge_type[id_to_idx[start], nbr_idx] = 2 \
+                    if start_road == end_road and start_lane != end_lane and np.sign(int(start_lane)) == np.sign(int(end_lane)) \
+                    else 1
 
-        s_next[:len(self.edges), -1] = np.arange(len(self.edges)) + self.max_nodes
-        edge_type[:len(self.edges), -1] = 3
+        s_next[:len(self.nodes), -1] = np.arange(len(self.nodes)) + self.max_nodes
+        edge_type[:len(self.nodes), -1] = 3
 
         return s_next, edge_type
 
@@ -615,17 +640,6 @@ class Dataset(Map):
     @staticmethod
     def heading_from_history(agent_history):
         return np.arctan2(agent_history[-1][1] - agent_history[-2][1], agent_history[-1][0] - agent_history[-2][0])
-
-    @staticmethod
-    def world_to_ego_batch(xs, ys, agent_pose):
-        cx, cy, heading = agent_pose
-        dx = np.array(xs) - cx
-        dy = np.array(ys) - cy
-        cos_h = np.cos(-heading)
-        sin_h = np.sin(-heading)
-        x_ego = cos_h * dx - sin_h * dy
-        y_ego = sin_h * dx + cos_h * dy
-        return x_ego, y_ego
 
     def reset_opendrive(self):
         self._Map__opendrive = self.__orig_opendrive
