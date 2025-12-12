@@ -343,11 +343,11 @@ def parse_opendrive_road_lane_section(new_road, lane_section_id, lane_section, p
                         lane.find("link").find("successor").get("id")
                     )
 
-                # RoadRunner does not take lane direction into account when outputting lane links so need to flip
-                #  lane IDs for left-lanes
-                if program == "RoadRunner" and new_lane.id > 0:
-                    new_lane.link.predecessor_id, new_lane.link.successor_id = \
-                        new_lane.link.successor_id, new_lane.link.predecessor_id
+                # # RoadRunner does not take lane direction into account when outputting lane links so need to flip
+                # #  lane IDs for left-lanes
+                # if program == "RoadRunner" and new_lane.id > 0:
+                #     new_lane.link.predecessor_id, new_lane.link.successor_id = \
+                #         new_lane.link.successor_id, new_lane.link.predecessor_id
 
             # Width
             for widthIdx, width in enumerate(lane.findall("width")):
@@ -604,24 +604,42 @@ def load_road_lane_links(road):
     next_contact_point = road.link.successor.contact_point if road.link.successor else None
     num_sections = len(road.lanes.lane_sections)
 
+    junction_of_road = road.junction if isinstance(road.junction, Junction) else None
+
     for lane_section_idx, lane_section in enumerate(road.lanes.lane_sections):
-        for lane_idx, lane in enumerate(lane_section.right_lanes):
-            if lane.link.predecessor_id is not None:
-                previous_lane_section = None
-                if lane_section_idx == 0 and previous_element is not None:
-                    if previous_contact_point == "start":
-                        previous_lane_section = previous_element.lanes.lane_sections[0]
-                    elif previous_contact_point == "end":
-                        previous_lane_section = previous_element.lanes.lane_sections[-1]
-                elif lane_section_idx > 0:
-                    previous_lane_section = road.lanes.lane_sections[lane_section_idx - 1]
 
-                if previous_lane_section is not None:
-                    lane.link.predecessor = [previous_lane_section.get_lane(lane.link.predecessor_id)]
-                if lane.link.predecessor is None:
-                    logger.debug(f"Road {road.id} - Lane {lane.id}: Predecessor {lane.link.predecessor_id} not found")
+        # ---------- RIGHT LANES ----------
+        for lane in lane_section.right_lanes:
 
-            if lane.link.successor_id is not None:
+            # CASE A: road is a CONNECTING ROAD inside a junction
+            if junction_of_road is not None:
+                # We ignore predecessor_id/successor_id and build from junction
+                lane.link.predecessor = _get_predecessor_lanes_via_junction(
+                    road, lane, junction_of_road
+                )
+                # Successor might be handled by normal road-link logic (if this connecting road
+                # leads to a non-junction road), so we still keep the successor logic below.
+            else:
+                # Normal predecessor handling (non-junction road)
+                if lane.link.predecessor_id is not None:
+                    previous_lane_section = None
+                    if lane_section_idx == 0 and previous_element is not None:
+                        if previous_contact_point == "start":
+                            previous_lane_section = previous_element.lanes.lane_sections[0]
+                        elif previous_contact_point == "end":
+                            previous_lane_section = previous_element.lanes.lane_sections[-1]
+                    elif lane_section_idx > 0:
+                        previous_lane_section = road.lanes.lane_sections[lane_section_idx - 1]
+
+                    if previous_lane_section is not None:
+                        lane.link.predecessor = [previous_lane_section.get_lane(lane.link.predecessor_id)]
+                    if lane.link.predecessor is None:
+                        logger.debug(
+                            f"Road {road.id} - Lane {lane.id}: Predecessor {lane.link.predecessor_id} not found"
+                        )
+
+            # Successor logic for RIGHT lanes
+            if lane.link.successor_id is not None and junction_of_road is None:
                 next_lane_section = None
                 if lane_section_idx == num_sections - 1 and next_element is not None:
                     if next_contact_point == "start":
@@ -634,31 +652,44 @@ def load_road_lane_links(road):
                 if next_lane_section is not None:
                     lane.link.successor = [next_lane_section.get_lane(lane.link.successor_id)]
                 if lane.link.successor is None:
-                    logger.debug(f"Road {road.id} - Lane {lane.id}: Successor {lane.link.successor_id} not found")
-            elif next_element is not None and isinstance(next_element, Junction):
-                lane.link.successor = next_element.get_all_connecting_lanes(lane)
+                    logger.debug(
+                        f"Road {road.id} - Lane {lane.id}: Successor {lane.link.successor_id} not found"
+                    )
 
+            # CASE B: this road is an INCOMING ROAD and its successor is a Junction
+            elif next_element is not None and isinstance(next_element, Junction) and junction_of_road is None:
+                lane.link.successor = _get_successor_lanes_via_junction(road, lane, next_element)
+
+        # swap previous/next for left side as you already do
         previous_element, next_element = next_element, previous_element
         previous_contact_point, next_contact_point = next_contact_point, previous_contact_point
 
-        for lane_idx, lane in enumerate(lane_section.left_lanes):
-            if lane.link.predecessor_id is not None:
-                previous_lane_section = None
-                if lane_section_idx == num_sections - 1 and previous_element is not None:
-                    if previous_contact_point == "start":
-                        previous_lane_section = previous_element.lanes.lane_sections[0]
-                    elif previous_contact_point == "end":
-                        previous_lane_section = previous_element.lanes.lane_sections[-1]
-                elif lane_section_idx < num_sections - 1:
-                    previous_lane_section = road.lanes.lane_sections[lane_section_idx + 1]
+        # ---------- LEFT LANES ----------
+        for lane in lane_section.left_lanes:
 
-                if previous_lane_section is not None:
-                    lane.link.predecessor = [previous_lane_section.get_lane(lane.link.predecessor_id)]
-                if lane.link.predecessor is None:
-                    logger.debug(f"Road {road.id} - Lane {lane.id}: Predecessor {lane.link.predecessor_id} not found")
+            if junction_of_road is not None:
+                lane.link.predecessor = _get_predecessor_lanes_via_junction(
+                    road, lane, junction_of_road
+                )
+            else:
+                if lane.link.predecessor_id is not None:
+                    previous_lane_section = None
+                    if lane_section_idx == num_sections - 1 and previous_element is not None:
+                        if previous_contact_point == "start":
+                            previous_lane_section = previous_element.lanes.lane_sections[0]
+                        elif previous_contact_point == "end":
+                            previous_lane_section = previous_element.lanes.lane_sections[-1]
+                    elif lane_section_idx < num_sections - 1:
+                        previous_lane_section = road.lanes.lane_sections[lane_section_idx + 1]
 
-            # Find successor Lanes
-            if lane.link.successor_id is not None:
+                    if previous_lane_section is not None:
+                        lane.link.predecessor = [previous_lane_section.get_lane(lane.link.predecessor_id)]
+                    if lane.link.predecessor is None:
+                        logger.debug(
+                            f"Road {road.id} - Lane {lane.id}: Predecessor {lane.link.predecessor_id} not found"
+                        )
+
+            if lane.link.successor_id is not None and junction_of_road is None:
                 next_lane_section = None
                 if lane_section_idx == 0 and next_element is not None:
                     if next_contact_point == "start":
@@ -671,9 +702,72 @@ def load_road_lane_links(road):
                 if next_lane_section is not None:
                     lane.link.successor = [next_lane_section.get_lane(lane.link.successor_id)]
                 if lane.link.successor is None:
-                    logger.debug(f"Road {road.id} - Lane {lane.id}: Successor {lane.link.successor_id} not found")
-            elif next_element is not None and isinstance(next_element, Junction):
-                lane.link.successor = next_element.get_all_connecting_lanes(lane)
+                    logger.debug(
+                        f"Road {road.id} - Lane {lane.id}: Successor {lane.link.successor_id} not found"
+                    )
+
+            elif next_element is not None and isinstance(next_element, Junction) and junction_of_road is None:
+                lane.link.successor = _get_successor_lanes_via_junction(road, lane, next_element)
 
         previous_element, next_element = next_element, previous_element
         previous_contact_point, next_contact_point = next_contact_point, previous_contact_point
+
+
+def _get_successor_lanes_via_junction(road, lane, junction):
+    """
+    For an INCOMING road lane, find all successor lanes in connecting roads
+    using the <laneLink from="..", to=".."> entries in the junction.
+    """
+    succ_lanes = []
+
+    for conn in junction.connections:
+        # Only consider connections where this road is the incoming road
+        if conn.incoming_road is not road:
+            continue
+
+        # Choose lane section on the connecting road according to contactPoint
+        if conn.contact_point == "start":
+            lane_section = conn.connecting_road.lanes.lane_sections[0]
+        elif conn.contact_point == "end":
+            lane_section = conn.connecting_road.lanes.lane_sections[-1]
+        else:
+            continue
+
+        for ll in conn.lane_links:
+            # from_id refers to lane on the incoming road (this road)
+            if int(ll.from_id) == int(lane.id):
+                to_lane = lane_section.get_lane(ll.to_id)
+                if to_lane is not None:
+                    succ_lanes.append(to_lane)
+
+    return succ_lanes if succ_lanes else None
+
+
+def _get_predecessor_lanes_via_junction(road, lane, junction):
+    """
+    For a CONNECTING road lane, find all predecessor lanes in incoming roads
+    using the <laneLink from="..", to=".."> entries in the junction.
+    """
+    pred_lanes = []
+
+    for conn in junction.connections:
+        # Only consider connections where this road is the connecting road
+        if conn.connecting_road is not road:
+            continue
+
+        # Choose lane section on the incoming road according to contactPoint
+        if conn.contact_point == "start":
+            lane_section = conn.incoming_road.lanes.lane_sections[0]
+        elif conn.contact_point == "end":
+            lane_section = conn.incoming_road.lanes.lane_sections[-1]
+        else:
+            continue
+
+        for ll in conn.lane_links:
+            # to_id refers to lane on the connecting road (this road)
+            if int(ll.to_id) == int(lane.id):
+                from_lane = lane_section.get_lane(ll.from_id)
+                if from_lane is not None:
+                    pred_lanes.append(from_lane)
+
+    return pred_lanes if pred_lanes else None
