@@ -820,24 +820,16 @@ class Exit(MacroAction):
         if junction:
             if not current_lane.link.predecessor is None and len(current_lane.link.predecessor) == 1:
                 connecting_lanes = [suc for suc in current_lane.link.predecessor[0].link.successor
-                                    if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR]# \
-                                    # if not current_lane.link.predecessor[0].link.successor is None else [] #\
-                                    # [suc for suc in scenario_map.lanes_at(state.position, max_distance=1.5)]
-                # if current_lane.link.predecessor[0].link.successor is None:
-                #     logger.debug(f"\n\n\n\n\n\n\n\n TRIGGERED")
-                #     logger.debug(f"current_lane.link.successor, connecting_lanes = {current_lane.link.successor, connecting_lanes}")
+                                    if suc.boundary.distance(Point(state.position)) < Map.ROAD_PRECISION_ERROR]
             else:
                 raise RuntimeError(f"Junction road {current_lane.parent_road.id} had "
                 f"zero or more than one predecessor road.")
 
-        # if connecting_lanes is None or len(connecting_lanes) < 1:
-        #     logger.debug(f"Connecting lanes is empty) current_lane = {current_lane}, current_lane.link.successor = {current_lane.link.successor}, predecessor_successor = {current_lane.link.predecessor[0].link.successor}, connecting_lanes = {connecting_lanes}")
-        #     logger.debug(f"current_lane.link.predecessor, pred, succs: {current_lane.link.predecessor, current_lane.link.predecessor[0].link.predecessor, current_lane.link.predecessor[0].link.successor}")
-        #     logger.debug(f"succesor distances: {[suc.boundary.distance(Point(state.position)) for suc in current_lane.link.predecessor[0].link.successor]}")
+        # Necessary for scenarios and goals at end of a road with no connection (ex scenario1)
         if connecting_lanes is None or len(connecting_lanes) == 0:
             connecting_lanes = [current_lane]
+
         for connecting_lane in connecting_lanes:
-            # logger.debug(f"not scenario_map.road_in_roundabout(connecting_lane.parent_road), len(connecting_lanes) == 1 = {not scenario_map.road_in_roundabout(connecting_lane.parent_road), len(connecting_lanes) == 1}")
             if not scenario_map.road_in_roundabout(connecting_lane.parent_road) or len(connecting_lanes) == 1:
                 targets.append(np.array(connecting_lane.midline.coords[-1]))
 
