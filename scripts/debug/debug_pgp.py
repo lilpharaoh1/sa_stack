@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import List, Tuple, Dict
 from igp2.pgp.plot_pgp_trajectories import plot_pgp_trajectories
 from igp2.pgp.plot_graph_traversals import plot_graph_traversals
+from igp2.pgp.plot_agent_histories import plot_agent_histories
 
 
 logger = logging.getLogger(__name__)
@@ -221,7 +222,7 @@ if __name__ == '__main__':
     max_speed = 20.0 # args.max_speed
     ego_id = 0
     n_simulations = 2 # args.n_sim
-    fps = 20 # args.fps  # Simulator frequency
+    fps = 15 # args.fps  # Simulator frequency
     T = 2 # args.period  # MCTS update period
 
     random.seed(seed)
@@ -299,30 +300,26 @@ if __name__ == '__main__':
     observations = []
     actions = []
     colors = ['r', 'g', 'b', 'y', 'k']
-    if os.path.exists("sampled_traversals.pt"):
-        os.remove("sampled_traversals.pt")
+
     for t in range(500):
         obs, acts = carla_sim.step()
         observations.append(obs)
         actions.append(acts)
 
-        if t % carla_sim.pgp.interval != 0:
+        if carla_sim.timestep % carla_sim.pgp.interval != 0:
             continue
 
         agent_history = carla_sim.pgp.agent_history
         trajectories = carla_sim.pgp.trajectories
         probabilities = carla_sim.pgp.probabilities
-        try:
-            traversals = torch.load("sampled_traversals.pt").cpu().numpy()
-        except Exception as e:
-            print(e)
-            traversals = None
+        traversals = carla_sim.pgp.traversals
 
-
+        if not agent_history is None:
+            plot_agent_histories(agent_history, carla_sim.scenario_map, markings=True)
         if not trajectories is None:
             plot_pgp_trajectories(trajectories, probabilities, agent_history, carla_sim.scenario_map, markings=True)
         if not traversals is None:
-            plot_graph_traversals(traversals, carla_sim.pgp.agent_history, carla_sim.pgp.dataset, carla_sim.scenario_map, markings=True)
+            plot_graph_traversals(traversals, agent_history, carla_sim.pgp.dataset, carla_sim.scenario_map, markings=True)
 
         plt.show()
 

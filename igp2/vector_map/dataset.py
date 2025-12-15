@@ -56,27 +56,26 @@ class Dataset(Map):
     def __process_graph(self):
         nodes, edges = {}, []
 
-
         for road_id, road in self.roads.items():
             for lane_section in road.lanes.lane_sections:
-                # Process nodes
-                lanes = [lane for lane in lane_section.all_lanes if not lane.id == 0 and lane.type == "driving"]
+                lanes = [lane for lane in lane_section.all_lanes if lane.id != 0 and lane.type == "driving"]
                 lane_ids = [lane.id for lane in lanes]
-
                 lane_feats = self.get_lane_feats(road, lanes)
-
 
                 lane_nodes, internal_edges = self.split_lanes(
                     lanes, lane_ids, lane_feats, road_id, self.POLYLINE_LENGTH
                 )
 
-
                 nodes.update(lane_nodes)
                 edges.extend(internal_edges)
                 edges.extend(self.get_edges(road, lanes, lane_ids))
 
+        # ✅ single cleanup pass
+        nodes, edges = self.cleanup_lane_graph(nodes, edges, pos_eps=1e-3, max_passes=10)
 
+        # lane-change edges after cleanup
         edges.extend(self.add_lane_change_edges(nodes))
+        edges = list(dict.fromkeys(edges))  # optional dedupe
 
         self.__graph = {"nodes": nodes, "edges": edges}
 
@@ -207,6 +206,171 @@ class Dataset(Map):
                     if neighbor_node_id in nodes:
                         edges.append((node_id, neighbor_node_id))
         return edges
+
+    def cleanup_lane_graph(
+        self,
+        nodes: Dict[str, dict],
+        edges: List[Tuple[str, str]],
+        pos_eps: float = 0.02,   # 2 cm is usually safe for float drift
+        max_passes: int = 5,
+    ):
+        """
+        One-stop cleanup that is robust against deleting chains of nodes:
+
+        - Deduplicate edges + drop self-loops
+        - Merge only "duplicate versions" of the same physical node across DIFFERENT lanes
+        (different road_id or lane_id). Never merge nodes from the same (road_id, lane_id),
+        which prevents collapsing lane polylines in junctions.
+        - Contract resulting clusters into a single hub node and rewire edges.
+        - Repeat a few passes until stable.
+        """
+        import numpy as np
+        from scipy.spatial import cKDTree
+
+        def parse_id(nid: str):
+            r, l, s = nid.split(":")
+            return int(r), int(l), int(s)
+
+        def dedupe_and_drop_self(ed):
+            out = []
+            seen = set()
+            for u, v in ed:
+                if u == v:
+                    continue
+                if (u, v) in seen:
+                    continue
+                seen.add((u, v))
+                out.append((u, v))
+            return out
+
+        def build_adj(ed):
+            out_adj, in_adj = {}, {}
+            for u, v in ed:
+                out_adj.setdefault(u, []).append(v)
+                in_adj.setdefault(v, []).append(u)
+            return in_adj, out_adj
+
+        edges = dedupe_and_drop_self(edges)
+
+        for _ in range(max_passes):
+            if not nodes:
+                break
+
+            node_ids = list(nodes.keys())
+            pts = np.array([nodes[n]["pose"] for n in node_ids], dtype=float)
+
+            # KD-tree for near-neighbor candidates
+            tree = cKDTree(pts)
+            candidate_pairs = tree.query_pairs(r=pos_eps)
+
+            if not candidate_pairs:
+                break
+
+            # Union-Find, but only union pairs from DIFFERENT (road_id, lane_id)
+            parent = np.arange(len(node_ids))
+
+            def find(a):
+                while parent[a] != a:
+                    parent[a] = parent[parent[a]]
+                    a = parent[a]
+                return a
+
+            def union(a, b):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[rb] = ra
+
+            # Pre-parse lane identity for fast checks
+            lane_key = [parse_id(n)[:2] for n in node_ids]  # (road_id, lane_id)
+
+            for i, j in candidate_pairs:
+                # ✅ critical guard: never merge within same lane polyline
+                if lane_key[i] == lane_key[j]:
+                    continue
+                union(i, j)
+
+            # Build components
+            comps = {}
+            for i in range(len(node_ids)):
+                r = find(i)
+                comps.setdefault(r, []).append(i)
+
+            in_adj, out_adj = build_adj(edges)
+            changed = False
+
+            for comp in comps.values():
+                if len(comp) <= 1:
+                    continue
+
+                cluster = [node_ids[i] for i in comp]
+                cluster_set = set(cluster)
+
+                # Extra safety: only contract if cluster contains >1 distinct lane identity
+                lane_ids_in_cluster = {parse_id(n)[:2] for n in cluster}
+                if len(lane_ids_in_cluster) <= 1:
+                    continue
+
+                # External preds/succs (cluster as a junction "hub")
+                preds, succs = set(), set()
+                for n in cluster:
+                    for p in in_adj.get(n, []):
+                        if p not in cluster_set:
+                            preds.add(p)
+                    for s in out_adj.get(n, []):
+                        if s not in cluster_set:
+                            succs.add(s)
+
+                # If it doesn't connect anything externally, don't touch it
+                if len(preds) == 0 and len(succs) == 0:
+                    continue
+
+                # Pick representative: highest degree, tie-break by id
+                def deg(n):
+                    return len(in_adj.get(n, [])) + len(out_adj.get(n, []))
+
+                rep = sorted(cluster, key=lambda n: (-deg(n), n))[0]
+                others = [n for n in cluster if n != rep]
+
+                # Remove all edges incident to cluster nodes
+                new_edges = []
+                for u, v in edges:
+                    if u in cluster_set or v in cluster_set:
+                        continue
+                    new_edges.append((u, v))
+                edges = new_edges
+
+                # Rewire through rep
+                edges.extend([(p, rep) for p in preds])
+                edges.extend([(rep, s) for s in succs])
+                edges = dedupe_and_drop_self(edges)
+
+                # Update rep pose to centroid (nice for plotting)
+                centroid = pts[comp].mean(axis=0)
+                nodes[rep]["pose"] = (float(centroid[0]), float(centroid[1]))
+                nodes[rep]["feats"][0] = nodes[rep]["pose"][0]
+                nodes[rep]["feats"][1] = nodes[rep]["pose"][1]
+
+                # Preserve has_successor if any had it
+                nodes[rep]["feats"][5] = float(any(bool(nodes[n]["feats"][5]) for n in cluster))
+
+                # Delete other nodes
+                for n in others:
+                    nodes.pop(n, None)
+
+                changed = True
+                break  # safer to rebuild adjacency after each contraction
+
+            # Remove edges that reference deleted nodes
+            node_set = set(nodes.keys())
+            edges = [(u, v) for (u, v) in edges if u in node_set and v in node_set]
+            edges = dedupe_and_drop_self(edges)
+
+            if not changed:
+                break
+
+        return nodes, edges
+
+
 
     def filter_opendrive_around_point(self, agent: Tuple[float, float, float]):
         cx, cy, heading = agent
@@ -422,8 +586,6 @@ class Dataset(Map):
         idx_to_id = {idx: seg_id for idx, seg_id in enumerate(node_ids)}
         N = len(node_ids)
         
-        print("in dataset:", idx_to_id)
-
         s_next = np.zeros((self.max_nodes, self.max_nodes + 1))
         edge_type = np.zeros((self.max_nodes, self.max_nodes + 1), dtype=int)
 

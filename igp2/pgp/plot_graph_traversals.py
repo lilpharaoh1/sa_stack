@@ -45,7 +45,7 @@ def heading_from_history(agent_history):
     return np.arctan2(agent_history[-1][1] - agent_history[-2][1], agent_history[-1][0] - agent_history[-2][0])
 
 def plot_graph_traversals(traversals, agent_history, dataset, odr_map, ax: plt.Axes = None, scenario_config=None, **kwargs):
-    for agent_idx, (traversal, single_history) in enumerate(zip(traversals, agent_history.values())):
+    for agent_idx, (traversal, single_history) in enumerate(zip(traversals.values(), agent_history.values())):
         dataset.generate_graph(agent_pose=[*single_history[-1][:2], heading_from_history(single_history)])
         plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax=ax, scenario_config=scenario_config, **kwargs)
     
@@ -185,11 +185,9 @@ def plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax:
     idx_to_id = {idx: seg_id for idx, seg_id in enumerate(node_ids)}
     id_to_idx = {seg_id: idx for idx, seg_id in enumerate(node_ids)}
     N = len(node_ids)
-    print("in plot:", idx_to_id)
 
     max_visited = 0
     visited_nodes = {}
-    print(traversal)
     for sampled_traversal in traversal:
         for idx, node_idx in enumerate(sampled_traversal):
             if node_idx >= dataset.max_nodes:
@@ -210,9 +208,8 @@ def plot_single_graph_traversal(traversal, single_history, dataset, odr_map, ax:
         ax.arrow(s[0], s[1], dx, dy, color='k', head_width=0.2, width=0.1, length_includes_head=True) 
 
     for node_id, num_visited in visited_nodes.items():
-    # for node_id, node in dataset.nodes.items():
         x, y = dataset.nodes[node_id]["pose"]
-        print(f"{node_id}: {num_visited} / {max_visited}")
+        # print(f"{node_id}: {num_visited} / {max_visited}")
         ax.scatter(x, y, c=[num_visited/max_visited], cmap='inferno', marker='o', linewidths=2.0, vmin=0.0, vmax=1.0)
         ax.text(x, y, id_to_idx[node_id], fontsize=13)
 

@@ -39,7 +39,7 @@ def ego_to_world_batch(xs, ys, agent_pose):
 def heading_from_history(agent_history):
     return np.arctan2(agent_history[-1][0] - agent_history[-2][0], agent_history[-1][1] - agent_history[-2][1])
 
-def plot_pgp_trajectories(trajectories, probabilities, agent_history, odr_map, ax: plt.Axes = None, scenario_config=None, **kwargs) -> plt.Axes:
+def plot_agent_histories(agent_history, odr_map, ax: plt.Axes = None, scenario_config=None, **kwargs) -> plt.Axes:
     """Plot OpenDRIVE map, optionally transformed to the ego frame."""
     colors = plt.get_cmap("tab10").colors
 
@@ -167,21 +167,19 @@ def plot_pgp_trajectories(trajectories, probabilities, agent_history, odr_map, a
         traj_history = np.array(list(agent_states))
         x_history = traj_history[:, 0]
         y_history = traj_history[:, 1]
-        ax.plot(x_history, y_history, color=base_color, marker='o')
+        speed_history = traj_history[:, 2]
+        yaw_history = traj_history[:, 4]
 
-        # Plot predicted agent futures
-        traj_preds, prob_preds = trajectories[agent_id], probabilities[agent_id]
-        for traj_pred, prob_pred in zip(traj_preds, prob_preds):
-            # x_pred = (traj_pred[:, 1] - 2.0) * 0.5 # EMRAN don't know why they appear ahead of car?
-            # y_pred = -traj_pred[:, 0] * 0.5
-            x_pred = traj_pred[:, 0]
-            y_pred = traj_pred[:, 1]
-            x_pred, y_pred = ego_to_world_batch(x_pred, y_pred, [agent_states[-1][0], agent_states[-1][1], \
-                np.arctan2(agent_states[-1][1] - agent_states[-2][1], agent_states[-1][0] - agent_states[-2][0])])
-            # x_pred = traj_pred[:, 0]
-            # y_pred = traj_pred[:, 1]
-            ax.plot(x_pred, y_pred, color=base_color, alpha=prob_pred, marker='x')
-            # print(f"probability: {prob_pred}")        
+        for i ,(x, y, speed, yaw) in enumerate(zip(x_history, y_history, speed_history, yaw_history)):
+            # Arrow properties
+            arrow_length = 0.12
+            arrow_width = 0.1
+
+            dx = arrow_length * np.cos(yaw)
+            dy = arrow_length * np.sin(yaw)
+            # ax.scatter(x, y, color="r", marker="o", linewidth=3)
+            ax.arrow(x, y, dx, dy, head_width=arrow_width, head_length=arrow_width * 1.5, 
+                    fc=base_color, ec='k', length_includes_head=True)
 
     return ax
 

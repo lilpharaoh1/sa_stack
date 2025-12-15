@@ -168,24 +168,46 @@ def plot_vector_map(dataset, odr_map, ax: plt.Axes = None, scenario_config=None,
     if dataset.agent and dataset.bounds and kwargs.get("agent", False):
         cx, cy, heading = dataset.agent
         left, right, back, front = dataset.bounds
-        corners_local = np.array([[front, left], [front, right], [back, right], [back, left]])
-        # Plot as polygon
-        poly = Polygon(corners_local, closed=True, alpha=0.2)
+
+        # Helper: rotate points +90deg so "forward" (x) becomes "up" (y)
+        def rot90(pts):
+            # pts shape: (N, 2)
+            return np.column_stack([-pts[:, 1], pts[:, 0]])
+
+        # --- Bounds polygon (was in ego frame: x forward, y left) ---
+        corners_local = np.array([
+            [front, left],
+            [front, right],
+            [back,  right],
+            [back,  left]
+        ], dtype=float)
+
+        corners_local_up = rot90(corners_local)
+
+        poly = Polygon(corners_local_up, closed=True, alpha=0.2)
         ax.add_patch(poly)
 
         # Vehicle dimensions (in meters)
         width = 2.0   # side-to-side
         length = 4.5  # front-to-back
 
-        # Draw rectangle centered at origin
-        rect = Rectangle((-length/2, -width/2), length, width,
-                        edgecolor='red', facecolor='none', linestyle='--', linewidth=2)
+        # If forward is up (y), then the rectangle's "length" should be along y,
+        # and width along x.
+        rect = Rectangle(
+            (-width/2, -length/2),  # bottom-left corner
+            width,                  # x-extent
+            length,                 # y-extent
+            edgecolor='red', facecolor='none', linestyle='--', linewidth=2
+        )
         ax.add_patch(rect)
 
-        # Draw arrow pointing forward (right, in ego frame)
-        arrow = FancyArrow(0, 0, length/2, 0,
-                        width=0.5, head_width=1.0, head_length=1.0,
-                        color='RED')
+        # Draw arrow pointing forward (UP, in the rotated ego frame)
+        arrow = FancyArrow(
+            0, 0,                  # start
+            0, length/2,           # dx, dy
+            width=0.5, head_width=1.0, head_length=1.0,
+            color='RED'
+        )
         ax.add_patch(arrow)
 
     return ax
@@ -197,7 +219,8 @@ if __name__ == '__main__':
     dataset = Dataset.parse_from_opendrive(xodr_file)
     # dataset.generate_graph(agent_pose=[90, -75, np.pi / 2])
     # dataset.generate_graph(agent_pose=[35.0, -1.8, np.pi / 2])
-    dataset.generate_graph(agent_pose=[52.0, -42.5, np.pi / 2])
+    # dataset.generate_graph(agent_pose=[52.0, -42.5, np.pi / 2])
+    dataset.generate_graph(agent_pose=[51.823974609375, -13.100902557373047, 1.5212975844354437])
     # plot_map(odr_map, markings=True, midline=True)
     plot_vector_map(dataset, odr_map, markings=True, agent=True)
     

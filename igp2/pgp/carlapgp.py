@@ -22,13 +22,14 @@ class CarlaPGP:
         self.__xodr_path = xodr_path
         self.__dataset = Dataset.parse_from_opendrive(xodr_path)
     
-        self.t_h, self.t_f, self.fps = 2, 6, 20
+        self.t_h, self.t_f, self.fps = 2, 6, 15
         self.__dataset.t_h, self.__dataset.t_f, self.__dataset.fps = \
             self.t_h, self.t_f, self.fps
         self.__dataset.interval = self.interval 
         self.__agent_history = {}
         self.__trajectories = None
         self.__probabilities = None
+        self.__traversals = None
 
         yaml_path = "/home/emran/IGP2/igp2/pgp/configs/pgp_gatx2_lvm_traversal.yml"
         # Load model config file
@@ -63,7 +64,6 @@ class CarlaPGP:
                 self.__dataset.generate_graph( \
                     agent_pose=[*agent_state[:2], heading_from_history(agent_history)])
 
-                print(f"agent_pose used in generate_graph; {[*agent_state[:2], heading_from_history(agent_history)]}")
                 # plot_vector_map(self.__dataset, self.__dataset, markings=True, agent=True)
 
                 target_agent_representation = transform_states_to_vehicle_frame(np.array(list(agent_history)))
@@ -87,34 +87,105 @@ class CarlaPGP:
 
             self.__trajectories = {}
             self.__probabilities = {}
+            self.__traversals = {}
             for traj_id, agent_id in enumerate(agent_ids):
                 # Assign trajectories to self.__trajectories                    
-                self.__trajectories[agent_id] = trajectories['traj'][traj_id].cpu().detach().numpy()
+                self.__trajectories[agent_id] = self.transform_trajectories(trajectories['traj'][traj_id].cpu().detach().numpy())
                 self.__probabilities[agent_id] = trajectories['probs'][traj_id].cpu().detach().numpy()
+                self.__traversals[agent_id] = trajectories['traversals'][traj_id].cpu().detach().numpy()
 
-    def state2vector(self, agent_id, agent_state, first=False):
+    def transform_trajectories(self, traj_preds):
+        out_trajs = np.zeros_like(traj_preds)
+        for traj_idx, traj_pred in enumerate(traj_preds):
+            out_trajs[traj_idx, :, 0] = (traj_pred[:, 1] - 2.0) * 0.5 # EMRAN don't know why they appear ahead of car?
+            out_trajs[traj_idx, :, 1]= -traj_pred[:, 0] * 0.5
+
+        return out_trajs
+
+    def state2vector(self, agent_id, agent_state, first=False, yaw_window=5):
+        # --- local helpers (so no NameError) ---
+        def wrap_to_pi(a):
+            return (a + np.pi) % (2*np.pi) - np.pi
+
+        def unwrap_angles(angles):
+            out = np.array(angles, dtype=float)
+            for i in range(1, len(out)):
+                d = wrap_to_pi(out[i] - out[i-1])
+                out[i] = out[i-1] + d
+            return out
+
+        def fit_slope(t, y):
+            t = np.asarray(t, dtype=float)
+            y = np.asarray(y, dtype=float)
+            t0 = t.mean()
+            denom = np.dot(t - t0, t - t0)
+            if denom < 1e-9:
+                return 0.0
+            return float(np.dot(t - t0, y - y.mean()) / denom)
+
+        # --- current state ---
         x, y = agent_state.position
-        speed = np.linalg.norm(agent_state.velocity) # Might need to be scalar # Actually I think so
-        acceleration = np.linalg.norm(agent_state.acceleration) # Might need to be scalar # Actually I think so
+        v = np.array(agent_state.velocity, dtype=float)
+        a = np.array(agent_state.acceleration, dtype=float)
 
-        if first:
-            yaw_rate = 0.0
-        else:
-            prev_x, prev_y = self.__agent_history[agent_id][-1][:2]
-            delta_heading = np.arctan2(y - prev_y, x - prev_x)
-            
-            # Compute delta (unwrap needed only on arrays — we use angle diff trick instead)
-            yaw_rate = -(agent_state.heading - delta_heading + np.pi) % (2 * np.pi) - np.pi  # angle diff
-            yaw_rate *= self.fps
+        speed = float(np.linalg.norm(v))
+        acceleration = float(np.linalg.norm(a))
 
-        print(f"state {agent_id}:", agent_state.velocity)# [x, y, speed, acceleration, yaw_rate])
+        dt = 1.0 / float(self.fps)
+        MIN_SPEED = 0.5       # m/s
+        MAX_YAWRATE = 3.0     # rad/s (tune if needed)
 
+        # --- build window (history + current) ---
+        hist = self.__agent_history.get(agent_id, [])
+        hist_list = list(hist)  # hist might be deque, so no slicing directly
+
+        xs, ys = [], []
+        headings = []
+
+        if (not first) and len(hist_list) > 0:
+            start = max(0, len(hist_list) - (yaw_window - 1))
+            for row in hist_list[start:]:
+                xs.append(float(row[0]))
+                ys.append(float(row[1]))
+                # If you ever store heading in history later, put it at idx 5.
+                headings.append(float(row[5]) if len(row) >= 6 else None)
+
+        xs.append(float(x))
+        ys.append(float(y))
+        headings.append(float(agent_state.heading))
+
+        n = len(xs)
+        yaw_rate = 0.0
+
+        if n >= 3:
+            t = np.arange(n) * dt
+
+            have_all_headings = all(h is not None for h in headings)
+            if have_all_headings:
+                psi = unwrap_angles(headings)
+                yaw_rate = fit_slope(t, psi)
+            else:
+                dx = np.diff(xs)
+                dy = np.diff(ys)
+                step_dist = np.hypot(dx, dy)
+
+                # If movement is tiny, travel-direction yaw is meaningless
+                if float(step_dist.sum()) >= MIN_SPEED * (n - 1) * dt:
+                    psi_steps = np.arctan2(dy, dx)
+                    psi = np.concatenate([[psi_steps[0]], psi_steps])
+                    psi = unwrap_angles(psi)
+                    yaw_rate = fit_slope(t, psi)
+                else:
+                    yaw_rate = 0.0
+
+        yaw_rate = float(np.clip(yaw_rate, -MAX_YAWRATE, MAX_YAWRATE))
         return [x, y, speed, acceleration, yaw_rate]
 
     def remove(self, agent_id):
         del self.__agent_history[agent_id]
         del self.__trajectories[agent_id]
         del self.__probabilities[agent_id]
+        del self.__traversals[agent_id]
 
     @property
     def dataset(self):
@@ -131,6 +202,10 @@ class CarlaPGP:
     @property   
     def probabilities(self):
         return self.__probabilities
+    
+    @property
+    def traversals(self):
+        return self.__traversals
 
     @property
     def interval(self):
