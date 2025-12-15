@@ -3,7 +3,7 @@ from typing import Optional
 
 from igp2.core.agentstate import AgentState, AgentMetadata
 from igp2.core.trajectory import StateTrajectory
-from igp2.core.vehicle import Observation, Action
+from igp2.core.vehicle import Observation, Prediction, Action
 from igp2.core.util import Box
 
 
@@ -33,7 +33,7 @@ class Agent(abc.ABC):
         """ Check whether the agent has completed executing its assigned task. """
         raise NotImplementedError
 
-    def next_action(self, observation: Observation) -> Action:
+    def next_action(self, observation: Observation, prediction: Prediction = None) -> Action:
         """ Return the next action the agent will take"""
         raise NotImplementedError
 

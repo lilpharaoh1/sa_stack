@@ -4,7 +4,7 @@ import copy
 
 from igp2.agents.macro_agent import MacroAgent
 from igp2.core.agentstate import AgentState
-from igp2.core.vehicle import Action, Observation
+from igp2.core.vehicle import Action, Observation, Prediction
 from igp2.core.goal import Goal
 from igp2.planlibrary.macro_action import MacroAction, Continue, Exit
 from igp2.recognition.astar import AStar
@@ -16,13 +16,14 @@ class TrafficAgent(MacroAgent):
     """ Agent that follows a list of MAs, optionally calculated using A*. """
 
     def __init__(self, agent_id: int, initial_state: AgentState, goal: "Goal" = None, fps: int = 20,
-                 macro_actions: List[MacroAction] = None):
+                 macro_actions: List[MacroAction] = None, pgp_control: bool = False):
         super(TrafficAgent, self).__init__(agent_id, initial_state, goal, fps)
         self._astar = AStar(max_iter=1000)
         self._macro_actions = []
         if macro_actions is not None and macro_actions:
             self.set_macro_actions(macro_actions)
         self._current_macro_id = 0
+        self._pgp_control = pgp_control
 
     def __repr__(self) -> str:
         return f"TrafficAgent(ID={self.agent_id})"
@@ -106,7 +107,7 @@ class TrafficAgent(MacroAgent):
             return False
         return done
 
-    def next_action(self, observation: Observation) -> Action:
+    def next_action(self, observation: Observation, prediction: Prediction = None) -> Action:
         if self.current_macro is None:
             if len(self._macro_actions) == 0:
                 logger.debug("set_destination in next_action")

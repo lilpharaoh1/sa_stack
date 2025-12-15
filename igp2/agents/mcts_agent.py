@@ -8,7 +8,7 @@ from igp2.core.trajectory import Trajectory, StateTrajectory
 from igp2.core.agentstate import AgentState
 from igp2.opendrive.map import Map
 from igp2.core.goal import Goal, PointGoal, StoppingGoal, PointCollectionGoal
-from igp2.core.vehicle import TrajectoryVehicle, Observation, Action
+from igp2.core.vehicle import TrajectoryVehicle, Observation, Action, Prediction
 from igp2.core.util import Circle, find_lane_sequence
 from igp2.core.cost import Cost
 from igp2.core.velocitysmoother import VelocitySmoother
@@ -42,7 +42,8 @@ class MCTSAgent(TrafficAgent):
                  default_rewards: Dict[str, float] = None,
                  velocity_smoother: dict = None,
                  goal_recognition: dict = None,
-                 stop_goals: bool = False):
+                 stop_goals: bool = False,
+                 pgp_control: bool = False):
         """ Create a new MCTS agent.
 
         Args:
@@ -102,6 +103,8 @@ class MCTSAgent(TrafficAgent):
 
         self._goals: List[Goal] = []
 
+        self._pgp_control = pgp_control
+
     def __repr__(self) -> str:
         return f"MCTSAgent(id={self.agent_id}, goal={self.goal})"
 
@@ -149,7 +152,7 @@ class MCTSAgent(TrafficAgent):
             predictions=self._goal_probabilities)
         self._current_macro_id = 0
 
-    def next_action(self, observation: Observation) -> Action:
+    def next_action(self, observation: Observation, prediction: Prediction = None) -> Action:
         """ Returns the next action for the agent.
 
         If the current macro actions has finished, then updates it.

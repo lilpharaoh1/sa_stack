@@ -17,6 +17,24 @@ class Action:
     target_speed: float = None
     target_angle: float = None
 
+@dataclass(eq=True, frozen=True)
+class Prediction:
+    """ Represents an prediction of agent motion using PGP"""
+    trajectory: Dict[int, AgentState]
+    probability: Dict
+    traversal: Dict
+    agent_history: Dict
+
+    def plot(self, ax: plt.Axes = None) -> plt.Axes:
+        """ Convenience method to plot the current observation. """
+        pass
+        # if ax is None:
+        #     fig, ax = plt.subplots()
+        # plot_map(self.scenario_map, ax, markings=True, midline=True)
+        # for aid, state in self.frame.items():
+        #     ax.plot(*state.position, marker="o")
+        # return ax
+
 
 @dataclass(eq=True, frozen=True)
 class Observation:

@@ -80,3 +80,30 @@ def get_speed(vehicle: carla.Actor, ignore_z: bool = True):
     else:
         return 3.6 * np.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
 
+def world_to_ego_batch(xs, ys, agent_pose):
+    cx, cy, heading = agent_pose
+    dx = np.array(xs) - cx
+    dy = np.array(ys) - cy
+    theta = -(heading - np.pi/2)
+    cos_h = np.cos(theta)
+    sin_h = np.sin(theta)
+    x_ego = cos_h * dx - sin_h * dy
+    y_ego = sin_h * dx + cos_h * dy
+    return x_ego, y_ego
+
+def ego_to_world_batch(xs, ys, agent_pose):
+    cx, cy, heading = agent_pose
+    
+    # Rotation by +heading (ego → world)
+    cos_h = np.cos(heading)
+    sin_h = np.sin(heading)
+    
+    # Apply rotation
+    x_rot = cos_h * np.array(xs) - sin_h * np.array(ys)
+    y_rot = sin_h * np.array(xs) + cos_h * np.array(ys)
+    
+    # Apply translation
+    x_world = x_rot + cx
+    y_world = y_rot + cy
+    
+    return x_world, y_world

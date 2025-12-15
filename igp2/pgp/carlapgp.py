@@ -13,6 +13,7 @@ from igp2.opendrive.map import Map
 from igp2.vector_map import Dataset
 from igp2.pgp.train_eval.initialization import initialize_prediction_model
 from igp2.vector_map.plot_vector_map import plot_vector_map
+from igp2.core.vehicle import Observation
 
 # Initialize device:
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -49,8 +50,8 @@ class CarlaPGP:
 
         print("Model:", self.__model)
 
-    def update(self, frame):
-        for agent_id, agent_state in frame.items():
+    def update(self, observation: Observation):
+        for agent_id, agent_state in observation.frame.items():
             if not agent_id in self.__agent_history:
                 self.__agent_history[agent_id] = deque([self.state2vector(agent_id, agent_state, first=True)], maxlen=self.interval)
             else:

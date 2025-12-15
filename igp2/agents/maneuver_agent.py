@@ -4,7 +4,7 @@ from igp2.agents.agent import Agent
 from igp2.planlibrary.maneuver import ManeuverConfig
 from igp2.planlibrary.maneuver_cl import CLManeuverFactory
 from igp2.core.agentstate import AgentState
-from igp2.core.vehicle import TrajectoryVehicle, Action, Observation
+from igp2.core.vehicle import TrajectoryVehicle, Action, Observation, Prediction
 
 
 class ManeuverAgent(Agent):
@@ -30,7 +30,7 @@ class ManeuverAgent(Agent):
         else:
             self.maneuver = None
 
-    def next_action(self, observation: Observation = None) -> Action:
+    def next_action(self, observation: Observation = None, prediction: Prediction = None) -> Action:
         if self.maneuver is None or self.maneuver.done(observation):
             self.create_next_maneuver(self.agent_id, observation)
 

@@ -3,7 +3,7 @@ from typing import List, Dict
 from igp2.agents.agent import Agent
 from igp2.core.goal import Goal
 from igp2.core.agentstate import AgentState
-from igp2.core.vehicle import KinematicVehicle, Action, Observation
+from igp2.core.vehicle import KinematicVehicle, Action, Observation, Prediction
 from igp2.planlibrary.macro_action import MacroAction, MacroActionConfig
 
 
@@ -38,7 +38,8 @@ class MacroAgent(Agent):
         """ Returns true if the current macro action has reached a completion state. """
         # assert self._current_macro is not None, f"Macro action of Agent {self.agent_id} is None!"
         return self._current_macro is not None and self._current_macro.done(observation)
-    def next_action(self, observation: Observation) -> Action:
+        
+    def next_action(self, observation: Observation, prediction: Prediction = None) -> Action:
         """ Get the next action from the macro action.
 
         Args:

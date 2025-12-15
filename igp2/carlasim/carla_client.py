@@ -17,7 +17,7 @@ from igp2.pgp.carlapgp import CarlaPGP
 from igp2.agents.agent import Agent
 from igp2.carlasim.traffic_manager import TrafficManager
 from igp2.carlasim.carla_agent_wrapper import CarlaAgentWrapper
-from igp2.core.vehicle import Observation
+from igp2.core.vehicle import Observation, Prediction
 from igp2.core.agentstate import AgentState
 
 
@@ -169,7 +169,8 @@ class CarlaSim:
         self.__timestep += 1
         
         observation = self.__get_current_observation()
-        actions = self.__take_actions(observation)
+        prediction = self.__make_predictions(observation)
+        actions = self.__take_actions(observation, prediction)
         self.__traffic_manager.update(self, observation)
         self.__update_spectator()
 
@@ -267,14 +268,14 @@ class CarlaSim:
             # actor_transform.rotation += self.__spectator_transform.rotation
             self.__spectator.set_transform(actor_transform)
 
-    def __take_actions(self, observation: Observation):
+    def __take_actions(self, observation: Observation, prediction: Prediction = None):
         commands = []
         controls = {}
         for agent_id, agent in self.agents.items():
             if agent is None:
                 continue
 
-            control = agent.next_control(observation)
+            control = agent.next_control(observation, prediction)
             if control is None:
                 logger.debug("Removing agent because control is None")
                 # self.remove_agent(agent.agent_id)
@@ -286,6 +287,16 @@ class CarlaSim:
 
         self.__client.apply_batch_sync(commands)
         return controls
+
+    def __make_predictions(self, observation: Observation) -> Prediction:
+        self.__pgp.update(observation)
+        if self.__timestep % self.__pgp.interval == 0:
+            self.__pgp.predict_trajectories()
+
+        if self.__pgp.trajectories is not None:
+            return Prediction(self.__pgp.trajectories, self.__pgp.probabilities, self.__pgp.traversals, self.__pgp.agent_history)
+        else:
+            return None
 
     def __get_current_observation(self) -> Observation:
         actor_list = self.__world.get_actors()
@@ -307,9 +318,6 @@ class CarlaSim:
             else:
                 agent_id = vehicle.id
             frame[agent_id] = state
-        self.__pgp.update(frame)
-        if self.__timestep % self.__pgp.interval == 0:
-            self.__pgp.predict_trajectories()
         return Observation(frame, self.scenario_map)
 
     def __wait_for_server(self):

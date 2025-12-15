@@ -5,7 +5,7 @@ from typing import Optional, Tuple, Union
 from igp2.agents.agent import Agent
 from igp2.core.agentstate import AgentState
 from igp2.core.goal import Goal
-from igp2.core.vehicle import Action, Observation, TrajectoryVehicle, KinematicVehicle
+from igp2.core.vehicle import Action, Observation, TrajectoryVehicle, KinematicVehicle, Prediction
 from igp2.core.trajectory import StateTrajectory, VelocityTrajectory, Trajectory
 from igp2.planlibrary.maneuver_cl import TrajectoryManeuverCL
 from igp2.planlibrary.maneuver import ManeuverConfig
@@ -57,7 +57,7 @@ class TrajectoryAgent(Agent):
             done = dist < 1.0  # arbitrary
         return done
 
-    def next_action(self, observation: Observation) -> Optional[Action]:
+    def next_action(self, observation: Observation, prediction: Prediction = None) -> Optional[Action]:
         """ Calculate next action based on trajectory and optionally steps
         the current state of the agent forward. """
         assert self._trajectory is not None, f"Trajectory of Agent {self.agent_id} was None!"
