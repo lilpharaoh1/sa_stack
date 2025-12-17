@@ -291,7 +291,28 @@ class CarlaSim:
     def __make_predictions(self, observation: Observation) -> Prediction:
         self.__pgp.update(observation)
         if self.__timestep % self.__pgp.interval == 0:
-            self.__pgp.predict_trajectories()
+            # EMRAN Clean up how we do this PLEASE!
+
+            for agent_id, agent in self.agents.items():
+                print(f"Agent {agent_id}: {[ma for ma in agent.agent.macro_actions]}")
+                try:
+                    print(f"Agent {agent_id}: {[ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions[1:]]}")
+                except:
+                    print(f"Agent {agent_id}: Couldn't get trajectory")
+
+            agent_waypoints = {agent_id: np.concatenate([ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions]) \
+                                if agent.agent.current_macro is not None and agent.agent._pgp_drive else [] \
+                                for agent_id, agent in self.agents.items()}
+            # try:
+            #     agent_waypoints = {agent_id: np.concatenate([ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions]) \
+            #                     if agent.agent.current_macro is not None else [] \
+            #                     for agent_id, agent in self.agents.items()}
+            # except:
+            #     agent_waypoints = {agent_id: agent.agent.current_macro.get_trajectory().path[:-1] \
+            #                     if agent.agent.current_macro is not None else [] \
+            #                     for agent_id, agent in self.agents.items()}
+            agent_drives = {agent_id: agent.agent._pgp_drive for agent_id, agent in self.agents.items()}
+            self.__pgp.predict_trajectories(agent_waypoints=agent_waypoints, agent_drives=agent_drives)
 
         if self.__pgp.trajectories is not None:
             return Prediction(self.__pgp.trajectories, self.__pgp.probabilities, self.__pgp.traversals, self.__pgp.agent_history)

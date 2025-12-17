@@ -28,6 +28,7 @@ class CarlaPGP:
             self.t_h, self.t_f, self.fps
         self.__dataset.interval = self.interval 
         self.__agent_history = {}
+        self.__waypoints = {}
         self.__trajectories = None
         self.__probabilities = None
         self.__traversals = None
@@ -57,7 +58,7 @@ class CarlaPGP:
             else:
                 self.__agent_history[agent_id].append(self.state2vector(agent_id, agent_state))
             
-    def predict_trajectories(self):
+    def predict_trajectories(self, agent_waypoints=None, agent_drives=None):
         agent_ids, agent_inputs = [], []
         for agent_id, agent_history in self.__agent_history.items():
             if len(agent_history) >= self.interval:
@@ -69,8 +70,9 @@ class CarlaPGP:
 
                 target_agent_representation = transform_states_to_vehicle_frame(np.array(list(agent_history)))
                 map_representation = self.__dataset.get_map_representation()
-                surrounding_agent_representation = self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # This could be done in a batch
+                surrounding_agent_representation = self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # EMRAN This could be done in a batch
                 agent_node_masks = self.__dataset.get_agent_node_masks(map_representation, surrounding_agent_representation)
+                drive_traversal = self.__dataset.get_drive_traversal(agent_id, agent_waypoints, agent_drives, map_representation) # Don't really need to be passing everything here but wtf
 
                 # Add to inputs
                 agent_ids.append(agent_id)
@@ -79,7 +81,8 @@ class CarlaPGP:
                     "map_representation": map_representation,
                     "surrounding_agent_representation": surrounding_agent_representation,
                     "agent_node_masks": agent_node_masks,
-                    "init_node": self.__dataset.get_initial_node(map_representation)
+                    "init_node": self.__dataset.get_initial_node(map_representation),
+                    "drive_traversal": drive_traversal
                 })
         
         if len(agent_inputs) > 0:

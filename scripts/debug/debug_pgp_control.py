@@ -287,7 +287,8 @@ if __name__ == '__main__':
                                        fps=fps,
                                        n_simulations=n_simulations,
                                        view_radius=100,
-                                       pgp_control=True,
+                                       pgp_drive=False,
+                                       pgp_control=False,
                                        store_results="all")
             carla_sim.add_agent(agents[aid], "ego")
             carla_sim.spectator.set_location(
@@ -295,7 +296,7 @@ if __name__ == '__main__':
                 carla.Location(50.0, 0.0, 5.0)
                 )
         else:
-            agents[aid] = ip.TrafficAgent(aid, frame[aid], goal, fps, pgp_control=True)
+            agents[aid] = ip.TrafficAgent(aid, frame[aid], goal, fps, pgp_drive=True, pgp_control=False)
             carla_sim.add_agent(agents[aid], None)
 
     observations = []

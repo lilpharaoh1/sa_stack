@@ -70,6 +70,8 @@ class PGP(PredictionAggregator):
         node_masks = encodings['context_encoding']['combined_masks']
         s_next = encodings['s_next']
         edge_type = encodings['edge_type']
+        drive_traversal = encodings["drive_traversal"]["drive_traversal"].long()       # [A, L]
+        drive_traversal_mask = encodings["drive_traversal"]["drive_traversal_mask"]    # [A, L] (0=valid, 1=filler)
 
         # Compute pi (log probs)
         pi = self.compute_policy(target_agent_encoding, node_encodings, node_masks, s_next, edge_type)
@@ -81,6 +83,72 @@ class PGP(PredictionAggregator):
             # Sample pi
             init_node = encodings['init_node']
             sampled_traversals = self.sample_policy(torch.exp(pi), s_next, init_node)
+
+        print(sampled_traversals[:, 0])
+        print(drive_traversal)
+
+        # Valid positions
+        A, P, S = sampled_traversals.shape
+        valid_dt = (drive_traversal_mask == 0)  # [A, L]
+        has_valid_dt = valid_dt.any(dim=1)  # [A] bool
+        if has_valid_dt.any():
+            lengths = valid_dt.sum(dim=1).long()           # [A]
+            lengths = torch.clamp(lengths, max=S) # cannot write past S
+
+            # last valid index = lengths - 1 (clamp for empty)
+            last_pos = torch.clamp(lengths - 1, min=0)  # [A]
+
+            # last valid value per agent: drive_traversal[a, last_pos[a]]
+            a_idx = torch.arange(A, device=device)
+            last_val = drive_traversal[a_idx, last_pos]  # [A]
+            fill_val = last_val + int(s_next.shape[1])          # [A]
+
+            # Build per-agent sequence of length S: prefix from drive_traversal, then fill_val
+            seq = fill_val[:, None].expand(A, S).clone()     # [A, S]
+            idxS = torch.arange(S, device=device)[None, :]   # [1, S]
+            take = idxS < lengths[:, None]                   # [A, S]
+
+            # Gather prefix values from drive_traversal for first S positions
+            L = drive_traversal.shape[1]
+            idxL = torch.clamp(idxS.expand(A, S), max=L - 1) # [A, S]
+            prefix = drive_traversal.gather(1, idxL)         # [A, S]
+
+            seq[take] = prefix[take].to(sampled_traversals.dtype)
+
+            # Overwrite sampled_traversals only for agents with valid generated traversal
+            sampled_traversals[has_valid_dt] = seq[has_valid_dt].unsqueeze(1).expand(-1, P, -1)
+
+
+
+
+            # # We will build per-agent [S] sequences then broadcast to [P, S]
+            # arangeS = torch.arange(S, device=device).view(1, S)  # [1, S]
+            # lens = lengths_clamped.view(A, 1)                    # [A, 1]
+
+            # # Default: filled with fill_val
+            # seq = fill_val.view(A, 1).expand(A, S).clone()       # [A, S]
+
+            # # Copy prefix from gen into seq for those agents
+            # # Create indices [A, S] into gen, but only first lens entries are used.
+            # idx = torch.arange(S, device=device).view(1, S).expand(A, S)  # [A, S]
+            # take_prefix = idx < lens                                      # [A, S] bool
+
+            # # Take gen prefix values (need gen to have at least S cols; if not, clamp indexing)
+            # # If L < S, clamp to L-1 to avoid OOB; typically L >= S in your setup.
+            # L = gen.shape[1]
+            # idx_gen = torch.clamp(idx, max=L - 1)
+            # gen_prefix = gen.gather(1, idx_gen)  # [A, S]
+
+            # seq[take_prefix] = gen_prefix[take_prefix]
+
+            # # Now write seq into out for agents with valid generated traversal, for ALL predictions
+            # # out: [A, P, S]
+            # sampled_traversals[valid_drive_traversals] = seq[has_valid].unsqueeze(1).expand(-1, P, -1)
+
+
+        drive_traversals = torch.zeros_like(sampled_traversals)
+        print("drive_traversals.shape:", drive_traversals.shape)
+        
 
         # Selectively aggregate context along traversed paths
         agg_enc = self.aggregate(sampled_traversals, node_encodings, target_agent_encoding)

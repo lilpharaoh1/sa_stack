@@ -49,11 +49,6 @@ class CarlaAgentWrapper:
                 self.__local_planner.set_global_plan(
                     self.__waypoints, stop_waypoint_creation=True, clean_queue=True)
 
-
-        # print(self.agent_id, self.__agent._pgp_control)
-        # if not prediction is None:
-        #     print(prediction.trajectory[self.agent_id].shape)
-        #     print(prediction.probability[self.agent_id].shape) 
         if self.__agent._pgp_control and prediction is not None:
             trajs = prediction.trajectory[self.agent_id]
             probs = prediction.probability[self.agent_id]
@@ -128,3 +123,7 @@ class CarlaAgentWrapper:
     def name(self):
         """ The role name of the wrapped Actor. """
         return self.__name
+
+    @property
+    def waypoints(self):
+        return self.__waypoints

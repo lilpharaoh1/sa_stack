@@ -43,6 +43,7 @@ class MCTSAgent(TrafficAgent):
                  velocity_smoother: dict = None,
                  goal_recognition: dict = None,
                  stop_goals: bool = False,
+                 pgp_drive: bool = False,
                  pgp_control: bool = False):
         """ Create a new MCTS agent.
 
@@ -103,6 +104,7 @@ class MCTSAgent(TrafficAgent):
 
         self._goals: List[Goal] = []
 
+        self._pgp_drive = pgp_drive
         self._pgp_control = pgp_control
 
     def __repr__(self) -> str:

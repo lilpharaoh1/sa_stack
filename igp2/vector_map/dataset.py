@@ -131,7 +131,7 @@ class Dataset(Map):
 
         return x_new, y_new, yaw
 
-    def world_to_ego_frame(self, x: np.ndarray, y: np.ndarray, yaw: np.ndarray):
+    def world_to_ego_frame(self, x: np.ndarray, y: np.ndarray, yaw: np.ndarray = None):
         assert self.agent is not None
 
         cx, cy, chead = self.agent
@@ -149,10 +149,13 @@ class Dataset(Map):
         x_ego = cos_h * dx - sin_h * dy   # right
         y_ego = sin_h * dx + cos_h * dy   # forward
 
-        # Yaw: convert to new frame (also rotated by - (heading - π/2))
-        yaw_ego = normalise_angle(yaw - (chead - np.pi/2))
+        if yaw is not None:
+            # Yaw: convert to new frame (also rotated by - (heading - π/2))
+            yaw_ego = normalise_angle(yaw - (chead - np.pi/2))
 
-        return x_ego, y_ego, yaw_ego
+            return x_ego, y_ego, yaw_ego
+        else:
+            return x_ego, y_ego
 
 
     def get_edges(self, road, lanes, lane_ids):
@@ -737,38 +740,280 @@ class Dataset(Map):
         init_node = np.zeros(self.max_nodes)
         init_node[assigned_nodes] = 1/len(assigned_nodes)
         return init_node
+    
+    def get_drive_traversal(self, agent_id, agent_waypoints, agent_drives, map_representation):
+        if agent_waypoints is None or agent_drives is None:
+            return None
+
+        if agent_waypoints.keys() != agent_drives.keys():
+            missing_w = agent_drives.keys() - agent_waypoints.keys()
+            missing_d = agent_waypoints.keys() - agent_drives.keys()
+            raise ValueError(
+                f"Mismatched agent IDs. Missing in waypoints: {sorted(missing_w)}; "
+                f"missing in drives: {sorted(missing_d)}"
+            )
+
+
+        waypoints = agent_waypoints[agent_id]
+        drive = agent_drives[agent_id]
+
+        if not drive or waypoints is None or len(waypoints) == 0:
+            traversal = []
+        else:
+            # Your "do something" goes here
+            # waypoints = waypoints.path[:-1]
+
+            print(f"Agent {agent_id}: {waypoints}")
+
+            # Example placeholder:
+            traversal = self.match_xy_trajectory_to_nodes(
+                traj_xy_world=np.asarray(waypoints),
+                map_representation=map_representation,
+                # dist_thresh=..., yaw_thresh=...
+        )
+
+        drive_traversal = np.zeros((self.max_nodes))
+        drive_traversal_mask = np.ones((self.max_nodes))
+        drive_traversal[:len(traversal)] = traversal
+        drive_traversal_mask[:len(traversal)] = 0
+
+        drive_traversal = {
+            "drive_traversal": drive_traversal,
+            "drive_traversal_mask": drive_traversal_mask
+        }
+
+        return drive_traversal
+
+    def build_node_poses_for_matching(self, map_representation):
+        node_feats = map_representation['lane_node_feats']      # (max_nodes, poly_len, 6)
+        node_masks = map_representation['lane_node_masks']      # (max_nodes, poly_len, 6)
+
+        N = len(self.nodes)  # only real nodes, ignore padding
+        node_poses = []
+
+        for i in range(N):
+            valid = np.where(node_masks[i][:, 0] == 0)[0]
+            if len(valid) == 0:
+                # should not happen for real nodes, but keep safe
+                node_poses.append(np.zeros((1, 3), dtype=float))
+            else:
+                node_poses.append(node_feats[i][valid, :3])  # x,y,yaw polyline
+        return node_poses
+
+
+    def match_xy_trajectory_to_nodes(
+        self,
+        traj_xy_world,             # (T,2) in WORLD frame
+        map_representation,
+        dist_thresh=0.5,
+        yaw_thresh=np.pi/3,
+        K_keep=10,
+        bad_transition_penalty=50.0,
+        allow_stay=True,
+    ):
+        import numpy as np
+
+        traj_xy_world = np.asarray(traj_xy_world, dtype=float)
+        if traj_xy_world.ndim != 2 or traj_xy_world.shape[1] != 2:
+            raise ValueError(f"traj_xy_world must have shape (T,2), got {traj_xy_world.shape}")
+
+        if self.agent is None:
+            raise ValueError("self.agent must be set (cx, cy, heading) before matching.")
+
+        # --- World -> Ego transform for the full trajectory ---
+        xw = traj_xy_world[:, 0]
+        yw = traj_xy_world[:, 1]
+        x_ego, y_ego = self.world_to_ego_frame(xw, yw)  # uses self.agent
+        traj_xy = np.stack([x_ego, y_ego], axis=1)      # (T,2) in EGO frame
+
+        # --- filter to map bounds in EGO frame (bounds = [left, right, back, front]) ---
+        left, right, back, front = self.bounds
+        in_bounds = (
+            (traj_xy[:, 0] >= left) & (traj_xy[:, 0] <= right) &
+            (traj_xy[:, 1] >= back) & (traj_xy[:, 1] <= front)
+        )
+        traj_xy = traj_xy[in_bounds]
+
+        if traj_xy.shape[0] == 0:
+            return []
+
+        # Node index space is 0..N-1 where N=len(self.nodes)
+        node_ids = list(self.nodes.keys())
+        N = len(node_ids)
+        if N == 0:
+            return []
+
+        # Adjacency in index space using s_next (aligned with your pipeline)
+        s_next = map_representation["s_next"]  # (max_nodes, max_nodes+1)
+        edge_set = set()
+        for i in range(N):
+            nbrs = s_next[i, :-1]  # ignore terminal slot
+            for j in nbrs:
+                j = int(j)
+                if 0 <= j < N:
+                    edge_set.add((i, j))
+        if allow_stay:
+            for i in range(N):
+                edge_set.add((i, i))
+
+        node_poses = self.build_node_poses_for_matching(map_representation)
+
+        # yaw estimated from ego-frame trajectory deltas
+        def query_yaw(t):
+            if t == 0:
+                return None
+            dx = traj_xy[t, 0] - traj_xy[t - 1, 0]
+            dy = traj_xy[t, 1] - traj_xy[t - 1, 1]
+            if dx * dx + dy * dy < 1e-6:
+                return None
+            return float(np.arctan2(dy, dx))
+
+        cand = []
+        cand_cost = []
+
+        # Build candidates; DROP points that have no node within dist_thresh (yaw-gated if yaw available)
+        for t in range(traj_xy.shape[0]):
+            qyaw = query_yaw(t)
+
+            if qyaw is None:
+                query_pose = np.array([traj_xy[t, 0], traj_xy[t, 1]])  # (x,y) => no yaw gating
+            else:
+                query_pose = np.array([traj_xy[t, 0], traj_xy[t, 1], qyaw])  # (x,y,yaw) => yaw gating
+
+            idcs = self.assign_pose_to_node(
+                node_poses,
+                query_pose,
+                dist_thresh=dist_thresh,
+                yaw_thresh=yaw_thresh,
+                return_multiple=True,
+                drop_if_no_match=True,   # <-- only here we drop unmatched points
+            )
+
+            # If no candidate within thresholds, disregard this point
+            if idcs is None or len(idcs) == 0:
+                continue
+
+            q = traj_xy[t]
+            dvals = []
+            for i in idcs:
+                distances = np.linalg.norm(node_poses[int(i)][:, :2] - q[None, :], axis=1)
+                dvals.append(float(np.min(distances)))
+            dvals = np.asarray(dvals)
+
+            # cap candidate count for speed
+            order = np.argsort(dvals)[:min(K_keep, len(dvals))]
+            idcs = np.asarray(idcs)[order].astype(int)
+            dvals = dvals[order]
+
+            cand.append(idcs)
+            cand_cost.append(dvals)
+
+        # If everything got dropped, return empty traversal
+        if len(cand) == 0:
+            return []
+
+        # If only one point survived, choose closest candidate
+        if len(cand) == 1:
+            return [int(cand[0][0])]
+
+        T2 = len(cand)
+
+        # Viterbi DP over surviving points
+        dp = [np.full(len(cand[t]), np.inf) for t in range(T2)]
+        back = [np.full(len(cand[t]), -1, dtype=int) for t in range(T2)]
+
+        dp[0] = cand_cost[0].copy()
+
+        for t in range(1, T2):
+            for j, node_j in enumerate(cand[t]):
+                best_val = np.inf
+                best_i = -1
+                for i, node_i in enumerate(cand[t - 1]):
+                    trans = 0.0 if (node_i, node_j) in edge_set else bad_transition_penalty
+                    val = dp[t - 1][i] + trans
+                    if val < best_val:
+                        best_val = val
+                        best_i = i
+                dp[t][j] = best_val + cand_cost[t][j]
+                back[t][j] = best_i
+
+        jT = int(np.argmin(dp[-1]))
+        seq = [jT]
+        for t in range(T2 - 1, 0, -1):
+            jT = int(back[t][jT])
+            seq.append(jT)
+        seq.reverse()
+
+        node_idx_seq = [int(cand[t][seq[t]]) for t in range(T2)]
+
+        # Collapse consecutive duplicates ("smush")
+        traversal = [node_idx_seq[0]]
+        for n in node_idx_seq[1:]:
+            if n != traversal[-1]:
+                traversal.append(n)
+
+        return traversal
+
+
+
 
     @staticmethod
-    def assign_pose_to_node(node_poses, query_pose, dist_thresh=5, yaw_thresh=np.pi/3, return_multiple=False):
+    def assign_pose_to_node(
+        node_poses,
+        query_pose,
+        dist_thresh=0.5,
+        yaw_thresh=np.pi/3,
+        return_multiple=False,
+        drop_if_no_match=False,   # NEW
+    ):
         """
-        Assigns a given agent pose to a lane node. Takes into account distance from the lane centerline as well as
-        direction of motion.
+        If drop_if_no_match=True and return_multiple=True:
+        - returns empty array if no node satisfies distance (+ yaw if applicable).
+        Otherwise:
+        - falls back to closest node (previous behavior).
         """
         dist_vals = []
         yaw_diffs = []
 
-        for i in range(len(node_poses)):
-            distances = np.linalg.norm(node_poses[i][:, :2] - query_pose[:2], axis=1)
-            dist_vals.append(np.min(distances))
-            idx = np.argmin(distances)
-            yaw_lane = node_poses[i][idx, 2]
-            yaw_query = query_pose[2]
-            yaw_diffs.append(np.arctan2(np.sin(yaw_lane - yaw_query), np.cos(yaw_lane - yaw_query)))
+        # query_pose can be (x,y) or (x,y,yaw). If yaw missing, skip yaw gating.
+        has_yaw = (len(query_pose) >= 3)
+        qxy = query_pose[:2]
+        qyaw = query_pose[2] if has_yaw else None
 
-        idcs_yaw = np.where(np.absolute(np.asarray(yaw_diffs)) <= yaw_thresh)[0]
-        idcs_dist = np.where(np.asarray(dist_vals) <= dist_thresh)[0]
-        idcs = np.intersect1d(idcs_dist, idcs_yaw)
+        for i in range(len(node_poses)):
+            distances = np.linalg.norm(node_poses[i][:, :2] - qxy[None, :], axis=1)
+            dist_vals.append(np.min(distances))
+            idx = int(np.argmin(distances))
+
+            if has_yaw:
+                yaw_lane = float(node_poses[i][idx, 2])
+                yaw_diffs.append(float(np.arctan2(np.sin(yaw_lane - qyaw), np.cos(yaw_lane - qyaw))))
+            else:
+                yaw_diffs.append(0.0)
+
+        dist_vals = np.asarray(dist_vals)
+        yaw_diffs = np.asarray(yaw_diffs)
+
+        idcs_dist = np.where(dist_vals <= dist_thresh)[0]
+        if has_yaw:
+            idcs_yaw = np.where(np.abs(yaw_diffs) <= yaw_thresh)[0]
+            idcs = np.intersect1d(idcs_dist, idcs_yaw)
+        else:
+            idcs = idcs_dist
 
         if len(idcs) > 0:
             if return_multiple:
                 return idcs
-            assigned_node_id = idcs[int(np.argmin(np.asarray(dist_vals)[idcs]))]
-        else:
-            assigned_node_id = np.argmin(np.asarray(dist_vals))
-            if return_multiple:
-                assigned_node_id = np.asarray([assigned_node_id])
+            return int(idcs[int(np.argmin(dist_vals[idcs]))])
 
-        return assigned_node_id
+        # No match within thresholds
+        if return_multiple:
+            if drop_if_no_match:
+                return np.asarray([], dtype=int)  # NEW behavior only when asked
+            return np.asarray([int(np.argmin(dist_vals))])  # old fallback
+        return int(np.argmin(dist_vals))
+
+
 
     @staticmethod
     def first_zero_index(arr):
@@ -802,6 +1047,55 @@ class Dataset(Map):
     @staticmethod
     def heading_from_history(agent_history):
         return np.arctan2(agent_history[-1][1] - agent_history[-2][1], agent_history[-1][0] - agent_history[-2][0])
+
+    @staticmethod
+    def _angle_diff(a, b):
+        return np.arctan2(np.sin(a - b), np.cos(a - b))
+
+    @staticmethod
+    def assign_xy_to_node(node_poses, query_xy, query_yaw=None,
+                        dist_thresh=0.5, yaw_thresh=np.pi/3,
+                        return_multiple=False):
+        """
+        PGP-style assignment, adapted for query pose with only (x,y).
+        If query_yaw is provided, uses yaw gating like original. Otherwise uses only distance.
+        """
+        dist_vals = []
+        yaw_diffs = []
+
+        qxy = np.asarray(query_xy, dtype=float)
+
+        for i in range(len(node_poses)):
+            # node_poses[i]: (Li, 3) with columns [x,y,yaw]
+            distances = np.linalg.norm(node_poses[i][:, :2] - qxy[None, :], axis=1)
+            dist_min = float(np.min(distances))
+            dist_vals.append(dist_min)
+
+            if query_yaw is not None:
+                idx = int(np.argmin(distances))
+                yaw_lane = float(node_poses[i][idx, 2])
+                yaw_diffs.append(float(np.arctan2(np.sin(yaw_lane - query_yaw), np.cos(yaw_lane - query_yaw))))
+            else:
+                yaw_diffs.append(0.0)  # dummy
+
+        dist_vals = np.asarray(dist_vals)
+
+        if query_yaw is not None:
+            yaw_diffs = np.asarray(yaw_diffs)
+            idcs_yaw = np.where(np.abs(yaw_diffs) <= yaw_thresh)[0]
+            idcs_dist = np.where(dist_vals <= dist_thresh)[0]
+            idcs = np.intersect1d(idcs_dist, idcs_yaw)
+        else:
+            idcs = np.where(dist_vals <= dist_thresh)[0]
+
+        if len(idcs) > 0:
+            if return_multiple:
+                return idcs
+            return int(idcs[int(np.argmin(dist_vals[idcs]))])
+        else:
+            # fallback: closest overall
+            best = int(np.argmin(dist_vals))
+            return np.asarray([best]) if return_multiple else best
 
     def reset_opendrive(self):
         self._Map__opendrive = self.__orig_opendrive

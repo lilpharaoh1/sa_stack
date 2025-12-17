@@ -158,6 +158,8 @@ class PGPEncoder(PredictionEncoder):
             # encodings['node_seq_gt'] = inputs['node_seq_gt']
             encodings['s_next'] = inputs['map_representation']['s_next']
             encodings['edge_type'] = inputs['map_representation']['edge_type']
+            print([k for k in inputs.keys()])
+            encodings['drive_traversal'] = inputs['drive_traversal']
 
         return encodings
 
