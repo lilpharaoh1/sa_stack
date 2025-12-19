@@ -579,7 +579,7 @@ class Dataset(Map):
             'edge_type': edge_type
         }
 
-        plot_map_representation(map_representation, self.nodes, self.edges)
+        # plot_map_representation(map_representation, self.nodes, self.edges)
 
         return map_representation
 
