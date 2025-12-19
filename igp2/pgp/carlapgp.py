@@ -58,7 +58,7 @@ class CarlaPGP:
             else:
                 self.__agent_history[agent_id].append(self.state2vector(agent_id, agent_state))
             
-    def predict_trajectories(self, agent_waypoints=None, agent_drives=None):
+    def predict_trajectories(self, agent_waypoints=None):
         agent_ids, agent_inputs = [], []
         for agent_id, agent_history in self.__agent_history.items():
             if len(agent_history) >= self.interval:
@@ -72,7 +72,7 @@ class CarlaPGP:
                 map_representation = self.__dataset.get_map_representation()
                 surrounding_agent_representation = self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # EMRAN This could be done in a batch
                 agent_node_masks = self.__dataset.get_agent_node_masks(map_representation, surrounding_agent_representation)
-                drive_traversal = self.__dataset.get_drive_traversal(agent_id, agent_waypoints, agent_drives, map_representation) # Don't really need to be passing everything here but wtf
+                drive_traversal = self.__dataset.get_drive_traversal(agent_id, agent_waypoints, map_representation) # Don't really need to be passing everything here but wtf
 
                 # Add to inputs
                 agent_ids.append(agent_id)

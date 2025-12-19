@@ -84,8 +84,8 @@ class PGP(PredictionAggregator):
             init_node = encodings['init_node']
             sampled_traversals = self.sample_policy(torch.exp(pi), s_next, init_node)
 
-        print(sampled_traversals[:, 0])
-        print(drive_traversal)
+        # print(sampled_traversals[:, 0])
+        # print(drive_traversal)
 
         # Valid positions
         A, P, S = sampled_traversals.shape
@@ -117,38 +117,6 @@ class PGP(PredictionAggregator):
 
             # Overwrite sampled_traversals only for agents with valid generated traversal
             sampled_traversals[has_valid_dt] = seq[has_valid_dt].unsqueeze(1).expand(-1, P, -1)
-
-
-
-
-            # # We will build per-agent [S] sequences then broadcast to [P, S]
-            # arangeS = torch.arange(S, device=device).view(1, S)  # [1, S]
-            # lens = lengths_clamped.view(A, 1)                    # [A, 1]
-
-            # # Default: filled with fill_val
-            # seq = fill_val.view(A, 1).expand(A, S).clone()       # [A, S]
-
-            # # Copy prefix from gen into seq for those agents
-            # # Create indices [A, S] into gen, but only first lens entries are used.
-            # idx = torch.arange(S, device=device).view(1, S).expand(A, S)  # [A, S]
-            # take_prefix = idx < lens                                      # [A, S] bool
-
-            # # Take gen prefix values (need gen to have at least S cols; if not, clamp indexing)
-            # # If L < S, clamp to L-1 to avoid OOB; typically L >= S in your setup.
-            # L = gen.shape[1]
-            # idx_gen = torch.clamp(idx, max=L - 1)
-            # gen_prefix = gen.gather(1, idx_gen)  # [A, S]
-
-            # seq[take_prefix] = gen_prefix[take_prefix]
-
-            # # Now write seq into out for agents with valid generated traversal, for ALL predictions
-            # # out: [A, P, S]
-            # sampled_traversals[valid_drive_traversals] = seq[has_valid].unsqueeze(1).expand(-1, P, -1)
-
-
-        drive_traversals = torch.zeros_like(sampled_traversals)
-        print("drive_traversals.shape:", drive_traversals.shape)
-        
 
         # Selectively aggregate context along traversed paths
         agg_enc = self.aggregate(sampled_traversals, node_encodings, target_agent_encoding)

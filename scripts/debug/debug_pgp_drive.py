@@ -288,7 +288,7 @@ if __name__ == '__main__':
                                        n_simulations=n_simulations,
                                        view_radius=100,
                                        pgp_drive=True,
-                                       pgp_control=True,
+                                       pgp_control=False,
                                        store_results="all")
             carla_sim.add_agent(agents[aid], "ego")
             # carla_sim.spectator.set_location(
@@ -296,7 +296,7 @@ if __name__ == '__main__':
             #     carla.Location(50.0, 0.0, 5.0)
             #     )
         else:
-            agents[aid] = ip.TrafficAgent(aid, frame[aid], goal, fps, pgp_drive=True, pgp_control=True)
+            agents[aid] = ip.TrafficAgent(aid, frame[aid], goal, fps, pgp_drive=True, pgp_control=False)
             carla_sim.add_agent(agents[aid], None)
 
     observations = []
@@ -308,19 +308,19 @@ if __name__ == '__main__':
         observations.append(obs)
         actions.append(acts)
 
-        if carla_sim.timestep % carla_sim.pgp.interval != 0:
-            continue
+        # if carla_sim.timestep % carla_sim.pgp.interval != 0:
+        #     continue
 
-        agent_history = carla_sim.pgp.agent_history
-        trajectories = carla_sim.pgp.trajectories
-        probabilities = carla_sim.pgp.probabilities
-        traversals = carla_sim.pgp.traversals
+        # agent_history = carla_sim.pgp.agent_history
+        # trajectories = carla_sim.pgp.trajectories
+        # probabilities = carla_sim.pgp.probabilities
+        # traversals = carla_sim.pgp.traversals
 
-        if not agent_history is None:
-            plot_agent_histories(agent_history, carla_sim.scenario_map, markings=True)
-        if not trajectories is None:
-            plot_pgp_trajectories(trajectories, probabilities, agent_history, carla_sim.scenario_map, markings=True)
-        if not traversals is None:
-            plot_graph_traversals(traversals, agent_history, carla_sim.pgp.dataset, carla_sim.scenario_map, markings=True)
+        # if not agent_history is None:
+        #     plot_agent_histories(agent_history, carla_sim.scenario_map, markings=True)
+        # if not trajectories is None:
+        #     plot_pgp_trajectories(trajectories, probabilities, agent_history, carla_sim.scenario_map, markings=True)
+        # if not traversals is None:
+        #     plot_graph_traversals(traversals, agent_history, carla_sim.pgp.dataset, carla_sim.scenario_map, markings=True)
 
-        plt.show()
+        # plt.show()

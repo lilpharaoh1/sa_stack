@@ -86,7 +86,7 @@ class CarlaSim:
 
         self.__scenario_map = None
         if isinstance(xodr, Map):
-            self.__scenario_map = xodr
+            self.__scenario_map = xodrf
         
         if not map_name is None:
             if self.__scenario_map is None:
@@ -275,7 +275,12 @@ class CarlaSim:
             if agent is None:
                 continue
 
-            control = agent.next_control(observation, prediction)
+            try:
+                control = agent.next_control(observation, prediction)
+            except RuntimeError as e:
+                print(f"Couldn't generate control command for Agent {agent_id}: {e}")
+                control = None
+
             if control is None:
                 logger.debug("Removing agent because control is None")
                 # self.remove_agent(agent.agent_id)
@@ -293,26 +298,15 @@ class CarlaSim:
         if self.__timestep % self.__pgp.interval == 0:
             # EMRAN Clean up how we do this PLEASE!
 
-            for agent_id, agent in self.agents.items():
-                print(f"Agent {agent_id}: {[ma for ma in agent.agent.macro_actions]}")
-                try:
-                    print(f"Agent {agent_id}: {[ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions[1:]]}")
-                except:
-                    print(f"Agent {agent_id}: Couldn't get trajectory")
+            # for agent_id, agent in self.agents.items():
+            #     print(f"Agent {agent_id}: {[(ma, type(ma)) for ma in agent.agent.macro_actions]}")
+            #     try:
+            #         print(f"Agent {agent_id}: {[ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions]}")
+            #     except:
+            #         print(f"Agent {agent_id}: Couldn't get trajectory")
 
-            agent_waypoints = {agent_id: np.concatenate([ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions]) \
-                                if agent.agent.current_macro is not None and agent.agent._pgp_drive else [] \
-                                for agent_id, agent in self.agents.items()}
-            # try:
-            #     agent_waypoints = {agent_id: np.concatenate([ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions]) \
-            #                     if agent.agent.current_macro is not None else [] \
-            #                     for agent_id, agent in self.agents.items()}
-            # except:
-            #     agent_waypoints = {agent_id: agent.agent.current_macro.get_trajectory().path[:-1] \
-            #                     if agent.agent.current_macro is not None else [] \
-            #                     for agent_id, agent in self.agents.items()}
-            agent_drives = {agent_id: agent.agent._pgp_drive for agent_id, agent in self.agents.items()}
-            self.__pgp.predict_trajectories(agent_waypoints=agent_waypoints, agent_drives=agent_drives)
+            agent_waypoints = self.__get_agent_waypoints()
+            self.__pgp.predict_trajectories(agent_waypoints=agent_waypoints)
 
         if self.__pgp.trajectories is not None:
             return Prediction(self.__pgp.trajectories, self.__pgp.probabilities, self.__pgp.traversals, self.__pgp.agent_history)
@@ -356,6 +350,24 @@ class CarlaSim:
         for agent_id, agent in self.agents.items():
             if agent is not None:
                 self.remove_agent(agent_id)
+    
+    def __get_agent_waypoints(self):
+        agent_waypoints = {}
+        for agent_id, agent in self.agents.items():
+            if agent is None:
+                continue
+            if agent.agent.current_macro is not None and agent.agent._pgp_drive:
+                try:
+                    out = np.concatenate([ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions])
+                except:
+                    out = agent.agent.current_macro.get_trajectory().path[:-1]
+            else:
+                out = []
+            agent_waypoints[agent_id] = out
+
+        # print("Got to the end!")
+        # exit()
+        return agent_waypoints
 
     @property
     def client(self) -> carla.Client:

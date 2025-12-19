@@ -741,29 +741,19 @@ class Dataset(Map):
         init_node[assigned_nodes] = 1/len(assigned_nodes)
         return init_node
     
-    def get_drive_traversal(self, agent_id, agent_waypoints, agent_drives, map_representation):
-        if agent_waypoints is None or agent_drives is None:
+    def get_drive_traversal(self, agent_id, agent_waypoints, map_representation):
+        if agent_waypoints is None:
             return None
 
-        if agent_waypoints.keys() != agent_drives.keys():
-            missing_w = agent_drives.keys() - agent_waypoints.keys()
-            missing_d = agent_waypoints.keys() - agent_drives.keys()
-            raise ValueError(
-                f"Mismatched agent IDs. Missing in waypoints: {sorted(missing_w)}; "
-                f"missing in drives: {sorted(missing_d)}"
-            )
-
-
         waypoints = agent_waypoints[agent_id]
-        drive = agent_drives[agent_id]
 
-        if not drive or waypoints is None or len(waypoints) == 0:
+        if waypoints is None or len(waypoints) == 0:
             traversal = []
         else:
             # Your "do something" goes here
             # waypoints = waypoints.path[:-1]
 
-            print(f"Agent {agent_id}: {waypoints}")
+            # print(f"Agent {agent_id}: {waypoints}")
 
             # Example placeholder:
             traversal = self.match_xy_trajectory_to_nodes(
