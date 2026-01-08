@@ -2,8 +2,8 @@ import imageio
 import matplotlib.pyplot as plt
 import numpy as np
 
-from . import Map
-from .elements.road_lanes import LaneTypes
+from igp2.opendrive import Map
+from igp2.opendrive.elements.road_lanes import LaneTypes
 
 
 def plot_map(odr_map: Map, ax: plt.Axes = None, scenario_config=None, **kwargs) -> plt.Axes:
@@ -111,11 +111,13 @@ def plot_map(odr_map: Map, ax: plt.Axes = None, scenario_config=None, **kwargs) 
                                 color=color)
 
         if kwargs.get("road_ids", False):
-            mid_point = len(road.midline.xy) // 2
-            ax.text(road.midline.xy[0][mid_point],
-                    road.midline.xy[1][mid_point],
-                    road.id,
-                    color=color, fontsize=15)
+            # if road.id in [7, 144, 145, 158]:
+            if road.id in [22, 183, 9, 313, 331]:
+                mid_point = len(road.midline.xy) // 2
+                ax.text(road.midline.xy[0][mid_point],
+                        road.midline.xy[1][mid_point],
+                        road.id,
+                        color=color, fontsize=15)
 
         if kwargs.get("markings", False):
             for lane_section in road.lanes.lane_sections:
@@ -151,6 +153,6 @@ def plot_map(odr_map: Map, ax: plt.Axes = None, scenario_config=None, **kwargs) 
 
 
 if __name__ == '__main__':
-    scenario = Map.parse_from_opendrive(f"scenarios/maps/heckstrasse.xodr")
-    plot_map(scenario)
+    scenario = Map.parse_from_opendrive(f"scenarios/maps/Town01.xodr")
+    plot_map(scenario, road_ids=True)
     plt.show()

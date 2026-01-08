@@ -312,15 +312,15 @@ if __name__ == '__main__':
             continue
 
         agent_history = carla_sim.pgp.agent_history
-        trajectories = carla_sim.pgp.trajectories
-        probabilities = carla_sim.pgp.probabilities
-        traversals = carla_sim.pgp.traversals
+        drive = carla_sim.pgp.drive
+        drive_prob = carla_sim.pgp.drive_prob
+        drive_traversal = carla_sim.pgp.drive_traversal
 
         if not agent_history is None:
             plot_agent_histories(agent_history, carla_sim.scenario_map, markings=True)
-        if not trajectories is None:
-            plot_pgp_trajectories(trajectories, probabilities, agent_history, carla_sim.scenario_map, markings=True)
-        if not traversals is None:
-            plot_graph_traversals(traversals, agent_history, carla_sim.pgp.dataset, carla_sim.scenario_map, markings=True)
+        if not drive is None:
+            plot_pgp_trajectories(drive, drive_prob, agent_history, carla_sim.scenario_map, markings=True)
+        if not drive_traversal is None:
+            plot_graph_traversals(drive_traversal, agent_history, carla_sim.pgp.dataset, carla_sim.scenario_map, markings=True)
 
         plt.show()

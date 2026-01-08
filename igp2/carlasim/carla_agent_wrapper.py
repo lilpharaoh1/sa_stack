@@ -6,7 +6,7 @@ import logging
 
 from igp2.carlasim.local_planner import LocalPlanner, RoadOption
 from igp2.carlasim.util import world_to_ego_batch, ego_to_world_batch
-from igp2.core.vehicle import Observation, Prediction
+from igp2.core.vehicle import Observation, TrajectoryPrediction
 from igp2.core.agentstate import AgentState
 from igp2.core.trajectory import VelocityTrajectory
 from igp2.agents.agent import Agent
@@ -32,7 +32,7 @@ class CarlaAgentWrapper:
     def __repr__(self):
         return f"Actor {self.actor_id}; Agent {self.agent_id}"
 
-    def next_control(self, observation: Observation, prediction: Prediction = None) -> Optional[carla.VehicleControl]:
+    def next_control(self, observation: Observation, prediction: TrajectoryPrediction = None) -> Optional[carla.VehicleControl]:
         limited_observation = self.__apply_view_radius(observation)
         action = self.__agent.next_action(limited_observation, prediction)
         self.agent.vehicle.execute_action(action, observation.frame[self.agent_id])
@@ -40,7 +40,7 @@ class CarlaAgentWrapper:
             logger.debug(f"observation.frame[self.agent.agent_id].position, self.agent.goal.center = {observation.frame[self.agent.agent_id].position, self.agent.goal.center}")
             logger.debug("Returning None for next_control.")
             return None
-        
+
         if hasattr(self.agent, "current_macro"):
             if self.__current_ma != self.agent.current_macro:
                 self.__current_ma = self.agent.current_macro
@@ -50,8 +50,8 @@ class CarlaAgentWrapper:
                     self.__waypoints, stop_waypoint_creation=True, clean_queue=True)
 
         if self.__agent._pgp_control and prediction is not None:
-            trajs = prediction.trajectory[self.agent_id]
-            probs = prediction.probability[self.agent_id]
+            trajs = prediction.drive[self.agent_id]
+            probs = prediction.drive_prob[self.agent_id]
             history = prediction.agent_history[self.agent_id]
             self.__pgp_to_waypoints(trajs[np.argmax(probs)], history)
             self.__local_planner.set_global_plan(

@@ -4,7 +4,7 @@ import copy
 
 from igp2.agents.macro_agent import MacroAgent
 from igp2.core.agentstate import AgentState
-from igp2.core.vehicle import Action, Observation, Prediction
+from igp2.core.vehicle import Action, Observation, TrajectoryPrediction
 from igp2.core.goal import Goal
 from igp2.planlibrary.macro_action import MacroAction, Continue, Exit
 from igp2.recognition.astar import AStar
@@ -114,7 +114,7 @@ class TrafficAgent(MacroAgent):
             return False
         return done
 
-    def next_action(self, observation: Observation, prediction: Prediction = None) -> Action:
+    def next_action(self, observation: Observation, prediction: TrajectoryPrediction = None) -> Action:
         if self.current_macro is None:
             if len(self._macro_actions) == 0:
                 logger.debug("set_destination in next_action")

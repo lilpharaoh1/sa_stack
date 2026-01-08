@@ -760,7 +760,7 @@ class Dataset(Map):
                 traj_xy_world=np.asarray(waypoints),
                 map_representation=map_representation,
                 # dist_thresh=..., yaw_thresh=...
-        )
+            )
 
         drive_traversal = np.zeros((self.max_nodes))
         drive_traversal_mask = np.ones((self.max_nodes))
@@ -778,9 +778,15 @@ class Dataset(Map):
         node_feats = map_representation['lane_node_feats']      # (max_nodes, poly_len, 6)
         node_masks = map_representation['lane_node_masks']      # (max_nodes, poly_len, 6)
 
-        N = len(self.nodes)  # only real nodes, ignore padding
-        node_poses = []
+        # Count actual nodes from map_representation itself (not self.nodes which may be stale)
+        N = 0
+        for i in range(len(node_feats)):
+            if (node_masks[i][:, 0] == 0).any():
+                N += 1
+            else:
+                break  # padding starts here
 
+        node_poses = []
         for i in range(N):
             valid = np.where(node_masks[i][:, 0] == 0)[0]
             if len(valid) == 0:
@@ -788,7 +794,7 @@ class Dataset(Map):
                 node_poses.append(np.zeros((1, 3), dtype=float))
             else:
                 node_poses.append(node_feats[i][valid, :3])  # x,y,yaw polyline
-        return node_poses
+        return node_poses, N
 
 
     def match_xy_trajectory_to_nodes(
@@ -827,26 +833,25 @@ class Dataset(Map):
         if traj_xy.shape[0] == 0:
             return []
 
-        # Node index space is 0..N-1 where N=len(self.nodes)
-        node_ids = list(self.nodes.keys())
-        N = len(node_ids)
+        # Get node poses and count N from map_representation (not self.nodes which may be stale)
+        node_poses, N = self.build_node_poses_for_matching(map_representation)
         if N == 0:
             return []
 
-        # Adjacency in index space using s_next (aligned with your pipeline)
+        # Adjacency in index space using s_next and edge_type
+        # edge_type > 0 indicates a real edge (1=successor, 2=lane-change, 3=terminal)
         s_next = map_representation["s_next"]  # (max_nodes, max_nodes+1)
+        edge_type = map_representation["edge_type"]  # (max_nodes, max_nodes+1)
         edge_set = set()
         for i in range(N):
-            nbrs = s_next[i, :-1]  # ignore terminal slot
-            for j in nbrs:
-                j = int(j)
-                if 0 <= j < N:
-                    edge_set.add((i, j))
+            for col in range(s_next.shape[1] - 1):  # ignore terminal slot
+                if edge_type[i, col] > 0:  # only real edges, not zero-padding
+                    j = int(s_next[i, col])
+                    if 0 <= j < N:
+                        edge_set.add((i, j))
         if allow_stay:
             for i in range(N):
                 edge_set.add((i, i))
-
-        node_poses = self.build_node_poses_for_matching(map_representation)
 
         # yaw estimated from ego-frame trajectory deltas
         def query_yaw(t):

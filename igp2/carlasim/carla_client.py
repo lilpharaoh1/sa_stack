@@ -17,7 +17,7 @@ from igp2.pgp.carlapgp import CarlaPGP
 from igp2.agents.agent import Agent
 from igp2.carlasim.traffic_manager import TrafficManager
 from igp2.carlasim.carla_agent_wrapper import CarlaAgentWrapper
-from igp2.core.vehicle import Observation, Prediction
+from igp2.core.vehicle import Observation, TrajectoryPrediction
 from igp2.core.agentstate import AgentState
 
 
@@ -268,7 +268,7 @@ class CarlaSim:
             # actor_transform.rotation += self.__spectator_transform.rotation
             self.__spectator.set_transform(actor_transform)
 
-    def __take_actions(self, observation: Observation, prediction: Prediction = None):
+    def __take_actions(self, observation: Observation, prediction: TrajectoryPrediction = None):
         commands = []
         controls = {}
         for agent_id, agent in self.agents.items():
@@ -293,7 +293,7 @@ class CarlaSim:
         self.__client.apply_batch_sync(commands)
         return controls
 
-    def __make_predictions(self, observation: Observation) -> Prediction:
+    def __make_predictions(self, observation: Observation) -> TrajectoryPrediction:
         self.__pgp.update(observation)
         if self.__timestep % self.__pgp.interval == 0:
             # EMRAN Clean up how we do this PLEASE!
@@ -308,8 +308,19 @@ class CarlaSim:
             agent_waypoints = self.__get_agent_waypoints()
             self.__pgp.predict_trajectories(agent_waypoints=agent_waypoints)
 
-        if self.__pgp.trajectories is not None:
-            return Prediction(self.__pgp.trajectories, self.__pgp.probabilities, self.__pgp.traversals, self.__pgp.agent_history)
+        if self.__pgp.prediction is not None:
+            return TrajectoryPrediction(
+                # Pure predictions
+                prediction=self.__pgp.prediction,
+                prediction_prob=self.__pgp.prediction_prob,
+                prediction_traversal=self.__pgp.prediction_traversal,
+                # Driven trajectories
+                drive=self.__pgp.drive,
+                drive_prob=self.__pgp.drive_prob,
+                drive_traversal=self.__pgp.drive_traversal,
+                # Shared
+                agent_history=self.__pgp.agent_history
+            )
         else:
             return None
 

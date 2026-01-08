@@ -18,11 +18,29 @@ class Action:
     target_angle: float = None
 
 @dataclass(eq=True, frozen=True)
-class Prediction:
-    """ Represents an prediction of agent motion using PGP"""
-    trajectory: Dict[int, AgentState]
-    probability: Dict
-    traversal: Dict
+class TrajectoryPrediction:
+    """
+    Represents predictions of agent motion using PGP.
+
+    Contains two sets of predictions:
+    1. Pure predictions (prediction, prediction_prob, prediction_traversal):
+       Always generated using normal PGP with no modifications.
+    2. Driven trajectories (drive, drive_prob, drive_traversal):
+       For agents with pgp_drive enabled, these contain trajectories
+       influenced by drive_traversal from macro action waypoints.
+       For other agents, these are the same as pure predictions.
+    """
+    # Pure PGP predictions (no drive_traversal modifications)
+    prediction: Dict[int, np.ndarray]
+    prediction_prob: Dict
+    prediction_traversal: Dict
+
+    # Driven trajectories (with pgp_drive modifications when enabled)
+    drive: Dict[int, np.ndarray]
+    drive_prob: Dict
+    drive_traversal: Dict
+
+    # Agent history (shared)
     agent_history: Dict
 
     def plot(self, ax: plt.Axes = None) -> plt.Axes:

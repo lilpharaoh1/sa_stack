@@ -29,9 +29,16 @@ class CarlaPGP:
         self.__dataset.interval = self.interval 
         self.__agent_history = {}
         self.__waypoints = {}
-        self.__trajectories = None
-        self.__probabilities = None
-        self.__traversals = None
+
+        # Pure PGP predictions (no drive_traversal modifications)
+        self.__prediction = None
+        self.__prediction_prob = None
+        self.__prediction_traversal = None
+
+        # Driven trajectories (with pgp_drive modifications when enabled)
+        self.__drive = None
+        self.__drive_prob = None
+        self.__drive_traversal = None
 
         yaml_path = "/home/emran/IGP2/igp2/pgp/configs/pgp_gatx2_lvm_traversal.yml"
         # Load model config file
@@ -59,44 +66,110 @@ class CarlaPGP:
                 self.__agent_history[agent_id].append(self.state2vector(agent_id, agent_state))
             
     def predict_trajectories(self, agent_waypoints=None):
-        agent_ids, agent_inputs = [], []
+        """
+        Generate trajectory predictions for all agents.
+
+        This method produces two sets of predictions:
+        1. Pure predictions (stored in self.__predictions): Always use normal PGP
+           with no drive_traversal modifications.
+        2. Driven trajectories (stored in self.__trajectories): For agents with
+           pgp_drive enabled, uses drive_traversal from their macro action waypoints.
+
+        Args:
+            agent_waypoints: Dict mapping agent_id to waypoints for agents with pgp_drive enabled.
+                             Empty or None waypoints means the agent doesn't have pgp_drive.
+        """
+        if agent_waypoints is None:
+            agent_waypoints = {}
+
+        # Build base inputs for all agents (without drive_traversal)
+        agent_ids = []
+        base_inputs = []  # Inputs without drive_traversal
+
         for agent_id, agent_history in self.__agent_history.items():
             if len(agent_history) >= self.interval:
                 agent_state = agent_history[-1]
-                self.__dataset.generate_graph( \
+                self.__dataset.generate_graph(
                     agent_pose=[*agent_state[:2], heading_from_history(agent_history)])
-
-                # plot_vector_map(self.__dataset, self.__dataset, markings=True, agent=True)
 
                 target_agent_representation = transform_states_to_vehicle_frame(np.array(list(agent_history)))
                 map_representation = self.__dataset.get_map_representation()
-                surrounding_agent_representation = self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history) # EMRAN This could be done in a batch
+                surrounding_agent_representation = self.__dataset.get_surrounding_agent_representation(agent_id, self.__agent_history)
                 agent_node_masks = self.__dataset.get_agent_node_masks(map_representation, surrounding_agent_representation)
-                drive_traversal = self.__dataset.get_drive_traversal(agent_id, agent_waypoints, map_representation) # Don't really need to be passing everything here but wtf
+                init_node = self.__dataset.get_initial_node(map_representation)
 
-                # Add to inputs
+                # Store base input (used for pure predictions)
                 agent_ids.append(agent_id)
-                agent_inputs.append({
+                base_inputs.append({
                     "target_agent_representation": target_agent_representation,
                     "map_representation": map_representation,
                     "surrounding_agent_representation": surrounding_agent_representation,
                     "agent_node_masks": agent_node_masks,
-                    "init_node": self.__dataset.get_initial_node(map_representation),
-                    "drive_traversal": drive_traversal
+                    "init_node": init_node,
+                    "agent_id": agent_id,  # Keep track for drive_traversal lookup
+                    "agent_pose": self.__dataset.agent  # Store pose for correct world->ego transform
                 })
-        
-        if len(agent_inputs) > 0:
-            batched_inputs = stack_dicts(agent_inputs)
-            trajectories = self.__model(batched_inputs)
 
-            self.__trajectories = {}
-            self.__probabilities = {}
-            self.__traversals = {}
+        if len(base_inputs) == 0:
+            return
+
+        # === Pass 1: Pure predictions (no drive_traversal) ===
+        pure_inputs = []
+        for inp in base_inputs:
+            pure_input = {k: v for k, v in inp.items() if k not in ("agent_id", "agent_pose")}
+            # Restore agent pose for correct world->ego transform
+            self.__dataset.agent = inp["agent_pose"]
+            # Empty drive_traversal for pure predictions (pass empty list for this agent)
+            pure_input["drive_traversal"] = self.__dataset.get_drive_traversal(
+                inp["agent_id"], {inp["agent_id"]: []}, inp["map_representation"])
+            pure_inputs.append(pure_input)
+
+        batched_pure_inputs = stack_dicts(pure_inputs)
+        pure_trajectories = self.__model(batched_pure_inputs)
+
+        self.__prediction = {}
+        self.__prediction_prob = {}
+        self.__prediction_traversal = {}
+        for traj_id, agent_id in enumerate(agent_ids):
+            self.__prediction[agent_id] = self.transform_trajectories(
+                pure_trajectories['traj'][traj_id].cpu().detach().numpy())
+            self.__prediction_prob[agent_id] = pure_trajectories['probs'][traj_id].cpu().detach().numpy()
+            self.__prediction_traversal[agent_id] = pure_trajectories['traversals'][traj_id].cpu().detach().numpy()
+
+        # === Pass 2: Driven trajectories (with drive_traversal for pgp_drive agents) ===
+        # Check if any agent has pgp_drive waypoints
+        has_driven_agents = any(
+            agent_id in agent_waypoints and len(agent_waypoints.get(agent_id, [])) > 0
+            for agent_id in agent_ids
+        )
+    
+        if has_driven_agents:
+            driven_inputs = []
+            for inp in base_inputs:
+                driven_input = {k: v for k, v in inp.items() if k not in ("agent_id", "agent_pose")}
+                # Restore agent pose for correct world->ego transform
+                self.__dataset.agent = inp["agent_pose"]
+                # Use drive_traversal from agent_waypoints for this agent
+                driven_input["drive_traversal"] = self.__dataset.get_drive_traversal(
+                    inp["agent_id"], agent_waypoints, inp["map_representation"])
+                driven_inputs.append(driven_input)
+
+            batched_driven_inputs = stack_dicts(driven_inputs)
+            driven_trajectories = self.__model(batched_driven_inputs)
+
+            self.__drive = {}
+            self.__drive_prob = {}
+            self.__drive_traversal = {}
             for traj_id, agent_id in enumerate(agent_ids):
-                # Assign trajectories to self.__trajectories                    
-                self.__trajectories[agent_id] = self.transform_trajectories(trajectories['traj'][traj_id].cpu().detach().numpy())
-                self.__probabilities[agent_id] = trajectories['probs'][traj_id].cpu().detach().numpy()
-                self.__traversals[agent_id] = trajectories['traversals'][traj_id].cpu().detach().numpy()
+                self.__drive[agent_id] = self.transform_trajectories(
+                    driven_trajectories['traj'][traj_id].cpu().detach().numpy())
+                self.__drive_prob[agent_id] = driven_trajectories['probs'][traj_id].cpu().detach().numpy()
+                self.__drive_traversal[agent_id] = driven_trajectories['traversals'][traj_id].cpu().detach().numpy()
+        else:
+            # No driven agents, so driven trajectories are same as pure predictions
+            self.__drive = self.__prediction.copy()
+            self.__drive_prob = self.__prediction_prob.copy()
+            self.__drive_traversal = self.__prediction_traversal.copy()
 
     def transform_trajectories(self, traj_preds):
         out_trajs = np.zeros_like(traj_preds)
@@ -186,10 +259,16 @@ class CarlaPGP:
         return [x, y, speed, acceleration, yaw_rate]
 
     def remove(self, agent_id):
-        del self.__agent_history[agent_id]
-        del self.__trajectories[agent_id]
-        del self.__probabilities[agent_id]
-        del self.__traversals[agent_id]
+        if agent_id in self.__agent_history:
+            del self.__agent_history[agent_id]
+        if self.__prediction is not None and agent_id in self.__prediction:
+            del self.__prediction[agent_id]
+            del self.__prediction_prob[agent_id]
+            del self.__prediction_traversal[agent_id]
+        if self.__drive is not None and agent_id in self.__drive:
+            del self.__drive[agent_id]
+            del self.__drive_prob[agent_id]
+            del self.__drive_traversal[agent_id]
 
     @property
     def dataset(self):
@@ -200,16 +279,34 @@ class CarlaPGP:
         return self.__agent_history
 
     @property
-    def trajectories(self):
-        return self.__trajectories
-    
-    @property   
-    def probabilities(self):
-        return self.__probabilities
-    
+    def prediction(self):
+        """Pure PGP predictions (no drive_traversal modifications)."""
+        return self.__prediction
+
     @property
-    def traversals(self):
-        return self.__traversals
+    def prediction_prob(self):
+        """Probabilities for pure PGP predictions."""
+        return self.__prediction_prob
+
+    @property
+    def prediction_traversal(self):
+        """Traversals for pure PGP predictions."""
+        return self.__prediction_traversal
+
+    @property
+    def drive(self):
+        """Driven trajectories (with pgp_drive modifications when enabled)."""
+        return self.__drive
+
+    @property
+    def drive_prob(self):
+        """Probabilities for driven trajectories."""
+        return self.__drive_prob
+
+    @property
+    def drive_traversal(self):
+        """Traversals for driven trajectories."""
+        return self.__drive_traversal
 
     @property
     def interval(self):

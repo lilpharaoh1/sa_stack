@@ -210,7 +210,75 @@ def generate_random_frame(ego: int,
 
     return ret
 
-# from scripts.experiments.scenarios.util import parse_args, generate_random_frame
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+
+plt.ioff()
+
+def fig_to_rgb(fig):
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    return np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8).reshape(h, w, 3)
+
+class VideoWriter:
+    def __init__(self, path, fps=10):
+        self.path = path
+        self.fps = fps
+        self._writer = None
+        self._size = None
+        self._count = 0
+
+    def write_rgb(self, rgb):
+        if rgb is None:
+            return
+
+        h, w = rgb.shape[:2]
+        if self._size is None:
+            self._size = (w, h)
+
+        # HARD CHECK: if this triggers, your corruption is from variable frame sizes
+        if (w, h) != self._size:
+            raise RuntimeError(f"Frame size changed: got {(w,h)} expected {self._size}")
+
+        if self._writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self._writer = cv2.VideoWriter(self.path, fourcc, self.fps, self._size)
+            if not self._writer.isOpened():
+                raise RuntimeError(f"VideoWriter failed to open for path={self.path}")
+
+        self._writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        self._count += 1
+
+    def close(self):
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+        print(f"[VideoWriter] wrote {self._count} frames to {self.path}")
+
+
+def capture_new_figs_rgb(plot_fn, *args, **kwargs):
+    before = set(plt.get_fignums())
+    plot_fn(*args, **kwargs)
+    after = set(plt.get_fignums())
+    new_nums = sorted(after - before)
+
+    rgbs = []
+    for fnum in new_nums:
+        fig = plt.figure(fnum)
+
+        # FORCE CONSISTENT OUTPUT CANVAS SIZE
+        fig.set_size_inches(12, 6, forward=True)
+        fig.set_dpi(150)
+
+        # Avoid layout that can resize canvas unpredictably
+        # fig.tight_layout()  # <-- do NOT call here if it causes variability
+
+        rgb = fig_to_rgb(fig)
+        rgbs.append(rgb)
+        plt.close(fig)
+
+    return rgbs
 
 if __name__ == '__main__':
     ip.setup_logging()
@@ -222,7 +290,7 @@ if __name__ == '__main__':
     max_speed = 20.0 # args.max_speed
     ego_id = 0
     n_simulations = 2 # args.n_sim
-    fps = 15 # args.fps  # Simulator frequency
+    fps = 20 # args.fps  # Simulator frequency
     T = 2 # args.period  # MCTS update period
 
     random.seed(seed)
@@ -230,46 +298,51 @@ if __name__ == '__main__':
     np.seterr(divide="ignore")
     ip.Maneuver.MAX_SPEED = max_speed
 
-    # Set randomised spawn parameters here
-    ego_spawn_box = ip.Box(np.array([-80.0, -1.8]), 10, 3.5, 0.0)
-    ego_vel_range = (5.0, max_speed)
-    veh1_spawn_box = ip.Box(np.array([-70.0, 1.7]), 10, 3.5, 0.0)
-    veh1_vel_range = (5.0, max_speed)
-    veh2_spawn_box = ip.Box(np.array([52.0, -42.5]), 10, 3.5, np.pi / 2)
-    veh2_vel_range = (5.0, max_speed)
 
-    # Vehicle goals
-    goals = {
-        ego_id: ip.BoxGoal(ip.Box(np.array([90.0, 0.0]), 5, 7, 0.0)),
-        ego_id + 1: ip.BoxGoal(ip.Box(np.array([50, -25.5]), 5, 7, np.pi * 3 / 2)),
-        ego_id + 2: ip.BoxGoal(ip.Box(np.array([90.0, 0.0]), 5, 7, 0.0))
-    }
+    scenario = "scenario1"
+    scenario_xodr = f"scenarios/maps/{scenario}.xodr"
+    scenario_map = ip.Map.parse_from_opendrive(scenario_xodr)
+    try:
+        scenario_config = json.load(open(os.path.join("scenarios", "configs", f"{scenario}.json"), "r"))
+    except FileNotFoundError as e:
+        logger.exception(msg="No configuration file was found for the given arguments", exc_info=e)
+        raise e
 
-    scenario_path = "scenarios/maps/scenario1.xodr"
-    scenario_map = ip.Map.parse_from_opendrive(scenario_path)
+    print(scenario_config["agents"])
+    agent_spawns = []
+    goals = {}
+    for agent_config in scenario_config["agents"]:
+        spawn_box = ip.Box(np.array(agent_config['spawn']['box']['center']), agent_config['spawn']['box']['length'], \
+                                    agent_config['spawn']['box']['width'], agent_config['spawn']['box']['heading'])
+        vel_range = agent_config['spawn']['velocity']
+        agent_spawns.append((spawn_box, vel_range))
+
+        goal = ip.BoxGoal(ip.Box(np.array(agent_config['goal']['box']['center']), agent_config['goal']['box']['length'], \
+                                          agent_config['goal']['box']['width'], agent_config['goal']['box']['heading']))
+
+        goals[agent_config['id']] = goal
 
     frame = generate_random_frame(ego_id,
                                   scenario_map,
-                                  [(ego_spawn_box, ego_vel_range),
-                                   (veh1_spawn_box, veh1_vel_range),
-                                   (veh2_spawn_box, veh2_vel_range)])
+                                  agent_spawns)
 
     # ip.plot_map(scenario_map, markings=True, midline=True)
-    # plt.plot(*list(zip(*ego_spawn_box.boundary)))
-    # plt.plot(*list(zip(*veh1_spawn_box.boundary)))
-    # plt.plot(*list(zip(*veh2_spawn_box.boundary)))
+    # for spawn in agent_spawns:
+    #     plt.plot(*list(zip(*spawn[0].boundary)))
     # for aid, state in frame.items():
-    #     plt.plot(*state.position, marker="x")
+    #     plt.plot(*state.position, marker="x", color='k')
     #     plt.text(*state.position, aid)
-    # for goal in goals.values():
+    # for aid, goal in goals.items():
+    #     plt.plot(*goal.box.center, marker="x", color='k')
+    #     plt.text(*goal.box.center, aid)
     #     plt.plot(*list(zip(*goal.box.boundary)), c="g")
     # plt.gca().add_patch(plt.Circle(frame[0].position, 100, color='b', fill=False))
-    # # plt.show()
+    # plt.show()
 
     cost_factors = {"time": 0.1, "velocity": 0.0, "acceleration": 0.1, "jerk": 0., "heading": 0.0,
                     "angular_velocity": 0.1, "angular_acceleration": 0.1, "curvature": 0.0, "safety": 0.}
     reward_factors = {"time": 1.0, "jerk": -0.1, "angular_acceleration": -0.2, "curvature": -0.1}
-    carla_sim = ip.carlasim.CarlaSim(xodr=scenario_path, carla_path=args.carla_path)
+    carla_sim = ip.carlasim.CarlaSim(xodr=scenario_xodr, carla_path=args.carla_path)
 
     agents = {}
     agents_meta = ip.AgentMetadata.default_meta_frame(frame)
@@ -287,8 +360,8 @@ if __name__ == '__main__':
                                        fps=fps,
                                        n_simulations=n_simulations,
                                        view_radius=100,
-                                       pgp_drive=False,
-                                       pgp_control=False,
+                                       pgp_drive=True,
+                                       pgp_control=True,
                                        store_results="all")
             carla_sim.add_agent(agents[aid], "ego")
             # carla_sim.spectator.set_location(
@@ -296,13 +369,18 @@ if __name__ == '__main__':
             #     carla.Location(50.0, 0.0, 5.0)
             #     )
         else:
-            agents[aid] = ip.TrafficAgent(aid, frame[aid], goal, fps, pgp_drive=False, pgp_control=False)
+            agents[aid] = ip.TrafficAgent(aid, frame[aid], goal, fps, pgp_drive=True, pgp_control=True)
             carla_sim.add_agent(agents[aid], None)
 
     observations = []
     actions = []
     colors = ['r', 'g', 'b', 'y', 'k']
 
+    traj_video = VideoWriter("pgp_trajectories.mp4", fps=fps)
+    trav_video = VideoWriter("pgp_traversals.mp4", fps=fps)  # optional
+
+    record_trajectories = True
+    record_traversals = False  
     for t in range(500):
         obs, acts = carla_sim.step()
         observations.append(obs)
@@ -312,15 +390,34 @@ if __name__ == '__main__':
             continue
 
         agent_history = carla_sim.pgp.agent_history
-        prediction = carla_sim.pgp.prediction
-        prediction_prob = carla_sim.pgp.prediction_prob
-        prediction_traversal = carla_sim.pgp.prediction_traversal
+        drive = carla_sim.pgp.drive
+        drive_prob = carla_sim.pgp.drive_prob
+        drive_traversal = carla_sim.pgp.drive_traversal
 
-        if not agent_history is None:
-            plot_agent_histories(agent_history, carla_sim.scenario_map, markings=True)
-        if not prediction is None:
-            plot_pgp_trajectories(prediction, prediction_prob, agent_history, carla_sim.scenario_map, markings=True)
-        if not prediction_traversal is None:
-            plot_graph_traversals(prediction_traversal, agent_history, carla_sim.pgp.dataset, carla_sim.scenario_map, markings=True)
+        # --- record only PGP trajectories ---
+        if record_trajectories and drive is not None:
+            rgbs = capture_new_figs_rgb(
+                plot_pgp_trajectories,
+                drive, drive_prob, agent_history, carla_sim.scenario_map,
+                markings=True
+            )
+            for rgb in rgbs:
+                # if multiple figs were created, write them all (or just rgbs[0])
+                os.makedirs("debug_frames", exist_ok=True)
 
-        plt.show()
+                # after you get rgb:
+                cv2.imwrite(f"debug_frames/frame_{t:04d}.png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+                traj_video.write_rgb(rgb)
+
+        # --- optionally record traversals into separate video ---
+        if record_traversals and drive_traversal is not None:
+            rgbs = capture_new_figs_rgb(
+                plot_graph_traversals,
+                drive_traversal, agent_history, carla_sim.pgp.dataset, carla_sim.scenario_map,
+                markings=True
+            )
+            for rgb in rgbs:
+                trav_video.write_rgb(rgb)
+
+    traj_video.close()
+    trav_video.close()
