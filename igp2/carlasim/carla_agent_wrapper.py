@@ -49,7 +49,7 @@ class CarlaAgentWrapper:
                 self.__local_planner.set_global_plan(
                     self.__waypoints, stop_waypoint_creation=True, clean_queue=True)
 
-        if self.__agent._pgp_control and prediction is not None:
+        if self.__agent._pgp_control and prediction is not None and self.agent_id in prediction.drive:
             trajs = prediction.drive[self.agent_id]
             probs = prediction.drive_prob[self.agent_id]
             history = prediction.agent_history[self.agent_id]
