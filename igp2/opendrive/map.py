@@ -545,6 +545,84 @@ class Map(object):
         assert 0 <= lane_section_idx < len(lane_sections), "Invalid lane section index given"
         return lane_sections[lane_section_idx].get_lane(lane_id)
 
+    def get_reachable_goals(self, min_lane_length: float = 10.0) -> List[np.ndarray]:
+        """ Generate a list of viable goal points from the road network.
+
+        A viable goal is a lane endpoint that:
+        1. Is on a drivable lane (not in a junction)
+        2. Can be reached from somewhere (has predecessor at lane or road level)
+        3. Is on a lane with sufficient length
+
+        Args:
+            min_lane_length: Minimum lane length to consider for goals
+
+        Returns:
+            List of numpy arrays representing viable goal positions
+        """
+        goals = []
+
+        for road_id, road in self.roads.items():
+            # Skip junction roads - they are connectors, not destinations
+            if road.junction is not None:
+                continue
+
+            # Check if road has a predecessor (road-level connectivity)
+            road_has_predecessor = road.link.predecessor is not None
+
+            for lane_section in road.lanes.lane_sections:
+                for lane in lane_section.all_lanes:
+                    # Skip non-drivable lanes and center lanes
+                    if lane.id == 0 or lane.type != LaneTypes.DRIVING:
+                        continue
+
+                    # Skip lanes that are too short
+                    if lane.midline is None or lane.midline.length < min_lane_length:
+                        continue
+
+                    # Check if lane has at least one predecessor (can be reached)
+                    # Either lane-level predecessor or road-level predecessor
+                    lane_has_predecessor = (lane.link.predecessor is not None and
+                                            len(lane.link.predecessor) > 0)
+
+                    # A lane endpoint is reachable if either:
+                    # 1. The lane has a direct predecessor lane, OR
+                    # 2. The road has a predecessor (meaning traffic can enter this road)
+                    #    For lanes going in the road direction (negative lane IDs),
+                    #    road predecessor means the lane end is reachable.
+                    #    For opposite direction lanes (positive IDs), road successor
+                    #    means the lane end is reachable.
+                    if lane.id < 0:
+                        # Lane follows road direction - check road predecessor
+                        is_reachable = lane_has_predecessor or road_has_predecessor
+                    else:
+                        # Lane opposes road direction - check road successor
+                        road_has_successor = road.link.successor is not None
+                        is_reachable = lane_has_predecessor or road_has_successor
+
+                    if is_reachable:
+                        # The endpoint of the lane is a viable goal
+                        endpoint = np.array(lane.midline.coords[-1])
+                        goals.append(endpoint)
+
+        # Fallback: if no reachable goals found, use all drivable lane endpoints
+        # A* will filter out truly unreachable ones
+        if not goals:
+            logger.warning("No reachable goals found via connectivity check. "
+                          "Using all drivable lane endpoints as fallback.")
+            for road_id, road in self.roads.items():
+                if road.junction is not None:
+                    continue
+                for lane_section in road.lanes.lane_sections:
+                    for lane in lane_section.all_lanes:
+                        if lane.id == 0 or lane.type != LaneTypes.DRIVING:
+                            continue
+                        if lane.midline is None or lane.midline.length < min_lane_length:
+                            continue
+                        endpoint = np.array(lane.midline.coords[-1])
+                        goals.append(endpoint)
+
+        return goals
+
     def is_valid(self):
         """ Checks if the Map geometry is valid. """
         for road in self.roads.values():

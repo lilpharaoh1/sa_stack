@@ -74,9 +74,11 @@ class AStar:
         frontier = [(0.0, ([], frame))]
         iterations = 0
         while frontier and len(solutions) < n_trajectories and iterations < self.max_iter:
+            # print(f"-------------------------------{iterations}--------------------------------")
+            # print(frame[agent_id].position, goal)
             iterations += 1
             cost, (actions, frame) = heapq.heappop(frontier)
-
+            # print(actions)
             # Check termination condition
             trajectory = self._full_trajectory(actions, offset_point=False)
             if self.goal_reached(goal, trajectory) and \
@@ -91,6 +93,7 @@ class AStar:
 
             # Check if current position is valid
             if not scenario_map.roads_at(frame[agent_id].position):
+                # print("current position not valid")
                 continue
 
             # Check if path has self-intersection
@@ -116,21 +119,34 @@ class AStar:
                         config = MacroActionConfig(ma_args)
                         new_ma = macro_action(config, agent_id=agent_id, frame=frame, scenario_map=scenario_map)
 
+                        # print("here1")
+
                         new_actions = actions + [new_ma]
                         new_trajectory = self._full_trajectory(new_actions)
 
+                        # print("here2")
+
                         # Check if has passed through region and went outside region already
                         if not self._check_in_region(new_trajectory, visible_region):
+                            print("continuing because check_in_region has failed")
                             continue
+
+                        # print("here3")
 
                         new_frame = MacroAction.play_forward_macro_action(agent_id, scenario_map, frame, new_ma)
                         new_frame[agent_id] = new_trajectory.final_agent_state
                         new_cost = self._f(new_trajectory, goal)
 
+                        # print(new_frame[agent_id].position, new_ma)
+
+                        # print("here4")
+
                         if any(new_cost == cost for cost, _ in frontier):
                             # If there is already a trajectory with the same cost, add a tiny random number to the cost
                             # to avoid duplicates
                             new_cost += np.random.uniform(0.0, 1e-6)
+
+                        # print("here5")
 
                         heapq.heappush(frontier, (new_cost, (new_actions, new_frame)))
                     except Exception as e:

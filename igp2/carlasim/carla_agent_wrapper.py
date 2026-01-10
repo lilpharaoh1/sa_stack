@@ -59,8 +59,8 @@ class CarlaAgentWrapper:
 
         target_speed = action.target_speed
         if target_speed is None:
-            logger.debug("EMRAN) Setting target_speed to 0.0 km/hr")
-            logger.debug(f"Macro actions for Agent {self.agent.agent_id}) self._macro_actions, self._current_macro: {self.agent._macro_actions, self.agent.current_macro, self.agent._current_macro_id}")
+            # logger.debug("EMRAN) Setting target_speed to 0.0 km/hr")
+            # logger.debug(f"Macro actions for Agent {self.agent.agent_id}) self._macro_actions, self._current_macro: {self.agent._macro_actions, self.agent.current_macro, self.agent._current_macro_id}")
             target_speed = 0.0
         self.__local_planner.set_speed(target_speed * 3.6)
         return self.__local_planner.run_step()

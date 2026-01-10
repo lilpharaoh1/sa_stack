@@ -222,6 +222,33 @@ class CarlaSim:
         self.agents[agent_id] = None
         self.__pgp.remove(agent_id)
 
+    def __is_spawn_on_dead_end(self, position: np.ndarray, heading: float) -> bool:
+        """Check if a spawn position is on a dead-end road (no successor lanes).
+
+        A spawn point is considered problematic if the lane it's on has no
+        successor lanes and is not near a junction, meaning the agent would
+        have nowhere to go after reaching the end of the lane.
+
+        Args:
+            position: The (x, y) position in IGP2 coordinates (y-inverted from CARLA)
+            heading: The heading angle in radians
+
+        Returns:
+            True if the spawn is on a dead-end road, False otherwise.
+        """
+        lane = self.scenario_map.best_lane_at(position, heading)
+        if lane is None:
+            return True  # No lane found, treat as problematic
+
+        # Check if this lane has successors
+        if lane.link is None or lane.link.successor is None or len(lane.link.successor) == 0:
+            # No direct successors - check if it's a junction road (which is okay)
+            if lane.parent_road.junction is not None:
+                return False  # Junction roads can have no successors but connect elsewhere
+            return True  # True dead-end
+
+        return False
+
     def get_traffic_manager(self) -> "TrafficManager":
         """ Enables and returns the internal traffic manager of the simulation."""
         self.__traffic_manager.enabled = True
@@ -231,7 +258,18 @@ class CarlaSim:
             distances = [np.isclose((q.location - p.location).x, 0.0) and
                          np.isclose((q.location - p.location).y, 0.0) for q in spawn_points]
             if not any(distances) and len(self.scenario_map.roads_at((p.location.x, -p.location.y), drivable=True)) > 0:
+                # Convert to IGP2 coordinates and get heading from spawn rotation
+                igp2_position = np.array([p.location.x, -p.location.y])
+                heading = np.deg2rad(-p.rotation.yaw)
+
+                # Filter out spawn points on dead-end roads
+                if self.__is_spawn_on_dead_end(igp2_position, heading):
+                    logger.debug(f"Filtering out spawn point at {p.location} - dead-end road")
+                    continue
+
                 spawn_points.append(p)
+
+        logger.info(f"Traffic manager initialized with {len(spawn_points)} valid spawn points")
         self.__traffic_manager.spawns = spawn_points
         return self.__traffic_manager
 

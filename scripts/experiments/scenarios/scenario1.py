@@ -84,14 +84,14 @@ if __name__ == '__main__':
     ego_vel_range = (5.0, max_speed)
     veh1_spawn_box = ip.Box(np.array([-70.0, 1.7]), 10, 3.5, 0.0)
     veh1_vel_range = (5.0, max_speed)
-    veh2_spawn_box = ip.Box(np.array([-18.34, -25.5]), 3.5, 10, 0.0)
-    veh2_vel_range = (5.0, max_speed)
+    # veh2_spawn_box = ip.Box(np.array([-18.34, -25.5]), 3.5, 10, 0.0)
+    # veh2_vel_range = (5.0, max_speed)
 
     # Vehicle goals
     goals = {
         ego_id: ip.BoxGoal(ip.Box(np.array([-6.0, 0.0]), 5, 7, 0.0)),
         ego_id + 1: ip.BoxGoal(ip.Box(np.array([-22, -25.5]), 3.5, 5, 0.0)),
-        ego_id + 2: ip.BoxGoal(ip.Box(np.array([-6.0, 0.0]), 5, 7, 0.0))
+        # ego_id + 2: ip.BoxGoal(ip.Box(np.array([-6.0, 0.0]), 5, 7, 0.0))
     }
 
     scenario_path = "scenarios/maps/scenario1.xodr"
@@ -100,13 +100,13 @@ if __name__ == '__main__':
     frame = generate_random_frame(ego_id,
                                   scenario_map,
                                   [(ego_spawn_box, ego_vel_range),
-                                   (veh1_spawn_box, veh1_vel_range),
-                                   (veh2_spawn_box, veh2_vel_range)])
+                                   (veh1_spawn_box, veh1_vel_range)]) # ,
+                                #    (veh2_spawn_box, veh2_vel_range)])
 
     ip.plot_map(scenario_map, markings=True, midline=True)
     plt.plot(*list(zip(*ego_spawn_box.boundary)))
     plt.plot(*list(zip(*veh1_spawn_box.boundary)))
-    plt.plot(*list(zip(*veh2_spawn_box.boundary)))
+    # plt.plot(*list(zip(*veh2_spawn_box.boundary)))
     for aid, state in frame.items():
         plt.plot(*state.position, marker="x")
         plt.text(*state.position, aid)
@@ -118,7 +118,7 @@ if __name__ == '__main__':
     cost_factors = {"time": 0.1, "velocity": 0.0, "acceleration": 0.1, "jerk": 0., "heading": 0.0,
                     "angular_velocity": 0.1, "angular_acceleration": 0.1, "curvature": 0.0, "safety": 0.}
     reward_factors = {"time": 1.0, "jerk": -0.1, "angular_acceleration": -0.2, "curvature": -0.1}
-    carla_sim = ip.carla.CarlaSim(xodr=scenario_path, carla_path=args.carla_path)
+    carla_sim = ip.carlasim.CarlaSim(xodr=scenario_path, carla_path=args.carla_path)
 
     agents = {}
     agents_meta = ip.AgentMetadata.default_meta_frame(frame)
@@ -142,5 +142,5 @@ if __name__ == '__main__':
             agents[aid] = ip.TrafficAgent(aid, frame[aid], goal, fps)
             carla_sim.add_agent(agents[aid], None)
 
-    visualiser = ip.carla.Visualiser(carla_sim)
+    visualiser = ip.carlasim.Visualiser(carla_sim)
     visualiser.run()

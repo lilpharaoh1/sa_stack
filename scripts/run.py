@@ -29,9 +29,9 @@ def main():
 
     ip_config = Configuration()
     ip_config.set_properties(**config["scenario"])
-
+    
     xodr_path = config["scenario"]["map_path"]
-    scenario_map = ip.Map.parse_from_opendrive(xodr_path)
+    scenario_map = ip.Map.parse_from_opendrive(xodr_path) 
 
     frame = generate_random_frame(scenario_map, config)
 

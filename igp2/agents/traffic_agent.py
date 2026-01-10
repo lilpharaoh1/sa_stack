@@ -84,21 +84,31 @@ class TrafficAgent(MacroAgent):
                                         open_loop=False)
 
         if len(actions) == 0:
+            print("len actions == 0 so failing due to astar")
             raise RuntimeError(f"Couldn't find path to goal {self.goal} for TrafficAgent {self.agent_id}.")
         self._macro_actions = actions[0]
         self._current_macro = self._macro_actions[0]
 
     def done(self, observation: Observation) -> bool:
-        """ Returns true if there are no more actions on the macro list and the current macro is finished. """
-        done = self._current_macro_id + 1 >= len(self._macro_actions) and super(TrafficAgent, self).done(observation)
+        """ Returns true if there are no more actions on the macro list and the current macro is finished,
+        OR if the goal has been reached while on the final macro action. """
+        macro_done = self._current_macro_id + 1 >= len(self._macro_actions) and super(TrafficAgent, self).done(observation)
         goal_reached = self.goal.reached(observation.frame[self.agent_id].position) if self.goal is not None else True
-        if done and not goal_reached:
+
+        # Check if we're on the final macro action and have reached the goal
+        # This allows early completion when the goal is reached, without waiting
+        # for the maneuver to report done (which requires driving past the endpoint)
+        on_final_macro = self._current_macro_id + 1 >= len(self._macro_actions)
+        done = macro_done or (on_final_macro and goal_reached)
+
+        if macro_done and not goal_reached:
             try:
                 logger.debug("set_destination in done")
                 self.set_destination(observation)
-            except RuntimeError:
+            except RuntimeError as e:
                 # If goal can't be reached, then just follow lane until end of episode.
-                logger.info(f"Agent {self.agent_id} couldn't reach goal {self.goal}.")
+                logger.info(f"Agent {self.agent_id} at {observation.frame[self.agent_id].position} couldn't reach goal {self.goal}.")
+                logger.info(e)
                 state = observation.frame[self.agent_id]
                 scenario_map = observation.scenario_map
                 if Continue.applicable(state, scenario_map):
@@ -121,7 +131,7 @@ class TrafficAgent(MacroAgent):
                 self.set_destination(observation)
 
         if self._current_macro.done(observation):
-            logger.debug(f"Macro actions for Agent {self.agent_id}) self._macro_actions, self._current_macro: {self._macro_actions, self._current_macro, self._current_macro_id}")
+            # logger.debug(f"Macro actions for Agent {self.agent_id}) self._macro_actions, self._current_macro: {self._macro_actions, self._current_macro, self._current_macro_id}")
             if self._current_macro_id < len(self._macro_actions):
                 try:
                     self._advance_macro(observation)

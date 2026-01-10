@@ -227,8 +227,8 @@ if __name__ == '__main__':
     ip.Maneuver.MAX_SPEED = max_speed
 
 
-    scenario = "Town01"
-    scenario_xodr = f"scenarios/maps/{scenario}.xodr"
+    scenario = "soa1"
+    scenario_xodr = f"scenarios/maps/Town01.xodr"
     scenario_map = ip.Map.parse_from_opendrive(scenario_xodr)
     try:
         scenario_config = json.load(open(os.path.join("scenarios", "configs", f"{scenario}.json"), "r"))

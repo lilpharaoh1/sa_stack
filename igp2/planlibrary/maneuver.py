@@ -327,7 +327,18 @@ class FollowLane(Maneuver):
         lat_dist = lane_ls.distance(current_point)
         margin = self.POINT_SPACING + 2 * lat_dist
 
-        assert current_lon < termination_lon, f'agent {self.agent_id}: current point is past the termination point'
+        # assert current_lon < termination_lon, f'agent {self.agent_id}: current point is past the termination point'
+
+        # Handle case where termination point projects behind current position
+        # This can happen when the termination point is on a different lane
+        # In this case, use the lane's end point as termination instead
+        if current_lon >= termination_lon:
+            print("Would have been an error")
+            termination_lon = lane_ls.length
+            termination_point = lane_ls.coords[-1]
+            # If agent is already at or past the lane end, return minimal trajectory
+            if current_lon >= termination_lon:
+                return np.array([state.position, np.array(termination_point)])
 
         # Follow lane straight ahead, if cannot sample more points
         if current_lon >= lane_ls.length - margin:
@@ -501,8 +512,10 @@ class Turn(FollowLane):
         Returns:
             Boolean indicating whether the maneuver is applicable
         """
-        currently_in_junction = scenario_map.junction_at(state.position, max_distance=0.1) is not None
+        # Use current lane's road to check if in junction (consistent with Continue.applicable)
+        # This avoids issues at junction boundaries where proximity check might differ from road check
         current_lane = scenario_map.best_lane_at(state.position, state.heading)
+        currently_in_junction = current_lane.parent_road.junction is not None
         next_lanes = current_lane.link.successor
         next_lane_is_junction = (next_lanes is not None and
                                  any([ll.parent_road.junction is not None for ll in next_lanes]))

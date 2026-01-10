@@ -94,10 +94,12 @@ class MacroAction(abc.ABC):
         self.scenario_map = scenario_map
 
         self._maneuvers = self.get_maneuvers()
+        # print("MacroAction.__init__) self._maneuvers:", self._maneuvers)
         self._current_maneuver = None
         self._current_maneuver_id = 0
         if not self.open_loop:
             self._advance_maneuver(Observation(frame, scenario_map))
+            # print("MacroAction.__init__) advanced maneuvers, self._current_maneuver:", self._current_maneuver)
 
     def __repr__(self):
         return self.__class__.__name__
@@ -322,6 +324,7 @@ class Continue(MacroAction):
             current_frame = Maneuver.play_forward_maneuver(self.agent_id, self.scenario_map,
                                                            current_frame, maneuvers[-1], 0.1)
         self.final_frame = current_frame
+        # print("Continue.get_maneuvers) maneuvers:", maneuvers)
         return maneuvers
 
     @staticmethod
@@ -577,6 +580,7 @@ class ChangeLaneRight(ChangeLane):
 
 class Exit(MacroAction):
     TURN_TARGET_THRESHOLD = 1  # meters; Threshold for checking if turn target is within distance of another point
+    MIN_TURN_TARGET_DISTANCE = 5.0  # meters; Minimum distance from current position to consider a turn target valid
 
     def __init__(self, config: MacroActionConfig, agent_id: int, frame: Dict[int, AgentState], scenario_map: Map):
         self.turn_target = config.turn_target
@@ -723,7 +727,10 @@ class Exit(MacroAction):
     def applicable(state: AgentState, scenario_map: Map) -> bool:
         """ True if either Turn (in junction) or GiveWay is applicable (ahead of junction) and not on
          a roundabout road. """
-        in_junction = scenario_map.junction_at(state.position, max_distance=0.1) is not None
+        # Use current lane's road to check if in junction (consistent with Continue.applicable)
+        # This avoids issues at junction boundaries where proximity check might differ from road check
+        current_lane = scenario_map.best_lane_at(state.position, state.heading)
+        in_junction = current_lane.parent_road.junction is not None
         can_turn = Turn.applicable(state, scenario_map)
         if in_junction:
             return can_turn
@@ -757,7 +764,12 @@ class Exit(MacroAction):
 
         for connecting_lane in connecting_lanes:
             if not scenario_map.road_in_roundabout(connecting_lane.parent_road) or len(connecting_lanes) == 1:
-                targets.append(np.array(connecting_lane.midline.coords[-1]))
+                turn_target = np.array(connecting_lane.midline.coords[-1])
+                # Filter out turn targets too close to current position to prevent
+                # selecting the same exit we just completed
+                distance_to_target = np.linalg.norm(turn_target - state.position)
+                if distance_to_target >= Exit.MIN_TURN_TARGET_DISTANCE:
+                    targets.append(turn_target)
 
         return [{"turn_target": t} for t in targets]
 

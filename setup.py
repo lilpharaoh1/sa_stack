@@ -20,6 +20,6 @@ setuptools.setup(name='igp2',
                  author='Balint Gyevnar, Cillian Brewitt, Samuel Garcin, Massimiliano Tamborski, Stefano Albrecht',
                  author_email='balint.gyevnar@ed.ac.uk',
                  url='https://github.com/uoe-agents/IGP2',
-                 packages=setuptools.find_packages(exclude=["tests", "scripts"]),
+                 packages=setuptools.find_packages(), # EMRAN removed exclude
                  install_requires=requirements
                  )
