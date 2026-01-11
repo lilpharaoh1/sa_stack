@@ -158,7 +158,7 @@ def to_ma_list(ma_confs: List[Dict[str, Any]], agent_id: int,
         -> List[ip.MacroAction]:
     mas = []
     for config in ma_confs:
-        config["open_loop"] = False
+        config["open_loop"] = True
         frame = start_frame if not mas else mas[-1].final_frame
         if "target_sequence" in config:
             config["target_sequence"] = [scenario_map.get_lane(rid, lid) for rid, lid in config["target_sequence"]]
@@ -206,6 +206,31 @@ def generate_random_frame(ego: int,
 
     return ret
 
+def create_agent(agent_config, scenario_map, frame, fps, args):
+    base_agent = {"agent_id": agent_config["id"], "initial_state": frame[agent_config["id"]],
+                  "goal": ip.BoxGoal(ip.Box(**agent_config["goal"]["box"])), "fps": fps}
+
+    mcts_agent = {"scenario_map": scenario_map,
+                  "cost_factors": agent_config.get("cost_factors", None),
+                  "view_radius": agent_config.get("view_radius", None),
+                  "kinematic": not args.carla,
+                  "velocity_smoother": agent_config.get("velocity_smoother", None),
+                  "goal_recognition": agent_config.get("goal_recognition", None),
+                  "stop_goals": agent_config.get("stop_goals", False)}
+
+    if agent_config["type"] == "MCTSAgent":
+        agent = ip.MCTSAgent(**base_agent, **mcts_agent, **agent_config["mcts"])
+    elif agent_config["type"] == "TrafficAgent":
+        if "macro_actions" in agent_config and agent_config["macro_actions"]:
+            base_agent["macro_actions"] = to_ma_list(
+                agent_config["macro_actions"], agent_config["id"], frame, scenario_map)
+        agent = ip.TrafficAgent(**base_agent)
+    elif agent_config["type"] == "KeyboardAgent":
+        agent = ip.KeyboardAgent(**base_agent)
+    else:
+        raise ValueError(f"Unsupported agent type {agent_config['type']}")
+    return agent
+
 # from scripts.experiments.scenarios.util import parse_args, generate_random_frame
 
 if __name__ == '__main__':
@@ -227,7 +252,7 @@ if __name__ == '__main__':
     ip.Maneuver.MAX_SPEED = max_speed
 
 
-    scenario = "soa1"
+    scenario = "soa2"
     scenario_xodr = f"scenarios/maps/Town01.xodr"
     scenario_map = ip.Map.parse_from_opendrive(scenario_xodr)
     try:
@@ -247,12 +272,18 @@ if __name__ == '__main__':
 
         goal = ip.BoxGoal(ip.Box(np.array(agent_config['goal']['box']['center']), agent_config['goal']['box']['length'], \
                                           agent_config['goal']['box']['width'], agent_config['goal']['box']['heading']))
-
         goals[agent_config['id']] = goal
 
     frame = generate_random_frame(ego_id,
                                   scenario_map,
                                   agent_spawns)
+
+    failure_zones = []
+    for failure_zone in scenario_config["failure_zones"]:
+        failure_zones.append({
+                                "box": ip.Box(**failure_zone["box"]), 
+                                "frames": failure_zone["frames"],
+                             })
 
     ip.plot_map(scenario_map, markings=True, midline=True)
     for spawn in agent_spawns:
@@ -264,39 +295,39 @@ if __name__ == '__main__':
         plt.plot(*goal.box.center, marker="x", color='k')
         plt.text(*goal.box.center, aid)
         plt.plot(*list(zip(*goal.box.boundary)), c="g")
+    for failure_zone in failure_zones:
+        print(failure_zone)
+        plt.plot(*failure_zone["box"].center, marker="x", color='k')
+        plt.text(*failure_zone["box"].center, \
+                 f"{failure_zone['frames']['start']}-{failure_zone['frames']['end']}")
+        plt.plot(*list(zip(*failure_zone["box"].boundary)), c="r")
     plt.gca().add_patch(plt.Circle(frame[0].position, 100, color='b', fill=False))
     plt.show()
 
     cost_factors = {"time": 0.1, "velocity": 0.0, "acceleration": 0.1, "jerk": 0., "heading": 0.0,
                     "angular_velocity": 0.1, "angular_acceleration": 0.1, "curvature": 0.0, "safety": 0.}
     reward_factors = {"time": 1.0, "jerk": -0.1, "angular_acceleration": -0.2, "curvature": -0.1}
-    carla_sim = ip.carlasim.CarlaSim(xodr=scenario_xodr, carla_path=args.carla_path)
+    carla_sim = ip.carlasim.CarlaSim(map_name="Town01", xodr=scenario_xodr, carla_path=args.carla_path)
+    # carla_sim = ip.carlasim.CarlaSim(xodr=scenario_xodr, carla_path=args.carla_path)
 
     agents = {}
     agents_meta = ip.AgentMetadata.default_meta_frame(frame)
-    for aid in frame.keys():
-        goal = goals[aid]
+    for agent_config in scenario_config["agents"]:
+        aid = agent_config['id']
+        agents[aid] = create_agent(agent_config, scenario_map, frame, fps, args)
+        carla_sim.add_agent(agents[aid], "ego" if aid == ego_id else None)
 
-        if aid == ego_id:
-            agents[aid] = ip.MCTSAgent(agent_id=aid,
-                                       initial_state=frame[aid],
-                                       t_update=T,
-                                       scenario_map=scenario_map,
-                                       goal=goal,
-                                       cost_factors=cost_factors,
-                                       reward_factors=reward_factors,
-                                       fps=fps,
-                                       n_simulations=n_simulations,
-                                       view_radius=100,
-                                       store_results="all")
-            carla_sim.add_agent(agents[aid], "ego")
-            # carla_sim.spectator.set_location(
-            #     # carla.Location(frame[aid].position[0], -frame[aid].position[1], 5.0)
-            #     carla.Location(50.0, 0.0, 5.0)
-            #     )
-        else:
-            agents[aid] = ip.TrafficAgent(aid, frame[aid], goal, fps)
-            carla_sim.add_agent(agents[aid], None)
+    # Set up camera to follow the ego vehicle
+    ego_agent = carla_sim.get_ego()
+    if ego_agent is not None:
+        # Third-person view from behind and above the vehicle
+        # x is forward/backward (negative = behind), z is height, pitch tilts camera down
+        camera_transform = carla.Transform(
+            carla.Location(x=-10.0, z=6.0),
+            carla.Rotation(pitch=-15.0)  # Tilt down 15 degrees
+        )
+        carla_sim.attach_camera(ego_agent.actor, camera_transform)
+        logger.info(f"Camera set to follow ego vehicle (Agent {ego_id})")
 
     observations = []
     actions = []
@@ -305,6 +336,8 @@ if __name__ == '__main__':
         obs, acts = carla_sim.step()
         observations.append(obs)
         actions.append(acts)
+
+        ego_pos = obs.frame[ego_id]
 
         time.sleep(0.1)
 

@@ -14,8 +14,8 @@
       "spawn": {
         "box": {
           "center": [
-            92.4,
-            -40.1
+            338.5,
+            -250.0
           ],
           "length": 10,
           "width": 3.5,
@@ -43,7 +43,7 @@
       "type": "TrafficAgent",
       "spawn": {
         "box": {
-          "center": [20, -2.5],
+          "center": [334.8, -160.0],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
@@ -56,8 +56,8 @@
       "goal": {
         "box": {
           "center": [
-            200.0,
-            -2.5
+            334.8,
+            -310.0
           ],
           "length": 5,
           "width": 7,
@@ -70,7 +70,7 @@
       "type": "TrafficAgent",
       "spawn": {
         "box": {
-          "center": [40, -2.5],
+          "center": [334.8, -115.0],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
@@ -83,8 +83,8 @@
       "goal": {
         "box": {
           "center": [
-            200.0,
-            -2.5
+            334.8,
+            -310.0
           ],
           "length": 5,
           "width": 7,
@@ -97,7 +97,7 @@
       "type": "TrafficAgent",
       "spawn": {
         "box": {
-          "center": [170.0, 1.5],
+          "center": [334.8, -35.0],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
@@ -110,35 +110,8 @@
       "goal": {
         "box": {
           "center": [
-            20.0,
-            1.5
-          ],
-          "length": 5,
-          "width": 7,
-          "heading": 0.0
-        }
-      }
-    },
-    {
-      "id": 4,
-      "type": "TrafficAgent",
-      "spawn": {
-        "box": {
-          "center": [200.0, 1.5],
-          "length": 3.5,
-          "width": 10.0,
-          "heading": 0.0
-        },
-        "velocity": [
-          5.0,
-          10.0
-        ]
-      },
-      "goal": {
-        "box": {
-          "center": [
-            20.0,
-            1.5
+            334.8,
+            -310.0
           ],
           "length": 5,
           "width": 7,
@@ -151,10 +124,10 @@
     {
       "box": {
         "center": [
-          90.0,
-          0.0
+          325.7,
+          197.0
         ],
-        "length": 25,
+        "length": 18,
         "width": 17,
         "heading": 0.0
       },

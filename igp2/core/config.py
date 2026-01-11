@@ -4,6 +4,7 @@ from igp2.planlibrary.maneuver import Maneuver, Stop
 from igp2.core.trajectory import Trajectory
 from igp2.planlibrary.maneuver import SwitchLane, GiveWay
 from igp2.planlibrary.macro_action import ChangeLane
+from igp2.planlibrary.maneuver_cl import WaypointManeuver
 from igp2.recognition.astar import AStar
 
 logger = logging.getLogger(__name__)
@@ -140,3 +141,43 @@ class Configuration:
     def check_vehicle_in_front(self, value: bool):
         """ Whether to check for vehicles in front when changing lanes."""
         Maneuver.CHECK_VEHICLE_IN_FRONT = value
+
+    @property
+    def collision_check_enabled(self) -> bool:
+        """ Whether to enable cross-traffic collision checking in closed-loop maneuvers."""
+        return WaypointManeuver.COLLISION_CHECK_ENABLED
+
+    @collision_check_enabled.setter
+    def collision_check_enabled(self, value: bool):
+        """ Whether to enable cross-traffic collision checking in closed-loop maneuvers."""
+        WaypointManeuver.COLLISION_CHECK_ENABLED = value
+
+    @property
+    def collision_horizon(self) -> float:
+        """ Time horizon in seconds to look ahead for collisions."""
+        return WaypointManeuver.COLLISION_HORIZON
+
+    @collision_horizon.setter
+    def collision_horizon(self, value: float):
+        """ Time horizon in seconds to look ahead for collisions."""
+        WaypointManeuver.COLLISION_HORIZON = value
+
+    @property
+    def proximity_slowdown_dist(self) -> float:
+        """ Distance in meters at which to start slowing for nearby vehicles."""
+        return WaypointManeuver.PROXIMITY_SLOWDOWN_DIST
+
+    @proximity_slowdown_dist.setter
+    def proximity_slowdown_dist(self, value: float):
+        """ Distance in meters at which to start slowing for nearby vehicles."""
+        WaypointManeuver.PROXIMITY_SLOWDOWN_DIST = value
+
+    @property
+    def proximity_stop_dist(self) -> float:
+        """ Distance in meters at which to stop for vehicles on collision course."""
+        return WaypointManeuver.PROXIMITY_STOP_DIST
+
+    @proximity_stop_dist.setter
+    def proximity_stop_dist(self, value: float):
+        """ Distance in meters at which to stop for vehicles on collision course."""
+        WaypointManeuver.PROXIMITY_STOP_DIST = value

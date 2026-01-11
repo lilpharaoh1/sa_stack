@@ -127,8 +127,8 @@ class AStar:
                         # print("here2")
 
                         # Check if has passed through region and went outside region already
-                        if not self._check_in_region(new_trajectory, visible_region):
-                            print("continuing because check_in_region has failed")
+                        # Skip this check if the goal is outside the visible region
+                        if not self._check_in_region(new_trajectory, visible_region, goal):
                             continue
 
                         # print("here3")
@@ -207,11 +207,18 @@ class AStar:
         close_points = np.sum(np.isclose(ds, 0.0, atol=2 * Maneuver.POINT_SPACING), axis=1)
         return np.count_nonzero(close_points) > 2 / Maneuver.POINT_SPACING
 
-    def _check_in_region(self, trajectory: VelocityTrajectory, visible_region: Circle) -> bool:
+    def _check_in_region(self, trajectory: VelocityTrajectory, visible_region: Circle, goal: Goal = None) -> bool:
         """ Checks whether the trajectory is in the visible region. Ignores the initial section outside of the visible
         region, as this often happens when the vehicle calculates the optimal trajectory from the first observed point
-        of a vehicle."""
+        of a vehicle.
+
+        If the goal is outside the visible region, this check is skipped since the trajectory must leave the region
+        to reach the goal."""
         if visible_region is None:
+            return True
+
+        # If goal is outside visible region, allow trajectory to leave the region
+        if goal is not None and not visible_region.contains(goal.center):
             return True
 
         dists = np.linalg.norm(trajectory.path[:-1] - visible_region.center, axis=1)  # remove ending off offset point

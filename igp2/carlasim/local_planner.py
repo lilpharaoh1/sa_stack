@@ -220,6 +220,8 @@ class LocalPlanner(object):
         if self._follow_speed_limits:
             self._target_speed = self._vehicle.get_speed_limit()
 
+        print("before len(self._waypoints_queue):", len(self._waypoints_queue))
+
         # Add more waypoints too few in the horizon
         if not self._stop_waypoint_creation and len(self._waypoints_queue) < self._min_waypoint_queue_length:
             self._compute_next_waypoints(k=self._min_waypoint_queue_length)
@@ -246,8 +248,11 @@ class LocalPlanner(object):
             for _ in range(num_waypoint_removed):
                 self._waypoints_queue.popleft()
 
+
+        print("after len(self._waypoints_queue):", len(self._waypoints_queue))
         # Get the target waypoint and move using the PID controllers. Stop if no target waypoint
         if len(self._waypoints_queue) == 0:
+            print("getting control1")
             control = carla.VehicleControl()
             control.steer = 0.0
             control.throttle = 0.0
@@ -255,11 +260,14 @@ class LocalPlanner(object):
             control.hand_brake = False
             control.manual_gear_shift = False
         else:
+            print("getting control2")
             self.target_waypoint, self.target_road_option = self._waypoints_queue[0]
             control = self._vehicle_controller.run_step(self._target_speed, self.target_waypoint)
 
         if debug:
             draw_waypoints(self._vehicle.get_world(), [self.target_waypoint], 1.0)
+
+        print("control at end of local_planner.run_step:", control)
 
         return control
 

@@ -10,6 +10,7 @@ from igp2.core.vehicle import Observation, TrajectoryPrediction
 from igp2.core.agentstate import AgentState
 from igp2.core.trajectory import VelocityTrajectory
 from igp2.agents.agent import Agent
+from igp2.agents.keyboard_agent import KeyboardAgent
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +42,14 @@ class CarlaAgentWrapper:
             logger.debug("Returning None for next_control.")
             return None
 
+        # For KeyboardAgent, convert action directly to CARLA control (bypass LocalPlanner)
+        if isinstance(self.__agent, KeyboardAgent):
+            return self.__action_to_control(action)
+
         if hasattr(self.agent, "current_macro"):
             if self.__current_ma != self.agent.current_macro:
                 self.__current_ma = self.agent.current_macro
                 self.__trajectory_to_waypoints(self.__current_ma.get_trajectory())
-                # print("Waypoints:", self.__waypoints)
                 self.__local_planner.set_global_plan(
                     self.__waypoints, stop_waypoint_creation=True, clean_queue=True)
 
@@ -59,8 +63,6 @@ class CarlaAgentWrapper:
 
         target_speed = action.target_speed
         if target_speed is None:
-            # logger.debug("EMRAN) Setting target_speed to 0.0 km/hr")
-            # logger.debug(f"Macro actions for Agent {self.agent.agent_id}) self._macro_actions, self._current_macro: {self.agent._macro_actions, self.agent.current_macro, self.agent._current_macro_id}")
             target_speed = 0.0
         self.__local_planner.set_speed(target_speed * 3.6)
         return self.__local_planner.run_step()
@@ -79,6 +81,28 @@ class CarlaAgentWrapper:
                          if np.linalg.norm(pos - state.position) <= self.agent.view_radius}
             return Observation(new_frame, observation.scenario_map)
         return observation
+
+    def __action_to_control(self, action) -> carla.VehicleControl:
+        """Convert an Action directly to CARLA VehicleControl (for KeyboardAgent)."""
+        control = carla.VehicleControl()
+
+        # Convert acceleration to throttle/brake
+        if action.acceleration >= 0:
+            control.throttle = min(1.0, action.acceleration / 5.0)  # Normalize to [0, 1]
+            control.brake = 0.0
+        else:
+            control.throttle = 0.0
+            control.brake = min(1.0, -action.acceleration / 8.0)  # Normalize to [0, 1]
+
+        # Convert steering angle to CARLA steering [-1, 1]
+        # action.steer_angle is in radians, CARLA expects [-1, 1]
+        max_steer_angle = 0.7  # radians (about 40 degrees)
+        control.steer = np.clip(action.steer_angle / max_steer_angle, -1.0, 1.0)
+
+        control.hand_brake = False
+        control.manual_gear_shift = False
+
+        return control
 
     def __pgp_to_waypoints(self, ego_trajectory, history):
         self.__waypoints = []

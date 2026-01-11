@@ -302,9 +302,32 @@ class CarlaSim:
     def __update_spectator(self):
         if self.__spectator_parent is not None and self.__spectator_transform is not None:
             actor_transform = self.__spectator_parent.get_transform()
-            actor_transform.location += self.__spectator_transform.location
-            # actor_transform.rotation += self.__spectator_transform.rotation
-            self.__spectator.set_transform(actor_transform)
+
+            # Get the actor's forward and right vectors based on its rotation
+            yaw = np.radians(actor_transform.rotation.yaw)
+
+            # Calculate camera offset in world coordinates (relative to actor heading)
+            # x is forward/backward, y is left/right in actor's local frame
+            offset = self.__spectator_transform.location
+            world_offset_x = offset.x * np.cos(yaw) - offset.y * np.sin(yaw)
+            world_offset_y = offset.x * np.sin(yaw) + offset.y * np.cos(yaw)
+
+            # Apply the rotated offset
+            camera_location = carla.Location(
+                x=actor_transform.location.x + world_offset_x,
+                y=actor_transform.location.y + world_offset_y,
+                z=actor_transform.location.z + offset.z
+            )
+
+            # Set camera rotation to look at the vehicle
+            # Yaw follows the actor, pitch tilts down
+            camera_rotation = carla.Rotation(
+                pitch=self.__spectator_transform.rotation.pitch,
+                yaw=actor_transform.rotation.yaw,
+                roll=0
+            )
+
+            self.__spectator.set_transform(carla.Transform(camera_location, camera_rotation))
 
     def __take_actions(self, observation: Observation, prediction: TrajectoryPrediction = None):
         commands = []
