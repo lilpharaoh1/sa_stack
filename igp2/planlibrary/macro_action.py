@@ -641,7 +641,23 @@ class Exit(MacroAction):
             connecting_lane = self._find_connecting_lane(current_lane)
 
             if connecting_lane is None:
-                raise RuntimeError(f"Exit macro action failed: no connecting lane found from {current_lane} to turn target {self.turn_target}")
+                # No connecting lane found - just drive to the end of the current lane
+                logger.debug(f"No connecting lane from {current_lane} to turn target {self.turn_target}. "
+                            f"Driving to end of lane instead.")
+                lane_end = np.array(current_lane.midline.coords[-1])
+                config_dict = {
+                    "type": "follow-lane",
+                    "termination_point": lane_end,
+                    "fps": self.config.fps
+                }
+                config = ManeuverConfig(config_dict)
+                if self.open_loop:
+                    man = FollowLane(config, self.agent_id, frame, self.scenario_map)
+                else:
+                    man = CLManeuverFactory.create(config, self.agent_id, frame, self.scenario_map)
+                maneuvers.append(man)
+                self.final_frame = Maneuver.play_forward_maneuver(self.agent_id, self.scenario_map, frame, man)
+                return maneuvers
 
             # Add give-way maneuver
             config_dict = {
