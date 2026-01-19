@@ -80,6 +80,7 @@ class CarlaSim:
         self.__wait_for_server()
 
         self.__agents = {}
+        self.__static_objects = []  # Track spawned static objects
 
         self.__world = self.__client.get_world()
         self.__map = self.__world.get_map()
@@ -138,6 +139,7 @@ class CarlaSim:
 
     def __del__(self):
         self.__clear_agents()
+        self.clear_static_objects()
         self.__world.apply_settings(self.__original_settings)
         if self.__record:
             self.__client.stop_recorder()
@@ -221,6 +223,126 @@ class CarlaSim:
         self.agents[agent_id].agent.alive = False
         self.agents[agent_id] = None
         self.__pgp.remove(agent_id)
+
+    def add_static_object(self,
+                          position: tuple,
+                          heading: float = 0.0,
+                          blueprint_name: str = None,
+                          z_offset: float = 0.1) -> carla.Actor:
+        """Add a static object to the scene.
+
+        Spawns a static object (prop or parked vehicle) at the given position.
+        If a vehicle blueprint is used, physics is disabled to make it static.
+
+        Args:
+            position: (x, y) position in IGP2 coordinates (y will be inverted for CARLA).
+            heading: Heading angle in radians.
+            blueprint_name: CARLA blueprint name. Options include:
+                - Props: 'static.prop.trafficcone01', 'static.prop.container',
+                         'static.prop.streetbarrier', 'static.prop.constructioncone', etc.
+                - Vehicles (will be made static): 'vehicle.audi.a2', 'vehicle.tesla.model3', etc.
+                If None, defaults to 'static.prop.trafficcone01'.
+            z_offset: Height offset for spawning (default 0.1 to avoid ground clipping).
+
+        Returns:
+            The spawned CARLA actor.
+
+        Example config entry:
+            "static_objects": [
+                {"position": [100.0, -50.0], "heading": 1.57, "blueprint": "static.prop.trafficcone01"},
+                {"position": [105.0, -50.0], "heading": 0.0, "blueprint": "vehicle.audi.a2"}
+            ]
+        """
+        if blueprint_name is None:
+            blueprint_name = 'static.prop.trafficcone01'
+
+        blueprint_library = self.__world.get_blueprint_library()
+
+        # Try to find the blueprint
+        try:
+            blueprint = blueprint_library.find(blueprint_name)
+        except IndexError:
+            logger.warning(f"Blueprint '{blueprint_name}' not found. Using traffic cone.")
+            blueprint = blueprint_library.find('static.prop.trafficcone01')
+
+        # Create transform (convert IGP2 coordinates to CARLA)
+        yaw = np.rad2deg(-heading)
+        transform = Transform(
+            Location(x=position[0], y=-position[1], z=z_offset),
+            Rotation(yaw=yaw, roll=0.0, pitch=0.0)
+        )
+
+        # Spawn the actor
+        actor = self.__world.spawn_actor(blueprint, transform)
+
+        # If it's a vehicle, disable physics to make it static (parked car)
+        if blueprint_name.startswith('vehicle.'):
+            actor.set_simulate_physics(False)
+
+        self.__static_objects.append(actor)
+        logger.info(f"Added static object '{blueprint_name}' at position {position} (actor {actor.id}).")
+
+        return actor
+
+    def spawn_static_objects_from_config(self, static_objects: list) -> List[carla.Actor]:
+        """Spawn multiple static objects from a config list.
+
+        Args:
+            static_objects: List of dicts with keys: 'position', 'heading' (optional),
+                           'blueprint' (optional), 'z_offset' (optional).
+
+        Returns:
+            List of spawned CARLA actors.
+
+        Example:
+            static_objects = [
+                {"position": [100.0, -50.0], "heading": 1.57, "blueprint": "static.prop.trafficcone01"},
+                {"position": [105.0, -50.0], "blueprint": "vehicle.audi.a2"}
+            ]
+            carla_sim.spawn_static_objects_from_config(static_objects)
+        """
+        spawned = []
+        for obj in static_objects:
+            position = tuple(obj['position'])
+            heading = obj.get('heading', 0.0)
+            blueprint = obj.get('blueprint', None)
+            z_offset = obj.get('z_offset', 0.1)
+
+            actor = self.add_static_object(
+                position=position,
+                heading=heading,
+                blueprint_name=blueprint,
+                z_offset=z_offset
+            )
+            spawned.append(actor)
+
+        return spawned
+
+    def remove_static_object(self, actor: carla.Actor):
+        """Remove a static object from the simulation.
+
+        Args:
+            actor: The CARLA actor to remove.
+        """
+        if actor in self.__static_objects:
+            actor.destroy()
+            self.__static_objects.remove(actor)
+            logger.info(f"Removed static object (actor {actor.id}).")
+
+    def clear_static_objects(self):
+        """Remove all static objects from the simulation."""
+        for actor in self.__static_objects:
+            try:
+                actor.destroy()
+            except Exception as e:
+                logger.warning(f"Failed to destroy static object: {e}")
+        self.__static_objects.clear()
+        logger.info("Cleared all static objects.")
+
+    @property
+    def static_objects(self) -> List[carla.Actor]:
+        """List of all spawned static objects."""
+        return self.__static_objects
 
     def __is_spawn_on_dead_end(self, position: np.ndarray, heading: float) -> bool:
         """Check if a spawn position is on a dead-end road (no successor lanes).

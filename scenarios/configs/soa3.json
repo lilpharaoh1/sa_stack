@@ -14,8 +14,8 @@
       "spawn": {
         "box": {
           "center": [
-            92.4,
-            -40.1
+            2.0,
+            -260.0
           ],
           "length": 10,
           "width": 3.5,
@@ -43,7 +43,7 @@
       "type": "TrafficAgent",
       "spawn": {
         "box": {
-          "center": [20, -2.5],
+          "center": [-2.0, -240.0],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
@@ -56,8 +56,8 @@
       "goal": {
         "box": {
           "center": [
-            200.0,
-            -2.5
+            25.0,
+            -330.8
           ],
           "length": 5,
           "width": 7,
@@ -70,7 +70,7 @@
       "type": "TrafficAgent",
       "spawn": {
         "box": {
-          "center": [40, -2.5],
+          "center": [-2.0, -210.0],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
@@ -83,8 +83,8 @@
       "goal": {
         "box": {
           "center": [
-            200.0,
-            -2.5
+            25.0,
+            -330.8
           ],
           "length": 5,
           "width": 7,
@@ -97,7 +97,7 @@
       "type": "TrafficAgent",
       "spawn": {
         "box": {
-          "center": [170.0, 1.5],
+          "center": [-2.0, -160.0],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
@@ -110,35 +110,8 @@
       "goal": {
         "box": {
           "center": [
-            20.0,
-            1.5
-          ],
-          "length": 5,
-          "width": 7,
-          "heading": 0.0
-        }
-      }
-    },
-    {
-      "id": 4,
-      "type": "TrafficAgent",
-      "spawn": {
-        "box": {
-          "center": [200.0, 1.5],
-          "length": 3.5,
-          "width": 10.0,
-          "heading": 0.0
-        },
-        "velocity": [
-          5.0,
-          10.0
-        ]
-      },
-      "goal": {
-        "box": {
-          "center": [
-            20.0,
-            1.5
+            25.0,
+            -330.8
           ],
           "length": 5,
           "width": 7,
@@ -147,20 +120,23 @@
       }
     }
   ],
+  "static_objects": [
+      {"position": [2.0, -230.0], "heading": 0.0, "blueprint": "static.prop.streetbarrier"}
+  ],
   "failure_zones": [
     {
       "box": {
         "center": [
-          90.0,
-          0.0
+          -2.0,
+          -230.0
         ],
-        "length": 25,
-        "width": 17,
+        "length": 5.0,
+        "width": 40,
         "heading": 0.0
       },
       "frames": {
         "start": 0,
-        "end": 275
+        "end": 150
       }
     }
   ]

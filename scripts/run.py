@@ -130,6 +130,9 @@ def create_agent(agent_config, scenario_map, frame, fps, args):
                 agent_config["macro_actions"], agent_config["id"], frame, scenario_map)
         rolename = agent_config.get("rolename", "car")
         agent = ip.TrafficAgent(**base_agent)
+    elif agent_config["type"] == "KeyboardAgent":
+        agent = ip.KeyboardAgent(**base_agent)
+        rolename = "ego"
     else:
         raise ValueError(f"Unsupported agent type {agent_config['type']}")
     return agent, rolename

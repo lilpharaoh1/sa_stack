@@ -20,6 +20,8 @@ from shapely.geometry import Polygon
 from datetime import datetime
 from typing import List, Tuple, Dict
 
+from igp2.carlasim.status_window import StatusWindow
+
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +254,7 @@ if __name__ == '__main__':
     ip.Maneuver.MAX_SPEED = max_speed
 
 
-    scenario = "soa2"
+    scenario = "soa1"
     scenario_xodr = f"scenarios/maps/Town01.xodr"
     scenario_map = ip.Map.parse_from_opendrive(scenario_xodr)
     try:
@@ -284,6 +286,11 @@ if __name__ == '__main__':
                                 "box": ip.Box(**failure_zone["box"]), 
                                 "frames": failure_zone["frames"],
                              })
+    
+    static_objs = []
+    if 'static_objects' in scenario_config:
+        for static_obj in scenario_config["static_objects"]:
+            static_objs.append(static_obj)
 
     ip.plot_map(scenario_map, markings=True, midline=True)
     for spawn in agent_spawns:
@@ -317,6 +324,9 @@ if __name__ == '__main__':
         agents[aid] = create_agent(agent_config, scenario_map, frame, fps, args)
         carla_sim.add_agent(agents[aid], "ego" if aid == ego_id else None)
 
+    # Adding static objects
+    carla_sim.spawn_static_objects_from_config(static_objs)
+
     # Set up camera to follow the ego vehicle
     ego_agent = carla_sim.get_ego()
     if ego_agent is not None:
@@ -329,6 +339,10 @@ if __name__ == '__main__':
         carla_sim.attach_camera(ego_agent.actor, camera_transform)
         logger.info(f"Camera set to follow ego vehicle (Agent {ego_id})")
 
+    # Create status window for failure zone monitoring
+    status_window = StatusWindow(width=350, height=120, title="Failure Zone Status")
+    status_window.set_safe(f"Frame: 0")
+
     observations = []
     actions = []
     colors = ['r', 'g', 'b', 'y', 'k']
@@ -338,6 +352,28 @@ if __name__ == '__main__':
         actions.append(acts)
 
         ego_pos = obs.frame[ego_id]
+
+        # Check if ego is in any failure zone during the corresponding frames
+        in_failure_zone = False
+        triggered_zone = None
+        for fz in failure_zones:
+            frame_start = fz["frames"]["start"]
+            frame_end = fz["frames"]["end"]
+            if frame_start <= t <= frame_end:
+                if fz["box"].inside(ego_pos.position):
+                    in_failure_zone = True
+                    triggered_zone = fz
+                    break
+
+        # Update status window
+        if in_failure_zone:
+            status_window.set_failure(f"Frame {t}: Zone active!")
+        else:
+            status_window.set_safe(f"Frame: {t}")
+
+        # Keep window responsive
+        if not status_window.update():
+            break  # Window was closed
 
         time.sleep(0.1)
 
