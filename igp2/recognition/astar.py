@@ -87,8 +87,12 @@ class AStar:
                 if not actions:
                     logger.info(f"\tAID {agent_id} at {goal} already.")
                 else:
-                    logger.info(f"\tSolution found for AID {agent_id} to {goal}: {actions}")
-                    solutions.append(actions)
+                    # Skip if we already have this exact action sequence
+                    actions_key = tuple(str(a) for a in actions)
+                    existing_keys = [tuple(str(a) for a in sol) for sol in solutions]
+                    if actions_key not in existing_keys:
+                        logger.info(f"\tSolution found for AID {agent_id} to {goal}: {actions}")
+                        solutions.append(actions)
                 continue
 
             # Check if current position is valid
