@@ -762,14 +762,16 @@ class Exit(MacroAction):
         if connecting_lanes is None or len(connecting_lanes) == 0:
             connecting_lanes = [current_lane]
 
+        # print("junction, connection_lanes:", junction, connecting_lanes)
         for connecting_lane in connecting_lanes:
             if not scenario_map.road_in_roundabout(connecting_lane.parent_road) or len(connecting_lanes) == 1:
                 turn_target = np.array(connecting_lane.midline.coords[-1])
                 # Filter out turn targets too close to current position to prevent
                 # selecting the same exit we just completed
                 distance_to_target = np.linalg.norm(turn_target - state.position)
-                if distance_to_target >= Exit.MIN_TURN_TARGET_DISTANCE:
-                    targets.append(turn_target)
+                # print("turn_target, state.position, distance_to_target:", turn_target, state.position, distance_to_target)
+                # if distance_to_target >= Exit.MIN_TURN_TARGET_DISTANCE:
+                targets.append(turn_target)
 
         return [{"turn_target": t} for t in targets]
 
