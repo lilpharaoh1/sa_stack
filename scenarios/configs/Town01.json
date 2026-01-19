@@ -58,9 +58,10 @@
           "jerk": -1.0,
           "angular_velocity": -0.1,
           "curvature": 0.0
-        }
+        },
+        "max_goal_recognition_agents": 2
       },
-      "view_radius": 100
+      "view_radius": 50
     }
   ]
 }

@@ -42,7 +42,8 @@ class MCTSAgent(TrafficAgent):
                  default_rewards: Dict[str, float] = None,
                  velocity_smoother: dict = None,
                  goal_recognition: dict = None,
-                 stop_goals: bool = False):
+                 stop_goals: bool = False,
+                 max_goal_recognition_agents: int = 3):
         """ Create a new MCTS agent.
 
         Args:
@@ -63,6 +64,8 @@ class MCTSAgent(TrafficAgent):
             velocity_smoother: Velocity smoother arguments. See: VelocitySmoother
             goal_recognition: Goal recognition parameters. See: GoalRecognition
             stop_goals: Whether to check for stopping goals.
+            max_goal_recognition_agents: Maximum number of other agents to run goal recognition for.
+                Closest agents are prioritized. Set to 0 to disable goal recognition.
         """
         super().__init__(agent_id, initial_state, goal, fps)
         if not kinematic:
@@ -72,6 +75,7 @@ class MCTSAgent(TrafficAgent):
         self._observations = {}
         self._k = 0
         self._stop_goals = stop_goals
+        self._max_goal_recognition_agents = max_goal_recognition_agents
 
         self._view_radius = view_radius
         self._kmax = t_update * self._fps
@@ -125,8 +129,16 @@ class MCTSAgent(TrafficAgent):
                                     for aid in frame.keys() if aid != self.agent_id}
         visible_region = Circle(frame[self.agent_id].position, self.view_radius)
 
-        for agent_id in frame:
-            if agent_id == self.agent_id:
+        # Sort other agents by distance to ego, closest first
+        ego_pos = frame[self.agent_id].position
+        other_agents = [aid for aid in frame.keys() if aid != self.agent_id]
+        other_agents.sort(key=lambda aid: np.linalg.norm(frame[aid].position - ego_pos))
+
+        # Only run goal recognition for the closest N agents
+        agents_for_recognition = other_agents[:self._max_goal_recognition_agents]
+
+        for agent_id in agents_for_recognition:
+            if agent_id not in self._observations:
                 continue
 
             self._goal_recognition.update_goals_probabilities(
