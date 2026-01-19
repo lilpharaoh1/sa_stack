@@ -640,6 +640,9 @@ class Exit(MacroAction):
 
             connecting_lane = self._find_connecting_lane(current_lane)
 
+            if connecting_lane is None:
+                raise RuntimeError(f"Exit macro action failed: no connecting lane found from {current_lane} to turn target {self.turn_target}")
+
             # Add give-way maneuver
             config_dict = {
                 "type": "give-way",
