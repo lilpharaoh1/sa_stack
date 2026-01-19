@@ -131,18 +131,36 @@ class CarlaSim:
         self.__world.tick()
 
     def __del__(self):
-        self.__clear_agents()
-        self.clear_static_objects()
-        self.__world.apply_settings(self.__original_settings)
-        if self.__record:
-            self.__client.stop_recorder()
+        try:
+            self.__clear_agents()
+        except AttributeError:
+            pass
+        try:
+            self.clear_static_objects()
+        except AttributeError:
+            pass
+        try:
+            self.__world.apply_settings(self.__original_settings)
+        except AttributeError:
+            pass
+        try:
+            if self.__record:
+                self.__client.stop_recorder()
+        except AttributeError:
+            pass
 
-        self.__world.tick()
+        try:
+            self.__world.tick()
+        except AttributeError:
+            pass
 
-        if self.__launch_process:
-            if self.__carla_process is not None:
-                for child in psutil.Process(self.__carla_process.pid).children(recursive=True):
-                    child.kill()
+        try:
+            if self.__launch_process:
+                if self.__carla_process is not None:
+                    for child in psutil.Process(self.__carla_process.pid).children(recursive=True):
+                        child.kill()
+        except AttributeError:
+            pass
 
     def run(self, steps=400):
         """ Run the simulation for a number of time steps """
