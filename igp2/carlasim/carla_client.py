@@ -12,12 +12,10 @@ import logging
 
 from carla import Transform, Location, Rotation, Vector3D
 from igp2.opendrive import Map
-from igp2.vector_map import Dataset
-from igp2.pgp.carlapgp import CarlaPGP
 from igp2.agents.agent import Agent
 from igp2.carlasim.traffic_manager import TrafficManager
 from igp2.carlasim.carla_agent_wrapper import CarlaAgentWrapper
-from igp2.core.vehicle import Observation, TrajectoryPrediction
+from igp2.core.vehicle import Observation
 from igp2.core.agentstate import AgentState
 
 
@@ -92,19 +90,14 @@ class CarlaSim:
         if not map_name is None:
             if self.__scenario_map is None:
                 self.__scenario_map = Map.parse_from_opendrive(f"scenarios/maps/{map_name}.xodr")
-                self.__pgp = CarlaPGP(f"scenarios/maps/{map_name}.xodr")
-            # if map_name in self.__client.get_available_maps():
-            # if not self.__client.get_world().get_map().name.endswith(map_name):
             try:
                 self.__client.load_world(map_name)
             except RuntimeError as e:
                 logger.debug(f"Failed to load world {map_name}: {e}")
                 self.load_opendrive_world(self.__scenario_map.xodr_path)
-            self.__pgp = CarlaPGP(self.__scenario_map.xodr_path)
         elif not xodr is None:
             if self.__scenario_map is None:
                 self.__scenario_map = Map.parse_from_opendrive(xodr)
-                self.__pgp = CarlaPGP(xodr)
             self.load_opendrive_world(self.__scenario_map.xodr_path)
         else:
             raise RuntimeError("Cannot load a map with the given parameters!")
@@ -222,7 +215,6 @@ class CarlaSim:
         actor.destroy()
         self.agents[agent_id].agent.alive = False
         self.agents[agent_id] = None
-        self.__pgp.remove(agent_id)
 
     def add_static_object(self,
                           position: tuple,
@@ -451,7 +443,7 @@ class CarlaSim:
 
             self.__spectator.set_transform(carla.Transform(camera_location, camera_rotation))
 
-    def __take_actions(self, observation: Observation, prediction: TrajectoryPrediction = None):
+    def __take_actions(self, observation: Observation, prediction=None):
         commands = []
         controls = {}
         for agent_id, agent in self.agents.items():
@@ -476,36 +468,9 @@ class CarlaSim:
         self.__client.apply_batch_sync(commands)
         return controls
 
-    def __make_predictions(self, observation: Observation) -> TrajectoryPrediction:
-        self.__pgp.update(observation)
-        if self.__timestep % self.__pgp.interval == 0:
-            # EMRAN Clean up how we do this PLEASE!
-
-            # for agent_id, agent in self.agents.items():
-            #     print(f"Agent {agent_id}: {[(ma, type(ma)) for ma in agent.agent.macro_actions]}")
-            #     try:
-            #         print(f"Agent {agent_id}: {[ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions]}")
-            #     except:
-            #         print(f"Agent {agent_id}: Couldn't get trajectory")
-
-            agent_waypoints = self.__get_agent_waypoints()
-            self.__pgp.predict_trajectories(agent_waypoints=agent_waypoints)
-
-        if self.__pgp.prediction is not None:
-            return TrajectoryPrediction(
-                # Pure predictions
-                prediction=self.__pgp.prediction,
-                prediction_prob=self.__pgp.prediction_prob,
-                prediction_traversal=self.__pgp.prediction_traversal,
-                # Driven trajectories
-                drive=self.__pgp.drive,
-                drive_prob=self.__pgp.drive_prob,
-                drive_traversal=self.__pgp.drive_traversal,
-                # Shared
-                agent_history=self.__pgp.agent_history
-            )
-        else:
-            return None
+    def __make_predictions(self, observation: Observation):
+        """ Make predictions for agent trajectories. Override in subclass for custom prediction. """
+        return None
 
     def __get_current_observation(self) -> Observation:
         actor_list = self.__world.get_actors()
@@ -544,24 +509,6 @@ class CarlaSim:
         for agent_id, agent in self.agents.items():
             if agent is not None:
                 self.remove_agent(agent_id)
-    
-    def __get_agent_waypoints(self):
-        agent_waypoints = {}
-        for agent_id, agent in self.agents.items():
-            if agent is None:
-                continue
-            if agent.agent.current_macro is not None and agent.agent._pgp_drive:
-                try:
-                    out = np.concatenate([ma.get_trajectory().path[:-1] for ma in agent.agent.macro_actions])
-                except:
-                    out = agent.agent.current_macro.get_trajectory().path[:-1]
-            else:
-                out = []
-            agent_waypoints[agent_id] = out
-
-        # print("Got to the end!")
-        # exit()
-        return agent_waypoints
 
     @property
     def client(self) -> carla.Client:
@@ -582,16 +529,6 @@ class CarlaSim:
     def scenario_map(self) -> Map:
         """The current road layout. """
         return self.__scenario_map
-    
-    @property
-    def dataset(self) -> Dataset:
-        """The lane graph handler layout. """
-        return self.__dataset
-
-    @property
-    def pgp(self):
-        """The CarlaPGP module. """
-        return self.__pgp
 
     @property
     def agents(self) -> Dict[int, CarlaAgentWrapper]:

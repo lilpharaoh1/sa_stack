@@ -15,22 +15,18 @@ logger = logging.getLogger(__name__)
 class TrafficAgent(MacroAgent):
     """ Agent that follows a list of MAs, optionally calculated using A*. """
 
-    def __init__(self, 
-                 agent_id: int, 
-                 initial_state: AgentState, 
-                 goal: "Goal" = None, 
+    def __init__(self,
+                 agent_id: int,
+                 initial_state: AgentState,
+                 goal: "Goal" = None,
                  fps: int = 20,
-                 macro_actions: List[MacroAction] = None, 
-                 pgp_drive: bool = False,
-                 pgp_control: bool = False):
+                 macro_actions: List[MacroAction] = None):
         super(TrafficAgent, self).__init__(agent_id, initial_state, goal, fps)
         self._astar = AStar(max_iter=1000)
         self._macro_actions = []
         if macro_actions is not None and macro_actions:
             self.set_macro_actions(macro_actions)
         self._current_macro_id = 0
-        self._pgp_drive = pgp_drive
-        self._pgp_control = pgp_control
 
     def __repr__(self) -> str:
         return f"TrafficAgent(ID={self.agent_id})"

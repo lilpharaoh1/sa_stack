@@ -51,8 +51,6 @@ class TrafficManager:
         self.__spawns = []
         self._actor_filter = "vehicle.*"
         self._actor_generation = "2"
-        self.__pgp_drive = False
-        self.__pgp_control = False
         # Cache reachable goals from the road network
         self.__reachable_goals = None
 
@@ -194,9 +192,7 @@ class TrafficManager:
                                       velocity=np.array([0.001 * np.cos(heading), 0.001 * np.sin(heading)]),
                                       acceleration=np.array([0.0, 0.0]),
                                       heading=heading)
-        agent = TrafficAgent(vehicle.id, initial_state,
-                             pgp_drive=self.__pgp_drive, pgp_control=self.__pgp_control,
-                             fps=simulation.fps)
+        agent = TrafficAgent(vehicle.id, initial_state, fps=simulation.fps)
         agent = CarlaAgentWrapper(agent, vehicle)
 
         # Try to find a destination - if this fails, destroy the vehicle and skip
@@ -291,17 +287,6 @@ class TrafficManager:
         Must be either '1', '2', or 'All'. """
         assert actor_generation in ["1", "2", "All"], "Invalid actor generation type given. "
         self._actor_generation = actor_generation
-
-    # def set_agent_behaviour(self, value: str = "normal"):
-    #     """ Set the behaviour of all agents as given by the behaviour types.
-    #     If set to random, then each vehicle will be randomly assigned a behaviour type. """
-    #     pass
-
-    def set_pgp_drive(self, pgp_drive: bool):
-        self.__pgp_drive = pgp_drive
-
-    def set_pgp_control(self, pgp_control: bool):
-        self.__pgp_control = pgp_control
 
     def set_min_spawn_distance(self, distance: float):
         """ Set the minimum distance from existing vehicles required for a spawn point.
