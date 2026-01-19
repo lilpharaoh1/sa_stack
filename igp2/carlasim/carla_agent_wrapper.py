@@ -10,7 +10,6 @@ from igp2.core.vehicle import Observation, TrajectoryPrediction
 from igp2.core.agentstate import AgentState
 from igp2.core.trajectory import VelocityTrajectory
 from igp2.agents.agent import Agent
-from igp2.agents.keyboard_agent import KeyboardAgent
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +40,6 @@ class CarlaAgentWrapper:
             logger.debug(f"observation.frame[self.agent.agent_id].position, self.agent.goal.center = {observation.frame[self.agent.agent_id].position, self.agent.goal.center}")
             logger.debug("Returning None for next_control.")
             return None
-
-        # For KeyboardAgent, convert action directly to CARLA control (bypass LocalPlanner)
-        if isinstance(self.__agent, KeyboardAgent):
-            return self.__action_to_control(action)
 
         if hasattr(self.agent, "current_macro"):
             if self.__current_ma != self.agent.current_macro:
@@ -81,28 +76,6 @@ class CarlaAgentWrapper:
                          if np.linalg.norm(pos - state.position) <= self.agent.view_radius}
             return Observation(new_frame, observation.scenario_map)
         return observation
-
-    def __action_to_control(self, action) -> carla.VehicleControl:
-        """Convert an Action directly to CARLA VehicleControl (for KeyboardAgent)."""
-        control = carla.VehicleControl()
-
-        # Convert acceleration to throttle/brake
-        if action.acceleration >= 0:
-            control.throttle = min(1.0, action.acceleration / 5.0)  # Normalize to [0, 1]
-            control.brake = 0.0
-        else:
-            control.throttle = 0.0
-            control.brake = min(1.0, -action.acceleration / 8.0)  # Normalize to [0, 1]
-
-        # Convert steering angle to CARLA steering [-1, 1]
-        # action.steer_angle is in radians, CARLA expects [-1, 1]
-        max_steer_angle = 0.7  # radians (about 40 degrees)
-        control.steer = np.clip(action.steer_angle / max_steer_angle, -1.0, 1.0)
-
-        control.hand_brake = False
-        control.manual_gear_shift = False
-
-        return control
 
     def __pgp_to_waypoints(self, ego_trajectory, history):
         self.__waypoints = []
