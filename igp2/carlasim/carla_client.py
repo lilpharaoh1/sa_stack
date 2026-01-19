@@ -85,7 +85,7 @@ class CarlaSim:
 
         self.__scenario_map = None
         if isinstance(xodr, Map):
-            self.__scenario_map = xodrf
+            self.__scenario_map = xodr
         
         if not map_name is None:
             if self.__scenario_map is None:
