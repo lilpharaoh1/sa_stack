@@ -72,13 +72,20 @@ class AStar:
         """
         solutions = []
         frontier = [(0.0, ([], frame))]
+        visited = set()  # Track visited states to avoid re-expansion
         iterations = 0
         while frontier and len(solutions) < n_trajectories and iterations < self.max_iter:
             # print(f"-------------------------------{iterations}--------------------------------")
             # print(frame[agent_id].position, goal)
             iterations += 1
             cost, (actions, frame) = heapq.heappop(frontier)
-            # print(actions)
+
+            # Create a state signature based on the sequence of actions taken
+            state_sig = tuple((type(a).__name__, str(a.ma_args)) for a in actions)
+            if state_sig in visited:
+                continue
+            visited.add(state_sig)
+
             # Check termination condition
             trajectory = self._full_trajectory(actions, offset_point=False)
             if self.goal_reached(goal, trajectory) and \
@@ -87,8 +94,15 @@ class AStar:
                 if not actions:
                     logger.info(f"\tAID {agent_id} at {goal} already.")
                 else:
-                    logger.info(f"\tSolution found for AID {agent_id} to {goal}: {actions}")
-                    solutions.append(actions)
+                    # Check if this solution is a duplicate (same sequence of macro action types and args)
+                    action_signature = tuple((type(a).__name__, str(a.ma_args)) for a in actions)
+                    is_duplicate = any(
+                        tuple((type(a).__name__, str(a.ma_args)) for a in sol) == action_signature
+                        for sol in solutions
+                    )
+                    if not is_duplicate:
+                        logger.info(f"\tSolution found for AID {agent_id} to {goal}: {actions}")
+                        solutions.append(actions)
                 continue
 
             # Check if current position is valid
