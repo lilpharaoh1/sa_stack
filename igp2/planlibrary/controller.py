@@ -71,9 +71,9 @@ class PIDController:
                     K_I -- Integral term
         """
         if args_lateral is None:
-            args_lateral = {'K_P': 1.95, 'K_I': 0.2, 'K_D': 0.0}
+            args_lateral = {'K_P': 1.0, 'K_I': 0.05, 'K_D': 0.2}
         if args_longitudinal is None:
-            args_longitudinal = {'K_P': 1.0, 'K_I': 0.05, 'K_D': 0.0}
+            args_longitudinal = {'K_P': 1.0, 'K_I': 0.0, 'K_D': 0.0}
         self.max_steer = max_steering
 
         self.past_steering = 0.0
