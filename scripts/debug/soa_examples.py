@@ -209,41 +209,56 @@ def generate_random_frame(ego: int,
     return ret
 
 def create_agent(agent_config, scenario_map, frame, fps, args):
-    base_agent = {"agent_id": agent_config["id"], "initial_state": frame[agent_config["id"]],
-                  "goal": ip.BoxGoal(ip.Box(**agent_config["goal"]["box"])), "fps": fps}
+    # Common base arguments for all agents
+    base_agent = {
+        "agent_id": agent_config["id"],
+        "initial_state": frame[agent_config["id"]],
+        "goal": ip.BoxGoal(ip.Box(**agent_config["goal"]["box"])),
+        "fps": fps,
+    }
 
-    mcts_agent = {"scenario_map": scenario_map,
-                  "cost_factors": agent_config.get("cost_factors", None),
-                  "view_radius": agent_config.get("view_radius", None),
-                  "kinematic": not args.carla,
-                  "velocity_smoother": agent_config.get("velocity_smoother", None),
-                  "goal_recognition": agent_config.get("goal_recognition", None),
-                  "stop_goals": agent_config.get("stop_goals", False)}
+    # Arguments shared by planning-based agents
+    planning_common = {
+        "scenario_map": scenario_map,
+        "cost_factors": agent_config.get("cost_factors"),
+        "view_radius": agent_config.get("view_radius"),
+        "velocity_smoother": agent_config.get("velocity_smoother"),
+        "goal_recognition": agent_config.get("goal_recognition"),
+        "stop_goals": agent_config.get("stop_goals", False),
+    }
 
-    # EMRAN TODO don't need two of these combined instead 
-    soa_agent = {"scenario_map": scenario_map,
-            "cost_factors": agent_config.get("cost_factors", None),
-            "view_radius": agent_config.get("view_radius", None),
-            "velocity_smoother": agent_config.get("velocity_smoother", None),
-            "goal_recognition": agent_config.get("goal_recognition", None),
-            "stop_goals": agent_config.get("stop_goals", False),
-            "t_update": agent_config.get("t_update", 1.0),
-            "predict_ego": agent_config.get("predict_ego", True)}
+    agent_type = agent_config["type"]
 
-    if agent_config["type"] == "MCTSAgent":
-        agent = ip.MCTSAgent(**base_agent, **mcts_agent, **agent_config["mcts"])
-    elif agent_config["type"] == "TrafficAgent":
-        if "macro_actions" in agent_config and agent_config["macro_actions"]:
+    if agent_type == "MCTSAgent":
+        agent = ip.MCTSAgent(
+            **base_agent,
+            **planning_common,
+            kinematic=not args.carla,
+            **agent_config["mcts"],
+        )
+    elif agent_type == "SharedAutonomyAgent":
+        agent = ip.SharedAutonomyAgent(
+            **base_agent,
+            **planning_common,
+            t_update=agent_config.get("t_update", 1.0),
+            predict_ego=agent_config.get("predict_ego", True),
+        )
+    elif agent_type == "TrafficAgent":
+        if agent_config.get("macro_actions"):
             base_agent["macro_actions"] = to_ma_list(
-                agent_config["macro_actions"], agent_config["id"], frame, scenario_map)
+                agent_config["macro_actions"],
+                agent_config["id"],
+                frame,
+                scenario_map,
+            )
         agent = ip.TrafficAgent(**base_agent)
-    elif agent_config["type"] == "KeyboardAgent":
+    elif agent_type == "KeyboardAgent":
         agent = ip.KeyboardAgent(**base_agent)
-    elif agent_config["type"] == "SharedAutonomyAgent":
-        agent = ip.SharedAutonomyAgent(**base_agent, **soa_agent)
     else:
-        raise ValueError(f"Unsupported agent type {agent_config['type']}")
+        raise ValueError(f"Unsupported agent type {agent_type}")
+
     return agent
+
 
 # from scripts.experiments.scenarios.util import parse_args, generate_random_frame
 
