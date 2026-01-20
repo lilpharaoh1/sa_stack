@@ -3,3 +3,4 @@ from .carla_agent_wrapper import CarlaAgentWrapper
 from .traffic_manager import TrafficManager
 from .carla_client import CarlaSim
 from .visualisation import Visualiser
+from .prediction_visualizer import PredictionVisualizer

@@ -20,7 +20,7 @@ from shapely.geometry import Polygon
 from datetime import datetime
 from typing import List, Tuple, Dict
 
-from igp2.carlasim.status_window import StatusWindow
+from igp2.carlasim.prediction_visualizer import PredictionVisualizer
 
 
 logger = logging.getLogger(__name__)
@@ -351,9 +351,14 @@ if __name__ == '__main__':
         carla_sim.attach_camera(ego_agent.actor, camera_transform)
         logger.info(f"Camera set to follow ego vehicle (Agent {ego_id})")
 
-    # Create status window for failure zone monitoring
-    status_window = StatusWindow(width=350, height=120, title="Failure Zone Status")
-    status_window.set_safe(f"Frame: 0")
+    # Create prediction visualizer (includes failure zone display)
+    pred_viz = PredictionVisualizer(
+        width=900,
+        height=700,
+        title="SOA Prediction Visualizer",
+        scale=4.0  # pixels per meter
+    )
+    pred_viz.initialize()
 
     observations = []
     actions = []
@@ -363,31 +368,24 @@ if __name__ == '__main__':
         observations.append(obs)
         actions.append(acts)
 
-        ego_pos = obs.frame[ego_id]
+        # Update prediction visualizer
+        ego_agent_obj = agents[ego_id]
+        goal_probs = getattr(ego_agent_obj, 'goal_probabilities', {})
+        possible_goals = getattr(ego_agent_obj, 'possible_goals', [])
+        view_radius = getattr(ego_agent_obj, 'view_radius', 50.0)
 
-        # Check if ego is in any failure zone during the corresponding frames
-        in_failure_zone = False
-        triggered_zone = None
-        for fz in failure_zones:
-            frame_start = fz["frames"]["start"]
-            frame_end = fz["frames"]["end"]
-            if frame_start <= t <= frame_end:
-                if fz["box"].inside(ego_pos.position):
-                    in_failure_zone = True
-                    triggered_zone = fz
-                    break
+        if not pred_viz.update(
+            frame=obs.frame,
+            ego_id=ego_id,
+            goal_probabilities=goal_probs,
+            possible_goals=possible_goals,
+            view_radius=view_radius,
+            failure_zones=failure_zones,
+            timestep=t
+        ):
+            break  # Visualizer window was closed
 
-        # Update status window
-        if in_failure_zone:
-            status_window.set_failure(f"Frame {t}: Zone active!")
-        else:
-            status_window.set_safe(f"Frame: {t}")
-
-        # Keep window responsive
-        if not status_window.update():
-            break  # Window was closed
-
-        time.sleep(0.1)
+        time.sleep(0.05)
 
         # logger.info(f'Step {t}')
         # logger.info('Vehicle actions were:')
@@ -419,3 +417,6 @@ if __name__ == '__main__':
         #     ax.set_ylabel('Throttle')
 
         # plt.show()
+
+    # Cleanup
+    pred_viz.close()
