@@ -77,12 +77,15 @@ class TrafficAgent(MacroAgent):
                                         observation.frame,
                                         self._goal,
                                         observation.scenario_map,
-                                        open_loop=False)
+                                        open_loop=True)
 
         if len(actions) == 0:
             print("len actions == 0 so failing due to astar")
             raise RuntimeError(f"Couldn't find path to goal {self.goal} for TrafficAgent {self.agent_id}.")
         self._macro_actions = actions[0]
+        # Convert open-loop macro actions to closed-loop for execution
+        for macro in self._macro_actions:
+            macro.to_closed_loop()
         self._current_macro = self._macro_actions[0]
 
     def done(self, observation: Observation) -> bool:
