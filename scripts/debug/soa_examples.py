@@ -220,6 +220,16 @@ def create_agent(agent_config, scenario_map, frame, fps, args):
                   "goal_recognition": agent_config.get("goal_recognition", None),
                   "stop_goals": agent_config.get("stop_goals", False)}
 
+    # EMRAN TODO don't need two of these combined instead 
+    soa_agent = {"scenario_map": scenario_map,
+            "cost_factors": agent_config.get("cost_factors", None),
+            "view_radius": agent_config.get("view_radius", None),
+            "velocity_smoother": agent_config.get("velocity_smoother", None),
+            "goal_recognition": agent_config.get("goal_recognition", None),
+            "stop_goals": agent_config.get("stop_goals", False),
+            "t_update": agent_config.get("t_update", 1.0),
+            "predict_ego": agent_config.get("predict_ego", True)}
+
     if agent_config["type"] == "MCTSAgent":
         agent = ip.MCTSAgent(**base_agent, **mcts_agent, **agent_config["mcts"])
     elif agent_config["type"] == "TrafficAgent":
@@ -229,6 +239,8 @@ def create_agent(agent_config, scenario_map, frame, fps, args):
         agent = ip.TrafficAgent(**base_agent)
     elif agent_config["type"] == "KeyboardAgent":
         agent = ip.KeyboardAgent(**base_agent)
+    elif agent_config["type"] == "SharedAutonomyAgent":
+        agent = ip.SharedAutonomyAgent(**base_agent, **soa_agent)
     else:
         raise ValueError(f"Unsupported agent type {agent_config['type']}")
     return agent
