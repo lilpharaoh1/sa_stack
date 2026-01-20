@@ -41,7 +41,7 @@ class MacroActionConfig:
     @property
     def open_loop(self) -> bool:
         """ Whether the macro action should be execute with or without control. """
-        return self.config_dict.get("open_loop", True)
+        return self.config_dict.get("open_loop", False)
 
     @property
     def left(self) -> bool:
