@@ -10,7 +10,10 @@
   "agents": [
     {
       "id": 0,
-      "type": "KeyboardAgent",
+      "type": "SharedAutonomyAgent",
+      "view_radius": 50.0,
+      "t_update": 1.0,
+      "predict_ego": true,
       "spawn": {
         "box": {
           "center": [

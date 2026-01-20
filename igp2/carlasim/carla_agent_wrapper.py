@@ -10,6 +10,7 @@ from igp2.core.agentstate import AgentState
 from igp2.core.trajectory import VelocityTrajectory
 from igp2.agents.agent import Agent
 from igp2.agents.keyboard_agent import KeyboardAgent
+from igp2.agents.shared_autonomy_agent import SharedAutonomyAgent
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class CarlaAgentWrapper:
             return None
 
         # For KeyboardAgent, convert action directly to CARLA control (bypass LocalPlanner)
-        if isinstance(self.__agent, KeyboardAgent):
+        if isinstance(self.__agent, KeyboardAgent) or isinstance(self.__agent, SharedAutonomyAgent):
             return self.__action_to_control(action)
 
         if hasattr(self.agent, "current_macro"):
