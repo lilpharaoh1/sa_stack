@@ -221,17 +221,21 @@ class TrafficManager:
         """
         agent = agent_wrapper.agent
         agent_position = state.position
+        
+        use_expanded_goals = False
+        if use_expanded_goals:
+            # Use reachable goals from road network (these are lane endpoints with predecessors)
+            valid_goals = []
+            for goal_position in self.reachable_goals:
+                distance = np.linalg.norm(goal_position - agent_position)
+                if distance >= self.MIN_DESTINATION_DISTANCE:
+                    valid_goals.append(goal_position)
 
-        # Use reachable goals from road network (these are lane endpoints with predecessors)
-        valid_goals = []
-        for goal_position in self.reachable_goals:
-            distance = np.linalg.norm(goal_position - agent_position)
-            if distance >= self.MIN_DESTINATION_DISTANCE:
-                valid_goals.append(goal_position)
-
-        if not valid_goals:
-            raise RuntimeError(f"No valid destinations found for Agent {agent.agent_id} - "
-                              f"all {len(self.reachable_goals)} reachable goals too close")
+            if not valid_goals:
+                raise RuntimeError(f"No valid destinations found for Agent {agent.agent_id} - "
+                                f"all {len(self.reachable_goals)} reachable goals too close")
+        else:
+            valid_goals = self.spawns
 
         for goal_position in random.sample(valid_goals, len(valid_goals)):  # random order
             goal = PointGoal(goal_position, 1.0)

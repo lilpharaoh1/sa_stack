@@ -56,6 +56,7 @@ class GoalRecognition:
                                    frame_ini: Dict[int, AgentState],
                                    frame: Dict[int, AgentState],
                                    visible_region: Circle = None,
+                                   open_loop: bool = True,
                                    debug: bool = False) -> GoalsProbabilities:
         """Updates the goal probabilities, and stores relevant information in the GoalsProbabilities object.
         
@@ -88,7 +89,7 @@ class GoalRecognition:
                     logger.debug("\tGenerating optimum trajectory")
                     trajectories, plans = self._generate_trajectory(
                         1, agent_id, frame_ini, goal,
-                        state_trajectory=None, visible_region=visible_region, debug=debug)
+                        state_trajectory=None, visible_region=visible_region, open_loop=open_loop, debug=debug)
                     goals_probabilities.optimum_trajectory[goal_and_type] = trajectories[0]
                     goals_probabilities.optimum_plan[goal_and_type] = plans[0]
 
@@ -162,12 +163,13 @@ class GoalRecognition:
                              state_trajectory: Trajectory,
                              visible_region: Circle = None,
                              n_resample: int = 5,
+                             open_loop: bool = True,
                              debug: bool = False) -> Tuple[List[VelocityTrajectory], List[List[MacroAction]]]:
         """Generates up to n possible trajectories from the current frame of an agent to the specified goal. """
         trajectories, plans = self._astar.search(agent_id, frame, goal,
                                                  self._scenario_map,
                                                  n_trajectories,
-                                                 open_loop=True,
+                                                 open_loop=open_loop,
                                                  visible_region=visible_region,
                                                  debug=debug)
         if len(trajectories) == 0:

@@ -240,8 +240,9 @@ def create_agent(agent_config, scenario_map, frame, fps, args):
         agent = ip.SharedAutonomyAgent(
             **base_agent,
             **planning_common,
-            t_update=agent_config.get("t_update", 1.0),
+            # t_update=agent_config.get("t_update", 1.0),
             predict_ego=agent_config.get("predict_ego", True),
+            **agent_config["mcts"],
         )
     elif agent_type == "TrafficAgent":
         if agent_config.get("macro_actions"):
@@ -383,11 +384,20 @@ if __name__ == '__main__':
         observations.append(obs)
         actions.append(acts)
 
-        # Update prediction visualizer
+        # Update prediction visualizer with MCTS plan and safety analysis
         ego_agent_obj = agents[ego_id]
         goal_probs = getattr(ego_agent_obj, 'goal_probabilities', {})
         possible_goals = getattr(ego_agent_obj, 'possible_goals', [])
         view_radius = getattr(ego_agent_obj, 'view_radius', 50.0)
+        mcts_trajectory = getattr(ego_agent_obj, 'mcts_trajectory', None)
+        mcts_plan = getattr(ego_agent_obj, 'mcts_plan', [])
+        mcts_maneuvers = getattr(ego_agent_obj, 'mcts_maneuvers', [])
+        predicted_plan = getattr(ego_agent_obj, 'predicted_plan', [])
+        predicted_maneuvers = getattr(ego_agent_obj, 'predicted_maneuvers', [])
+        predicted_trajectory = getattr(ego_agent_obj, 'predicted_trajectory', None)
+        safety_analysis = getattr(ego_agent_obj, 'safety_analysis', None)
+        driver_message = getattr(ego_agent_obj, 'current_message', None)
+        intervention_active = getattr(ego_agent_obj, 'intervention_active', False)
 
         if not pred_viz.update(
             frame=obs.frame,
@@ -396,7 +406,16 @@ if __name__ == '__main__':
             possible_goals=possible_goals,
             view_radius=view_radius,
             failure_zones=failure_zones,
-            timestep=t
+            timestep=t,
+            mcts_trajectory=mcts_trajectory,
+            mcts_plan=mcts_plan,
+            mcts_maneuvers=mcts_maneuvers,
+            predicted_plan=predicted_plan,
+            predicted_maneuvers=predicted_maneuvers,
+            predicted_trajectory=predicted_trajectory,
+            safety_analysis=safety_analysis,
+            driver_message=driver_message,
+            intervention_active=intervention_active
         ):
             break  # Visualizer window was closed
 

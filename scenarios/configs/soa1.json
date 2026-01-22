@@ -32,8 +32,8 @@
       "goal": {
         "box": {
           "center": [
-            200.0,
-            -2.5
+            20.0,
+            1.5
           ],
           "length": 5,
           "width": 7,
@@ -54,8 +54,8 @@
         "safety": 0.0
       },
       "mcts": {
-        "t_update": 2.0,
-        "n_simulations": 30,
+        "t_update": 3.0,
+        "n_simulations": 2,
         "max_depth": 5,
         "store_results": "all",
         "trajectory_agents": false,

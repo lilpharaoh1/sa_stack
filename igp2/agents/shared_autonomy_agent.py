@@ -1,15 +1,19 @@
 """
-Shared Autonomy Agent for human-in-the-loop driving with MCTS predictions.
+Shared Autonomy Agent for human-in-the-loop driving with MCTS predictions and safety interventions.
 
 This agent combines:
 - Keyboard control for manual driving (like KeyboardAgent)
-- Goal recognition and predictions for ALL agents including ego (like MCTSAgent)
+- Goal recognition and predictions for ALL agents including ego
+- MCTS planning to generate an "optimal" safe plan
+- Safety analysis comparing predicted driver intent vs optimal plan
+- Interventions when the predicted plan is unsafe
 
-The predictions can be used for:
-- Visualizing predicted trajectories
-- Shared autonomy interventions
-- Human intent inference
-- Safety monitoring
+The system:
+1. Predicts what the driver intends to do (goal recognition on ego)
+2. Generates what the driver SHOULD do (MCTS optimal plan)
+3. Compares the two to identify safety issues
+4. Applies interventions (slow down, stop) when needed
+5. Communicates changes to the driver
 
 Controls:
     W / UP      : Accelerate
@@ -21,7 +25,9 @@ Controls:
 import logging
 import os
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+from enum import Enum
 
 # Set SDL to use dummy video driver if no display is available
 if os.environ.get('DISPLAY') is None and os.environ.get('SDL_VIDEODRIVER') is None:
@@ -35,12 +41,13 @@ from igp2.agents.agent import Agent
 from igp2.core.agentstate import AgentState
 from igp2.core.goal import Goal, PointGoal, StoppingGoal, PointCollectionGoal
 from igp2.core.vehicle import Action, Observation, TrajectoryPrediction, KinematicVehicle
-from igp2.core.trajectory import Trajectory, StateTrajectory
+from igp2.core.trajectory import Trajectory, StateTrajectory, VelocityTrajectory
 from igp2.core.cost import Cost
 from igp2.core.velocitysmoother import VelocitySmoother
-from igp2.core.util import Circle, find_lane_sequence
+from igp2.core.util import Circle
 from igp2.opendrive.map import Map
 from igp2.planlibrary.maneuver import Maneuver
+from igp2.planlibrary.macro_action import MacroAction, MacroActionConfig, MacroActionFactory
 from igp2.planning.reward import Reward
 from igp2.planning.mcts import MCTS
 from igp2.recognition.astar import AStar
@@ -50,29 +57,71 @@ from igp2.recognition.goalprobabilities import GoalsProbabilities
 logger = logging.getLogger(__name__)
 
 
+class InterventionType(Enum):
+    """Types of safety interventions the system can apply."""
+    NONE = "none"
+    SLOW_DOWN = "slow_down"
+    STOP = "stop"
+    YIELD = "yield"
+
+
+@dataclass
+class SafetyAnalysis:
+    """Results of comparing predicted plan vs MCTS optimal plan.
+
+    Comparison happens at two levels:
+    - Macro-actions: High-level actions like Continue, Exit, ChangeLane, StopMA
+    - Maneuvers: Low-level actions like FollowLane, Turn, GiveWay, Stop
+    """
+    is_safe: bool
+    intervention_type: InterventionType
+    message: str
+    # Macro-action level
+    predicted_actions: List[str]  # MacroAction types in predicted plan
+    optimal_actions: List[str]    # MacroAction types in MCTS plan
+    missing_actions: List[str]    # MacroActions in optimal but not in predicted
+    # Maneuver level
+    predicted_maneuvers: List[str]  # Maneuver types in predicted plan
+    missing_maneuvers: List[str]    # Safety-critical maneuvers missing from predicted
+    risk_score: float               # 0.0 = safe, 1.0 = very unsafe
+
+
+@dataclass
+class DriverMessage:
+    """Message to communicate to the driver."""
+    text: str
+    severity: str  # "info", "warning", "critical"
+    action_hint: str  # What the driver should do
+
+
 class SharedAutonomyAgent(Agent):
-    """Agent that combines keyboard control with MCTS predictions for all agents.
+    """Agent that combines keyboard control with MCTS predictions and safety interventions.
 
-    This agent is controlled by a human via keyboard, but also performs goal
-    recognition and trajectory prediction for all visible agents INCLUDING itself.
-    This enables shared autonomy applications where the system predicts human intent.
-
-    Key differences from MCTSAgent:
-    - Control comes from keyboard, not MCTS planning
-    - Goal recognition includes the ego agent (self)
-    - Predictions are stored but not used for control
+    This agent is controlled by a human via keyboard, but also:
+    - Performs goal recognition for ALL agents including itself (ego)
+    - Runs MCTS to generate an "optimal" safe plan
+    - Compares predicted intent vs optimal plan for safety
+    - Applies interventions when the predicted plan is unsafe
+    - Communicates safety issues to the driver
 
     Attributes:
         goal_probabilities: Dict mapping agent_id -> GoalsProbabilities for all agents
         observations: Dict mapping agent_id -> (trajectory, initial_frame) for all agents
         possible_goals: List of possible goals in the current view
+        mcts_plan: The optimal plan generated by MCTS
+        safety_analysis: Results of comparing predicted vs optimal plan
+        current_message: Current message to display to driver
     """
 
-    # Control parameters (same as KeyboardAgent)
+    # Control parameters
     MAX_ACCELERATION = 5.0  # m/s^2
     MAX_BRAKE = 8.0  # m/s^2
     MAX_STEER = 0.7  # radians
     STEER_SPEED = 0.05
+
+    # Intervention parameters
+    INTERVENTION_DECEL = 3.0  # m/s^2 deceleration when slowing down
+    STOP_DECEL = 6.0  # m/s^2 deceleration when stopping
 
     # Class-level pygame tracking
     _pygame_initialized = False
@@ -80,31 +129,49 @@ class SharedAutonomyAgent(Agent):
     def __init__(self,
                  agent_id: int,
                  initial_state: AgentState,
+                 t_update: float,
                  scenario_map: Map,
                  goal: Goal = None,
                  view_radius: float = 50.0,
                  fps: int = 20,
-                 t_update: float = 1.0,
+                 n_simulations: int = 5,
+                 max_depth: int = 5,
+                 store_results: str = 'final',
+                 trajectory_agents: bool = True,
                  cost_factors: Dict[str, float] = None,
+                 reward_factors: Dict[str, float] = None,
+                 default_rewards: Dict[str, float] = None,
                  velocity_smoother: dict = None,
                  goal_recognition: dict = None,
                  stop_goals: bool = False,
-                 predict_ego: bool = True):
+                 predict_ego: bool = True,
+                 ego_goal_mode: str = "true_goal",
+                 enable_interventions: bool = True):
         """Initialize a shared autonomy agent.
 
         Args:
             agent_id: ID of the agent
             initial_state: Starting state of the agent
+            t_update: Time interval between prediction/planning updates (seconds)
             scenario_map: The road network map
-            goal: Optional final goal of the agent (for ego prediction)
+            goal: Final goal of the agent
             view_radius: Radius within which other agents are visible
             fps: Execution rate of the environment simulation
-            t_update: Time interval between prediction updates (seconds)
+            n_simulations: Number of MCTS simulations
+            max_depth: Maximum MCTS search depth
+            store_results: Whether to save MCTS rollout traces
+            trajectory_agents: Whether to use trajectories for non-egos in MCTS
             cost_factors: Cost factors for trajectory evaluation
+            reward_factors: Reward factors for MCTS rollouts
+            default_rewards: Default rewards for MCTS
             velocity_smoother: Velocity smoother parameters
             goal_recognition: Goal recognition parameters
             stop_goals: Whether to include stopping goals
             predict_ego: Whether to include ego in goal recognition (default True)
+            ego_goal_mode: How to determine ego's goal for prediction:
+                - "goal_recognition": Predict goal from observed trajectory (default)
+                - "true_goal": Use the actual ego goal, run A* to find path
+            enable_interventions: Whether to apply safety interventions
         """
         super().__init__(agent_id, initial_state, goal, fps)
 
@@ -121,6 +188,7 @@ class SharedAutonomyAgent(Agent):
         self._scenario_map = scenario_map
         self._predict_ego = predict_ego
         self._stop_goals = stop_goals
+        self._ego_goal_mode = ego_goal_mode  # "goal_recognition" or "true_goal"
 
         # Update timing
         self._k = 0
@@ -144,19 +212,44 @@ class SharedAutonomyAgent(Agent):
             **goal_recognition
         )
 
-        # Storage for predictions
+        # MCTS setup
+        self._reward = Reward(factors=reward_factors, default_rewards=default_rewards) \
+            if reward_factors is not None else Reward()
+        self._mcts = MCTS(
+            scenario_map=scenario_map,
+            reward=self._reward,
+            n_simulations=n_simulations,
+            max_depth=max_depth,
+            store_results=store_results,
+            trajectory_agents=trajectory_agents
+        )
+
+        # Storage for predictions and plans
         self._goal_probabilities: Dict[int, GoalsProbabilities] = {}
         self._observations: Dict[int, Tuple[StateTrajectory, Dict[int, AgentState]]] = {}
         self._goals: List[Goal] = []
 
-        # For compatibility with systems expecting current_macro
+        # MCTS plan storage
+        self._mcts_plan: List[MacroAction] = []  # MCTSAction wrappers from search
+        self._mcts_macro_actions: List[MacroAction] = []  # Instantiated MacroActions
+        self._mcts_maneuvers: List[List] = []  # Maneuvers per macro-action
+        self._mcts_trajectory: Optional[VelocityTrajectory] = None
+
+        # Safety analysis
+        self._enable_interventions = enable_interventions
+        self._safety_analysis: Optional[SafetyAnalysis] = None
+        self._current_message: Optional[DriverMessage] = None
+        self._intervention_active = False
+
+        # For compatibility
         self._current_macro = None
         self._pgp_control = False
         self._pgp_drive = False
 
         if self._pygame_available:
-            logger.info(f"SharedAutonomyAgent {agent_id} initialized with prediction. "
-                       f"predict_ego={predict_ego}")
+            logger.info(f"SharedAutonomyAgent {agent_id} initialized. "
+                       f"predict_ego={predict_ego}, ego_goal_mode={ego_goal_mode}, "
+                       f"interventions={enable_interventions}")
         else:
             logger.warning(f"SharedAutonomyAgent {agent_id}: pygame unavailable, zero controls.")
 
@@ -188,31 +281,44 @@ class SharedAutonomyAgent(Agent):
         return False
 
     def next_action(self, observation: Observation, prediction: TrajectoryPrediction = None) -> Action:
-        """Get next action from keyboard and update predictions.
+        """Get next action from keyboard with safety interventions.
 
         This method:
         1. Updates observations for all agents
-        2. Periodically runs goal recognition for all agents (including ego if enabled)
-        3. Returns keyboard-controlled action
+        2. Periodically runs goal recognition for all agents (including ego)
+        3. Runs MCTS to generate optimal plan
+        4. Analyzes safety by comparing predicted vs optimal
+        5. Applies interventions if needed
+        6. Returns (possibly modified) keyboard action
 
         Args:
             observation: Current observation of the environment
             prediction: Optional external prediction (unused)
 
         Returns:
-            Action from keyboard input
+            Action from keyboard input, possibly modified by interventions
         """
         # Update observations for all agents
         self._update_observations(observation)
 
-        # Periodically update predictions
+        # Periodically update predictions and MCTS plan
         self._k += 1
         if self._k >= self._kmax:
-            self._update_predictions(observation)
+            self._goals = self._get_goals(observation)
+            if self._goals:
+                self._update_predictions(observation)
+                self._update_mcts_plan(observation)
+                self._analyze_safety()
             self._k = 0
 
         # Get keyboard action
-        return self._get_keyboard_action(observation)
+        action = self._get_keyboard_action(observation)
+
+        # Apply interventions if enabled and needed
+        if self._enable_interventions and self._safety_analysis is not None:
+            action = self._apply_intervention(action, observation)
+
+        return action
 
     def _get_keyboard_action(self, observation: Observation) -> Action:
         """Read keyboard input and return corresponding action."""
@@ -256,6 +362,42 @@ class SharedAutonomyAgent(Agent):
 
         return Action(acceleration, self._current_steer, target_speed=target_speed)
 
+    def _apply_intervention(self, action: Action, observation: Observation) -> Action:
+        """Apply safety intervention to the action if needed."""
+        if self._safety_analysis is None or self._safety_analysis.is_safe:
+            self._intervention_active = False
+            return action
+
+        current_state = observation.frame.get(self.agent_id)
+        current_speed = current_state.speed if current_state else 0.0
+        dt = 1.0 / self._fps
+
+        intervention = self._safety_analysis.intervention_type
+
+        if intervention == InterventionType.STOP:
+            # Force stop
+            self._intervention_active = True
+            new_accel = -self.STOP_DECEL
+            new_target_speed = max(0.0, current_speed + new_accel * dt)
+            return Action(new_accel, action.steer_angle, target_speed=new_target_speed)
+
+        elif intervention == InterventionType.SLOW_DOWN:
+            # Limit acceleration to slow down
+            self._intervention_active = True
+            new_accel = min(action.acceleration, -self.INTERVENTION_DECEL)
+            new_target_speed = max(0.0, current_speed + new_accel * dt)
+            return Action(new_accel, action.steer_angle, target_speed=new_target_speed)
+
+        elif intervention == InterventionType.YIELD:
+            # Reduce speed moderately
+            self._intervention_active = True
+            max_allowed_accel = -self.INTERVENTION_DECEL * 0.5
+            new_accel = min(action.acceleration, max_allowed_accel)
+            new_target_speed = max(0.0, current_speed + new_accel * dt)
+            return Action(new_accel, action.steer_angle, target_speed=new_target_speed)
+
+        return action
+
     def _update_observations(self, observation: Observation):
         """Update trajectory observations for all visible agents including ego."""
         frame = observation.frame
@@ -275,21 +417,24 @@ class SharedAutonomyAgent(Agent):
                 self._observations.pop(aid)
 
     def _update_predictions(self, observation: Observation):
-        """Run goal recognition for all agents including ego (if enabled)."""
-        frame = observation.frame
+        """Run goal recognition for all agents including ego (if enabled).
 
-        # Get possible goals from ego's perspective
-        self._goals = self._get_goals(observation)
+        The ego agent's prediction can be done in two modes (set via ego_goal_mode):
+        - "goal_recognition": Predict goal from observed trajectory
+        - "true_goal": Use the actual ego goal, just run A* to find path to it
+        """
+        frame = observation.frame
 
         if not self._goals:
             logger.debug("No goals found in view, skipping prediction update")
             return
 
-        # Initialize goal probabilities for all agents
+        # Determine which agents to predict
         agents_to_predict = list(frame.keys())
         if not self._predict_ego:
             agents_to_predict = [aid for aid in agents_to_predict if aid != self.agent_id]
 
+        # Initialize goal probabilities for all agents
         self._goal_probabilities = {
             aid: GoalsProbabilities(self._goals) for aid in agents_to_predict
         }
@@ -301,30 +446,410 @@ class SharedAutonomyAgent(Agent):
             if aid not in self._observations:
                 continue
 
+            # Check if this is ego and we should use true goal mode
+            use_true_goal = (aid == self.agent_id and
+                            self._ego_goal_mode == "true_goal" and
+                            self.goal is not None)
+
+            if use_true_goal:
+                # Use actual ego goal - run A* to find path to true goal
+                self._update_ego_with_true_goal(observation, frame, visible_region)
+            else:
+                # Normal goal recognition
+                try:
+                    self._goal_recognition.update_goals_probabilities(
+                        goals_probabilities=self._goal_probabilities[aid],
+                        observed_trajectory=self._observations[aid][0],
+                        agent_id=aid,
+                        frame_ini=self._observations[aid][1],
+                        frame=frame,
+                        visible_region=visible_region,
+                        open_loop=(aid != self.agent_id)
+                    )
+
+                    if aid == self.agent_id:
+                        logger.debug(f"Ego goal recognition updated (mode: goal_recognition)")
+                    else:
+                        logger.debug(f"Agent {aid} goal probabilities updated")
+
+                except Exception as e:
+                    logger.debug(f"Goal recognition failed for agent {aid}: {e}")
+
+    def _update_ego_with_true_goal(self, observation: Observation, frame: Dict,
+                                    visible_region: Circle):
+        """Update ego prediction using the true/actual goal instead of goal recognition.
+
+        This bypasses goal prediction but still computes the path using A*.
+        Useful when you want to analyze the path to a known destination
+        without the uncertainty of goal recognition.
+        """
+        if self.goal is None or self.agent_id not in self._observations:
+            return
+
+        try:
+            # Create a GoalsProbabilities with just the true goal
+            ego_goals = GoalsProbabilities([self.goal])
+
+            # Run goal recognition which will compute A* path to the goal
+            # The probability will be based on how well the observed trajectory
+            # matches the path to the true goal
+            self._goal_recognition.update_goals_probabilities(
+                goals_probabilities=ego_goals,
+                observed_trajectory=self._observations[self.agent_id][0],
+                agent_id=self.agent_id,
+                frame_ini=self._observations[self.agent_id][1],
+                frame=frame,
+                visible_region=visible_region,
+                open_loop=False
+            )
+
+            # Set probability to 1.0 for the true goal (we know this is the goal)
+            for key in ego_goals.goals_probabilities:
+                ego_goals.goals_probabilities[key] = 1.0
+
+            self._goal_probabilities[self.agent_id] = ego_goals
+            logger.debug(f"Ego prediction updated with true goal (mode: true_goal)")
+
+        except Exception as e:
+            logger.debug(f"Failed to update ego with true goal: {e}")
+
+    def _update_mcts_plan(self, observation: Observation):
+        """Run MCTS to generate optimal plan for ego."""
+        if self.goal is None:
+            logger.debug("No goal set for ego, skipping MCTS planning")
+            return
+
+        frame = observation.frame
+        agents_metadata = {aid: state.metadata for aid, state in frame.items()}
+
+        # Get goal probabilities for non-ego agents (for MCTS predictions)
+        non_ego_predictions = {
+            aid: gp for aid, gp in self._goal_probabilities.items()
+            if aid != self.agent_id
+        }
+
+        try:
+            self._mcts_plan, _ = self._mcts.search(
+                agent_id=self.agent_id,
+                goal=self.goal,
+                frame=frame,
+                meta=agents_metadata,
+                predictions=non_ego_predictions
+            )
+
+            if self._mcts_plan:
+                logger.debug(f"MCTS plan: {[str(ma) for ma in self._mcts_plan]}")
+
+                # Instantiate MacroActions from MCTSAction wrappers to get maneuvers
+                self._mcts_macro_actions, self._mcts_maneuvers = \
+                    self._instantiate_mcts_plan(observation)
+
+        except Exception as e:
+            logger.warning(f"MCTS planning failed: {e}")
+            self._mcts_plan = []
+            self._mcts_macro_actions = []
+            self._mcts_maneuvers = []
+            self._mcts_trajectory = None
+
+    # Mapping from class names to MacroActionFactory registered names
+    _MA_CLASS_TO_FACTORY_NAME = {
+        "Continue": "Continue",
+        "ChangeLaneLeft": "ChangeLaneLeft",
+        "ChangeLaneRight": "ChangeLaneRight",
+        "Exit": "Exit",
+        "StopMA": "Stop",  # StopMA class is registered as "Stop"
+    }
+
+    def _instantiate_mcts_plan(self, observation: Observation) -> Tuple[List[MacroAction], List[List]]:
+        """Instantiate MacroActions from MCTSAction wrappers to extract maneuvers.
+
+        MCTSAction contains macro_action_type and ma_args, which we use to create
+        actual MacroAction instances that have maneuvers.
+
+        Returns:
+            Tuple of (list of MacroActions, list of maneuver lists per macro-action)
+        """
+        macro_actions = []
+        maneuvers_per_ma = []
+        current_frame = observation.frame.copy()
+
+        for mcts_action in self._mcts_plan:
+            if not hasattr(mcts_action, 'macro_action_type'):
+                continue
+
             try:
-                self._goal_recognition.update_goals_probabilities(
-                    goals_probabilities=self._goal_probabilities[aid],
-                    observed_trajectory=self._observations[aid][0],
-                    agent_id=aid,
-                    frame_ini=self._observations[aid][1],
-                    frame=frame,
-                    visible_region=visible_region
+                # Create MacroActionConfig from MCTSAction
+                ma_type = mcts_action.macro_action_type
+                ma_class_name = ma_type.__name__
+
+                # Map class name to factory registered name
+                factory_name = self._MA_CLASS_TO_FACTORY_NAME.get(ma_class_name, ma_class_name)
+
+                ma_args = mcts_action.ma_args.copy() if mcts_action.ma_args else {}
+                ma_args['type'] = factory_name
+                ma_args['open_loop'] = True
+
+                config = MacroActionConfig(ma_args)
+
+                # Create the actual MacroAction
+                macro_action = MacroActionFactory.create(
+                    config, self.agent_id, current_frame, self._scenario_map
                 )
 
-                if aid == self.agent_id:
-                    logger.info(f"Ego agent goal probabilities:")
-                else:
-                    logger.info(f"Agent {aid} goal probabilities:")
-                self._goal_probabilities[aid].log(logger)
+                if macro_action is not None:
+                    macro_actions.append(macro_action)
+
+                    # Extract maneuvers
+                    if hasattr(macro_action, '_maneuvers') and macro_action._maneuvers:
+                        maneuvers_per_ma.append(macro_action._maneuvers)
+                    else:
+                        maneuvers_per_ma.append([])
+
+                    # Update frame for next macro-action (play forward)
+                    try:
+                        current_frame = MacroAction.play_forward_macro_action(
+                            self.agent_id, self._scenario_map, current_frame, macro_action
+                        )
+                    except Exception:
+                        pass  # Continue with same frame if play forward fails
 
             except Exception as e:
-                logger.debug(f"Goal recognition failed for agent {aid}: {e}")
+                logger.debug(f"Failed to instantiate MCTSAction {mcts_action}: {e}")
+                continue
+
+        return macro_actions, maneuvers_per_ma
+
+    def _analyze_safety(self):
+        """Compare predicted ego plan vs MCTS optimal plan to assess safety.
+
+        Analysis happens at two levels:
+        - Macro-actions: High-level (Continue, Exit, ChangeLane, StopMA)
+        - Maneuvers: Low-level (FollowLane, Turn, GiveWay, Stop, etc.)
+
+        Safety-critical maneuvers like GiveWay and Stop are checked specifically.
+        """
+        # Get predicted ego plan from goal recognition
+        ego_probs = self._goal_probabilities.get(self.agent_id)
+        if ego_probs is None:
+            self._safety_analysis = SafetyAnalysis(
+                is_safe=True,
+                intervention_type=InterventionType.NONE,
+                message="No prediction available",
+                predicted_actions=[],
+                optimal_actions=[],
+                missing_actions=[],
+                predicted_maneuvers=[],
+                missing_maneuvers=[],
+                risk_score=0.0
+            )
+            self._current_message = None
+            return
+
+        # Get most likely predicted goal and plan (list of macro-actions)
+        predicted_goal, predicted_prob = self._get_most_likely_goal(ego_probs)
+        all_plans = ego_probs.all_plans.get((predicted_goal, None), [])
+        # all_plans is List[List[MacroAction]], get the first/best plan
+        predicted_plan = all_plans[0] if all_plans and len(all_plans) > 0 else []
+
+        # Extract macro-action names
+        predicted_actions = [type(ma).__name__ for ma in predicted_plan] if predicted_plan else []
+
+        # Extract maneuvers from predicted macro-actions
+        predicted_maneuvers = self._extract_maneuvers_from_plan(predicted_plan)
+
+        # Get MCTS optimal plan macro-action names (MCTSAction wrappers)
+        optimal_actions = []
+        for ma in self._mcts_plan:
+            if hasattr(ma, 'macro_action_type'):
+                optimal_actions.append(ma.macro_action_type.__name__)
+            else:
+                optimal_actions.append(type(ma).__name__)
+
+        # Analyze differences at macro-action level
+        missing_actions = self._find_missing_macro_actions(predicted_actions, optimal_actions)
+
+        # Extract maneuvers from MCTS plan
+        mcts_maneuvers = self._extract_maneuvers_from_list(self._mcts_maneuvers)
+
+        # Analyze differences at maneuver level (safety-critical maneuvers)
+        missing_maneuvers = self._find_missing_safety_maneuvers(predicted_maneuvers, mcts_maneuvers)
+
+        # Calculate risk score based on both levels
+        risk_score = self._calculate_risk_score(
+            predicted_actions, optimal_actions, missing_actions, missing_maneuvers
+        )
+
+        # Determine intervention
+        intervention_type, message = self._determine_intervention(
+            missing_actions, missing_maneuvers, risk_score, predicted_prob
+        )
+
+        self._safety_analysis = SafetyAnalysis(
+            is_safe=(intervention_type == InterventionType.NONE),
+            intervention_type=intervention_type,
+            message=message,
+            predicted_actions=predicted_actions,
+            optimal_actions=optimal_actions,
+            missing_actions=missing_actions,
+            predicted_maneuvers=predicted_maneuvers,
+            missing_maneuvers=missing_maneuvers,
+            risk_score=risk_score
+        )
+
+        # Create driver message
+        if intervention_type != InterventionType.NONE:
+            self._current_message = DriverMessage(
+                text=message,
+                severity="critical" if intervention_type == InterventionType.STOP else "warning",
+                action_hint=self._get_action_hint(intervention_type, missing_actions, missing_maneuvers)
+            )
+        else:
+            self._current_message = None
+
+    def _extract_maneuvers_from_plan(self, plan: List[MacroAction]) -> List[str]:
+        """Extract all maneuver type names from a plan of macro-actions."""
+        maneuvers = []
+        for ma in plan:
+            if hasattr(ma, '_maneuvers') and ma._maneuvers:
+                for m in ma._maneuvers:
+                    maneuvers.append(type(m).__name__)
+        return maneuvers
+
+    def _find_missing_macro_actions(self, predicted: List[str], optimal: List[str]) -> List[str]:
+        """Find macro-actions in optimal plan that are missing from predicted.
+
+        Note: StopMA is a safety-critical macro-action.
+        """
+        safety_macro_actions = {"StopMA"}
+
+        predicted_set = set(predicted)
+
+        missing = []
+        for action in optimal:
+            if action in safety_macro_actions and action not in predicted_set:
+                missing.append(action)
+
+        return missing
+
+    def _extract_maneuvers_from_list(self, maneuvers_per_ma: List[List]) -> List[str]:
+        """Flatten a list of maneuver lists into a single list of maneuver names."""
+        maneuvers = []
+        for ma_maneuvers in maneuvers_per_ma:
+            for m in ma_maneuvers:
+                maneuvers.append(type(m).__name__)
+        return maneuvers
+
+    def _find_missing_safety_maneuvers(self, predicted_maneuvers: List[str],
+                                        mcts_maneuvers: List[str]) -> List[str]:
+        """Find safety-critical maneuvers in MCTS plan that are missing from predicted.
+
+        Safety-critical maneuvers:
+        - GiveWay / GiveWayCL: Yielding to other traffic
+        - Stop / StopCL: Coming to a complete stop
+
+        Args:
+            predicted_maneuvers: Maneuver names from predicted plan
+            mcts_maneuvers: Maneuver names from MCTS plan
+
+        Returns:
+            List of safety-critical maneuvers in MCTS but not in predicted
+        """
+        safety_maneuvers = {"GiveWay", "GiveWayCL", "Stop", "StopCL"}
+
+        predicted_set = set(predicted_maneuvers)
+
+        # Find safety maneuvers in MCTS plan that are missing from predicted
+        missing = []
+        for maneuver in mcts_maneuvers:
+            if maneuver in safety_maneuvers and maneuver not in predicted_set:
+                if maneuver not in missing:  # Avoid duplicates
+                    missing.append(maneuver)
+
+        return missing
+
+    def _calculate_risk_score(self, predicted: List[str], optimal: List[str],
+                              missing_actions: List[str], missing_maneuvers: List[str]) -> float:
+        """Calculate a risk score based on plan differences at both levels.
+
+        Args:
+            predicted: Predicted macro-action names
+            optimal: Optimal (MCTS) macro-action names
+            missing_actions: Missing macro-actions (e.g., StopMA)
+            missing_maneuvers: Missing safety-critical maneuvers (e.g., GiveWay, Stop)
+        """
+        if not optimal and not predicted:
+            return 0.0
+
+        risk = 0.0
+
+        # Risk from missing macro-actions
+        macro_weights = {"StopMA": 0.5}
+        risk += sum(macro_weights.get(action, 0.2) for action in missing_actions)
+
+        # Risk from missing safety maneuvers
+        maneuver_weights = {"GiveWay": 0.4, "GiveWayCL": 0.4, "Stop": 0.5, "StopCL": 0.5}
+        risk += sum(maneuver_weights.get(m, 0.2) for m in missing_maneuvers)
+
+        # Additional risk if macro-action sequences differ significantly
+        if predicted and optimal:
+            if predicted[0] != optimal[0]:
+                risk += 0.2
+
+        return min(1.0, risk)
+
+    def _determine_intervention(self, missing_actions: List[str], missing_maneuvers: List[str],
+                                risk_score: float, predicted_prob: float) -> Tuple[InterventionType, str]:
+        """Determine what intervention to apply based on safety analysis.
+
+        Checks both macro-action and maneuver level differences.
+        """
+        # Low confidence prediction - be cautious
+        if predicted_prob < 0.3:
+            return InterventionType.NONE, "Low prediction confidence"
+
+        # Check for critical missing macro-actions
+        if "StopMA" in missing_actions:
+            return InterventionType.STOP, "STOP REQUIRED - Missing stop macro-action!"
+
+        # Check for critical missing maneuvers
+        if any(m in missing_maneuvers for m in ["Stop", "StopCL"]):
+            return InterventionType.STOP, "STOP REQUIRED - Missing stop maneuver!"
+
+        if any(m in missing_maneuvers for m in ["GiveWay", "GiveWayCL"]):
+            return InterventionType.YIELD, "YIELD REQUIRED - Give way to other traffic!"
+
+        # High risk score
+        if risk_score > 0.6:
+            return InterventionType.SLOW_DOWN, "CAUTION - Predicted plan may be unsafe!"
+
+        if risk_score > 0.3:
+            return InterventionType.YIELD, "Slow down - approaching potential conflict"
+
+        return InterventionType.NONE, "Plan appears safe"
+
+    def _get_action_hint(self, intervention: InterventionType, missing_actions: List[str],
+                         missing_maneuvers: List[str]) -> str:
+        """Get a hint for what the driver should do."""
+        if intervention == InterventionType.STOP:
+            return "Apply brakes and stop before proceeding"
+        elif intervention == InterventionType.YIELD:
+            return "Reduce speed and yield to crossing traffic"
+        elif intervention == InterventionType.SLOW_DOWN:
+            return "Reduce speed and assess the situation"
+        return ""
+
+    def _get_most_likely_goal(self, goal_probs: GoalsProbabilities) -> Tuple[Optional[Goal], float]:
+        """Get the most likely goal from goal probabilities."""
+        best_goal = None
+        best_prob = 0.0
+        for (goal, _), prob in goal_probs.goals_probabilities.items():
+            if prob > best_prob:
+                best_prob = prob
+                best_goal = goal
+        return best_goal, best_prob
 
     def _get_goals(self, observation: Observation, threshold: float = 2.0) -> List[Goal]:
-        """Get all possible goals reachable from current position.
-
-        This is similar to MCTSAgent.get_goals() but operates from ego's position.
-        """
+        """Get all possible goals reachable from current position."""
         scenario_map = observation.scenario_map
         frame = observation.frame
         state = frame[self.agent_id]
@@ -418,45 +943,31 @@ class SharedAutonomyAgent(Agent):
         self._observations = {}
         self._goal_probabilities = {}
         self._goals = []
+        self._mcts_plan = []
+        self._mcts_macro_actions = []
+        self._mcts_maneuvers = []
+        self._mcts_trajectory = None
+        self._safety_analysis = None
+        self._current_message = None
+        self._intervention_active = False
         self._k = 0
 
-    def get_ego_predictions(self) -> GoalsProbabilities:
-        """Get goal probabilities for the ego agent.
+    # ==================== Public API for Visualization ====================
 
-        Returns:
-            GoalsProbabilities for ego, or None if not available
-        """
+    def get_ego_predictions(self) -> Optional[GoalsProbabilities]:
+        """Get goal probabilities for the ego agent."""
         return self._goal_probabilities.get(self.agent_id)
 
-    def get_agent_predictions(self, agent_id: int) -> GoalsProbabilities:
-        """Get goal probabilities for a specific agent.
-
-        Args:
-            agent_id: ID of the agent
-
-        Returns:
-            GoalsProbabilities for the agent, or None if not available
-        """
+    def get_agent_predictions(self, agent_id: int) -> Optional[GoalsProbabilities]:
+        """Get goal probabilities for a specific agent."""
         return self._goal_probabilities.get(agent_id)
 
-    def get_most_likely_ego_goal(self) -> Tuple[Goal, float]:
-        """Get the most likely goal for the ego agent.
-
-        Returns:
-            Tuple of (goal, probability), or (None, 0) if not available
-        """
+    def get_most_likely_ego_goal(self) -> Tuple[Optional[Goal], float]:
+        """Get the most likely goal for the ego agent."""
         ego_probs = self.get_ego_predictions()
         if ego_probs is None:
             return None, 0.0
-
-        best_goal = None
-        best_prob = 0.0
-        for (goal, _), prob in ego_probs.goals_probabilities.items():
-            if prob > best_prob:
-                best_prob = prob
-                best_goal = goal
-
-        return best_goal, best_prob
+        return self._get_most_likely_goal(ego_probs)
 
     @property
     def view_radius(self) -> float:
@@ -479,11 +990,137 @@ class SharedAutonomyAgent(Agent):
         return self._goal_probabilities
 
     @property
+    def mcts_plan(self) -> List[MacroAction]:
+        """The MCTS-generated optimal plan for ego."""
+        return self._mcts_plan
+
+    @property
+    def mcts_trajectory(self) -> Optional[VelocityTrajectory]:
+        """Trajectory from the MCTS optimal plan."""
+        return self._mcts_trajectory
+
+    @property
+    def mcts_macro_actions(self) -> List[MacroAction]:
+        """The instantiated MacroActions from the MCTS plan."""
+        return self._mcts_macro_actions
+
+    @property
+    def mcts_maneuvers(self) -> List[List]:
+        """Maneuvers for each macro-action in the MCTS plan.
+
+        Returns a list of maneuver lists, one per macro-action.
+        Maneuvers are low-level actions: FollowLane, Turn, GiveWay, Stop, etc.
+        """
+        return self._mcts_maneuvers
+
+    @property
+    def safety_analysis(self) -> Optional[SafetyAnalysis]:
+        """Current safety analysis results."""
+        return self._safety_analysis
+
+    @property
+    def current_message(self) -> Optional[DriverMessage]:
+        """Current message for the driver."""
+        return self._current_message
+
+    @property
+    def intervention_active(self) -> bool:
+        """Whether an intervention is currently being applied."""
+        return self._intervention_active
+
+    @property
     def current_macro(self):
-        """SharedAutonomyAgent doesn't use macro actions."""
+        """SharedAutonomyAgent doesn't use macro actions for control."""
         return self._current_macro
 
     @property
     def predict_ego(self) -> bool:
         """Whether ego is included in predictions."""
         return self._predict_ego
+
+    @property
+    def ego_goal_mode(self) -> str:
+        """How ego's goal is determined for prediction.
+
+        Returns:
+            "goal_recognition": Predict goal from observed trajectory
+            "true_goal": Use the actual ego goal, run A* to find path
+        """
+        return self._ego_goal_mode
+
+    @ego_goal_mode.setter
+    def ego_goal_mode(self, mode: str):
+        """Set the ego goal prediction mode.
+
+        Args:
+            mode: Either "goal_recognition" or "true_goal"
+        """
+        if mode not in ("goal_recognition", "true_goal"):
+            raise ValueError(f"Invalid ego_goal_mode: {mode}. "
+                           f"Must be 'goal_recognition' or 'true_goal'")
+        self._ego_goal_mode = mode
+
+    @property
+    def predicted_plan(self) -> List[MacroAction]:
+        """Get the predicted plan (macro-actions) for ego from goal recognition.
+
+        This is the first/best plan corresponding to the most likely goal.
+        MacroActions are high-level actions: Continue, Exit, ChangeLane, StopMA.
+        Each MacroAction contains a sequence of Maneuvers.
+        """
+        ego_probs = self._goal_probabilities.get(self.agent_id)
+        if ego_probs is None:
+            return []
+
+        # Get most likely goal
+        best_goal, _ = self._get_most_likely_goal(ego_probs)
+        if best_goal is None:
+            return []
+
+        # all_plans returns List[List[MacroAction]] - get the first (best) plan
+        plans = ego_probs.all_plans.get((best_goal, None), [])
+        if plans and len(plans) > 0:
+            return plans[0]  # Return the first/best plan
+        return []
+
+    @property
+    def predicted_maneuvers(self) -> List[List]:
+        """Get the maneuvers for each macro-action in the predicted plan.
+
+        Returns a list of maneuver lists, one per macro-action.
+        Maneuvers are low-level actions: FollowLane, Turn, GiveWay, Stop, etc.
+        """
+        plan = self.predicted_plan
+        if not plan:
+            return []
+
+        maneuvers_per_ma = []
+        for ma in plan:
+            if hasattr(ma, '_maneuvers') and ma._maneuvers:
+                maneuvers_per_ma.append(ma._maneuvers)
+            elif hasattr(ma, 'get_maneuvers'):
+                try:
+                    maneuvers_per_ma.append(ma.get_maneuvers())
+                except:
+                    maneuvers_per_ma.append([])
+            else:
+                maneuvers_per_ma.append([])
+        return maneuvers_per_ma
+
+    @property
+    def predicted_trajectory(self) -> Optional[VelocityTrajectory]:
+        """Get the predicted trajectory for ego from goal recognition.
+
+        This is the optimum trajectory for the most likely goal.
+        """
+        ego_probs = self._goal_probabilities.get(self.agent_id)
+        if ego_probs is None:
+            return None
+
+        # Get most likely goal
+        best_goal, _ = self._get_most_likely_goal(ego_probs)
+        if best_goal is None:
+            return None
+
+        # Get the optimum trajectory for this goal
+        return ego_probs.optimum_trajectory.get((best_goal, None))
