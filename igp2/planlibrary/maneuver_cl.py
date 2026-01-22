@@ -188,7 +188,7 @@ class WaypointManeuver(ClosedLoopManeuver, abc.ABC):
                     required_accel = target_speed - ego_speed
                     acceleration = min(acceleration, required_accel)
 
-        return acceleration if acceleration != float('inf') else 0.0
+        return acceleration  # Return inf when no constraint; min() in caller handles it correctly
 
     def _get_future_trajectory_segment(self, state: AgentState) -> np.ndarray:
         """Get the segment of trajectory ahead of current position for collision checking."""
