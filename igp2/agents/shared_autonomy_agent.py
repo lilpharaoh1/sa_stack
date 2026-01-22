@@ -66,12 +66,26 @@ class InterventionType(Enum):
 
 
 @dataclass
+class SequenceDifference:
+    """Represents a difference between predicted and optimal plans at a specific position."""
+    position: int              # 0-indexed position in the plan
+    predicted_action: str      # What the predicted plan has (or None if shorter)
+    optimal_action: str        # What the MCTS plan has (or None if shorter)
+    is_safety_critical: bool   # True if optimal action is safety-critical (StopMA, etc.)
+    description: str           # Human-readable description
+
+
+@dataclass
 class SafetyAnalysis:
     """Results of comparing predicted plan vs MCTS optimal plan.
 
     Comparison happens at two levels:
     - Macro-actions: High-level actions like Continue, Exit, ChangeLane, StopMA
     - Maneuvers: Low-level actions like FollowLane, Turn, GiveWay, Stop
+
+    Sequence comparison:
+    - sequence_differences: List of differences at each position where plans diverge
+    - first_divergence: Position where plans first differ (or -1 if identical)
     """
     is_safe: bool
     intervention_type: InterventionType
@@ -79,7 +93,10 @@ class SafetyAnalysis:
     # Macro-action level
     predicted_actions: List[str]  # MacroAction types in predicted plan
     optimal_actions: List[str]    # MacroAction types in MCTS plan
-    missing_actions: List[str]    # MacroActions in optimal but not in predicted
+    missing_actions: List[str]    # MacroActions in optimal but not in predicted (set-based)
+    # Sequence-level comparison
+    sequence_differences: List[SequenceDifference]  # Differences at each position
+    first_divergence: int         # Position of first difference (-1 if identical)
     # Maneuver level
     predicted_maneuvers: List[str]  # Maneuver types in predicted plan
     missing_maneuvers: List[str]    # Safety-critical maneuvers missing from predicted
@@ -622,7 +639,8 @@ class SharedAutonomyAgent(Agent):
     def _analyze_safety(self):
         """Compare predicted ego plan vs MCTS optimal plan to assess safety.
 
-        Analysis happens at two levels:
+        Analysis happens at multiple levels:
+        - Sequence comparison: Position-by-position comparison of action sequences
         - Macro-actions: High-level (Continue, Exit, ChangeLane, StopMA)
         - Maneuvers: Low-level (FollowLane, Turn, GiveWay, Stop, etc.)
 
@@ -638,6 +656,8 @@ class SharedAutonomyAgent(Agent):
                 predicted_actions=[],
                 optimal_actions=[],
                 missing_actions=[],
+                sequence_differences=[],
+                first_divergence=-1,
                 predicted_maneuvers=[],
                 missing_maneuvers=[],
                 risk_score=0.0
@@ -665,8 +685,13 @@ class SharedAutonomyAgent(Agent):
             else:
                 optimal_actions.append(type(ma).__name__)
 
-        # Analyze differences at macro-action level
+        # Analyze differences at macro-action level (set-based)
         missing_actions = self._find_missing_macro_actions(predicted_actions, optimal_actions)
+
+        # Analyze sequence differences (position-based)
+        sequence_differences, first_divergence = self._compare_action_sequences(
+            predicted_actions, optimal_actions
+        )
 
         # Extract maneuvers from MCTS plan
         mcts_maneuvers = self._extract_maneuvers_from_list(self._mcts_maneuvers)
@@ -674,14 +699,16 @@ class SharedAutonomyAgent(Agent):
         # Analyze differences at maneuver level (safety-critical maneuvers)
         missing_maneuvers = self._find_missing_safety_maneuvers(predicted_maneuvers, mcts_maneuvers)
 
-        # Calculate risk score based on both levels
+        # Calculate risk score based on all levels including sequence differences
         risk_score = self._calculate_risk_score(
-            predicted_actions, optimal_actions, missing_actions, missing_maneuvers
+            predicted_actions, optimal_actions, missing_actions, missing_maneuvers,
+            sequence_differences
         )
 
-        # Determine intervention
+        # Determine intervention based on sequence differences
         intervention_type, message = self._determine_intervention(
-            missing_actions, missing_maneuvers, risk_score, predicted_prob
+            missing_actions, missing_maneuvers, risk_score, predicted_prob,
+            sequence_differences
         )
 
         self._safety_analysis = SafetyAnalysis(
@@ -691,6 +718,8 @@ class SharedAutonomyAgent(Agent):
             predicted_actions=predicted_actions,
             optimal_actions=optimal_actions,
             missing_actions=missing_actions,
+            sequence_differences=sequence_differences,
+            first_divergence=first_divergence,
             predicted_maneuvers=predicted_maneuvers,
             missing_maneuvers=missing_maneuvers,
             risk_score=risk_score
@@ -701,7 +730,9 @@ class SharedAutonomyAgent(Agent):
             self._current_message = DriverMessage(
                 text=message,
                 severity="critical" if intervention_type == InterventionType.STOP else "warning",
-                action_hint=self._get_action_hint(intervention_type, missing_actions, missing_maneuvers)
+                action_hint=self._get_action_hint(
+                    intervention_type, missing_actions, missing_maneuvers, sequence_differences
+                )
             )
         else:
             self._current_message = None
@@ -730,6 +761,59 @@ class SharedAutonomyAgent(Agent):
                 missing.append(action)
 
         return missing
+
+    def _compare_action_sequences(self, predicted: List[str], optimal: List[str]) \
+            -> Tuple[List[SequenceDifference], int]:
+        """Compare predicted and optimal action sequences position by position.
+
+        This detects differences like:
+        - MCTS: [Exit, StopMA] vs Predicted: [Exit, Continue] -> difference at position 1
+        - MCTS: [Exit, StopMA, Continue] vs Predicted: [Exit] -> missing actions at positions 1, 2
+
+        Args:
+            predicted: List of predicted macro-action names
+            optimal: List of optimal (MCTS) macro-action names
+
+        Returns:
+            Tuple of (list of SequenceDifference, first_divergence_position)
+            first_divergence_position is -1 if sequences are identical
+        """
+        safety_critical_actions = {"StopMA", "GiveWay", "Stop"}
+        differences = []
+        first_divergence = -1
+        max_len = max(len(predicted), len(optimal))
+
+        for i in range(max_len):
+            pred_action = predicted[i] if i < len(predicted) else None
+            opt_action = optimal[i] if i < len(optimal) else None
+
+            if pred_action != opt_action:
+                if first_divergence == -1:
+                    first_divergence = i
+
+                # Determine if this is a safety-critical difference
+                is_critical = opt_action in safety_critical_actions if opt_action else False
+
+                # Create description
+                if pred_action is None:
+                    desc = f"Position {i+1}: MCTS suggests {opt_action}, predicted plan is shorter"
+                elif opt_action is None:
+                    desc = f"Position {i+1}: Predicted has {pred_action}, MCTS plan is shorter"
+                else:
+                    desc = f"Position {i+1}: MCTS suggests {opt_action}, predicted has {pred_action}"
+
+                if is_critical:
+                    desc += " [SAFETY-CRITICAL]"
+
+                differences.append(SequenceDifference(
+                    position=i,
+                    predicted_action=pred_action,
+                    optimal_action=opt_action,
+                    is_safety_critical=is_critical,
+                    description=desc
+                ))
+
+        return differences, first_divergence
 
     def _extract_maneuvers_from_list(self, maneuvers_per_ma: List[List]) -> List[str]:
         """Flatten a list of maneuver lists into a single list of maneuver names."""
@@ -768,7 +852,8 @@ class SharedAutonomyAgent(Agent):
         return missing
 
     def _calculate_risk_score(self, predicted: List[str], optimal: List[str],
-                              missing_actions: List[str], missing_maneuvers: List[str]) -> float:
+                              missing_actions: List[str], missing_maneuvers: List[str],
+                              sequence_differences: List[SequenceDifference] = None) -> float:
         """Calculate a risk score based on plan differences at both levels.
 
         Args:
@@ -776,13 +861,14 @@ class SharedAutonomyAgent(Agent):
             optimal: Optimal (MCTS) macro-action names
             missing_actions: Missing macro-actions (e.g., StopMA)
             missing_maneuvers: Missing safety-critical maneuvers (e.g., GiveWay, Stop)
+            sequence_differences: Position-by-position differences in action sequences
         """
         if not optimal and not predicted:
             return 0.0
 
         risk = 0.0
 
-        # Risk from missing macro-actions
+        # Risk from missing macro-actions (set-based)
         macro_weights = {"StopMA": 0.5}
         risk += sum(macro_weights.get(action, 0.2) for action in missing_actions)
 
@@ -790,24 +876,55 @@ class SharedAutonomyAgent(Agent):
         maneuver_weights = {"GiveWay": 0.4, "GiveWayCL": 0.4, "Stop": 0.5, "StopCL": 0.5}
         risk += sum(maneuver_weights.get(m, 0.2) for m in missing_maneuvers)
 
-        # Additional risk if macro-action sequences differ significantly
-        if predicted and optimal:
-            if predicted[0] != optimal[0]:
-                risk += 0.2
+        # Risk from sequence differences (position-based)
+        if sequence_differences:
+            for diff in sequence_differences:
+                # Safety-critical differences are weighted more heavily
+                if diff.is_safety_critical:
+                    risk += 0.3
+                # Early divergences (first few actions) are more concerning
+                elif diff.position == 0:
+                    risk += 0.25  # First action differs
+                elif diff.position == 1:
+                    risk += 0.15  # Second action differs
+                else:
+                    risk += 0.1  # Later differences
 
         return min(1.0, risk)
 
     def _determine_intervention(self, missing_actions: List[str], missing_maneuvers: List[str],
-                                risk_score: float, predicted_prob: float) -> Tuple[InterventionType, str]:
+                                risk_score: float, predicted_prob: float,
+                                sequence_differences: List[SequenceDifference] = None) -> Tuple[InterventionType, str]:
         """Determine what intervention to apply based on safety analysis.
 
-        Checks both macro-action and maneuver level differences.
+        Checks macro-action level, maneuver level, and sequence-level differences.
+        Provides detailed reasoning about sequence differences for the driver.
+
+        Args:
+            missing_actions: Missing macro-actions (set-based comparison)
+            missing_maneuvers: Missing safety-critical maneuvers
+            risk_score: Calculated risk score (0.0 to 1.0)
+            predicted_prob: Confidence in the predicted goal
+            sequence_differences: Position-by-position differences in plans
         """
         # Low confidence prediction - be cautious
         if predicted_prob < 0.3:
             return InterventionType.NONE, "Low prediction confidence"
 
-        # Check for critical missing macro-actions
+        # Check for safety-critical sequence differences first
+        if sequence_differences:
+            critical_diffs = [d for d in sequence_differences if d.is_safety_critical]
+            if critical_diffs:
+                # Find the first safety-critical difference
+                first_critical = critical_diffs[0]
+                if first_critical.optimal_action in ("StopMA", "Stop"):
+                    msg = f"STOP REQUIRED - {first_critical.description}"
+                    return InterventionType.STOP, msg
+                elif first_critical.optimal_action in ("GiveWay", "GiveWayCL"):
+                    msg = f"YIELD REQUIRED - {first_critical.description}"
+                    return InterventionType.YIELD, msg
+
+        # Check for critical missing macro-actions (set-based)
         if "StopMA" in missing_actions:
             return InterventionType.STOP, "STOP REQUIRED - Missing stop macro-action!"
 
@@ -817,6 +934,21 @@ class SharedAutonomyAgent(Agent):
 
         if any(m in missing_maneuvers for m in ["GiveWay", "GiveWayCL"]):
             return InterventionType.YIELD, "YIELD REQUIRED - Give way to other traffic!"
+
+        # Check for early sequence divergences (non-critical)
+        if sequence_differences:
+            first_diff = sequence_differences[0] if sequence_differences else None
+            if first_diff and first_diff.position == 0:
+                # Plans differ from the very first action
+                msg = f"CAUTION - Plans diverge immediately: {first_diff.description}"
+                return InterventionType.SLOW_DOWN, msg
+            elif first_diff and first_diff.position == 1:
+                # Plans differ at second action
+                msg = f"CAUTION - Plans differ at step 2: {first_diff.description}"
+                if risk_score > 0.4:
+                    return InterventionType.SLOW_DOWN, msg
+                else:
+                    return InterventionType.YIELD, msg
 
         # High risk score
         if risk_score > 0.6:
@@ -828,8 +960,27 @@ class SharedAutonomyAgent(Agent):
         return InterventionType.NONE, "Plan appears safe"
 
     def _get_action_hint(self, intervention: InterventionType, missing_actions: List[str],
-                         missing_maneuvers: List[str]) -> str:
-        """Get a hint for what the driver should do."""
+                         missing_maneuvers: List[str],
+                         sequence_differences: List[SequenceDifference] = None) -> str:
+        """Get a hint for what the driver should do based on plan differences.
+
+        Args:
+            intervention: The type of intervention being applied
+            missing_actions: Missing macro-actions
+            missing_maneuvers: Missing safety-critical maneuvers
+            sequence_differences: Position-by-position differences in plans
+        """
+        # Build a specific hint based on sequence differences when available
+        if sequence_differences:
+            critical_diffs = [d for d in sequence_differences if d.is_safety_critical]
+            if critical_diffs:
+                first_critical = critical_diffs[0]
+                if first_critical.optimal_action in ("StopMA", "Stop"):
+                    return f"Apply brakes - MCTS recommends stop at step {first_critical.position + 1}"
+                elif first_critical.optimal_action in ("GiveWay", "GiveWayCL"):
+                    return f"Yield to traffic - MCTS recommends giving way at step {first_critical.position + 1}"
+
+        # Generic hints based on intervention type
         if intervention == InterventionType.STOP:
             return "Apply brakes and stop before proceeding"
         elif intervention == InterventionType.YIELD:
