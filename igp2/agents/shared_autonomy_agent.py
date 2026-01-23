@@ -54,6 +54,11 @@ from igp2.recognition.astar import AStar
 from igp2.recognition.goalrecognition import GoalRecognition
 from igp2.recognition.goalprobabilities import GoalsProbabilities
 
+# Epistemic module for maneuver-level recognition
+from igp2.epistemic.maneuver_astar import ManeuverAStar
+from igp2.epistemic.maneuver_recognition import ManeuverRecognition
+from igp2.epistemic.maneuver_probabilities import ManeuverProbabilities
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,7 +168,8 @@ class SharedAutonomyAgent(Agent):
                  stop_goals: bool = False,
                  predict_ego: bool = True,
                  ego_goal_mode: str = "true_goal",
-                 enable_interventions: bool = True):
+                 enable_interventions: bool = False, # True, 
+                 prediction_level: str = "maneuver"):
         """Initialize a shared autonomy agent.
 
         Args:
@@ -189,6 +195,9 @@ class SharedAutonomyAgent(Agent):
                 - "goal_recognition": Predict goal from observed trajectory (default)
                 - "true_goal": Use the actual ego goal, run A* to find path
             enable_interventions: Whether to apply safety interventions
+            prediction_level: Level of prediction granularity:
+                - "macro": Use macro-action level (Continue, Exit, etc.) via IGP2 GoalRecognition
+                - "maneuver": Use maneuver level (FollowLane, GiveWay, Turn, etc.) via epistemic module
         """
         super().__init__(agent_id, initial_state, goal, fps)
 
@@ -211,9 +220,13 @@ class SharedAutonomyAgent(Agent):
         self._k = 0
         self._kmax = t_update * fps
 
+        # Prediction level configuration
+        if prediction_level not in ("macro", "maneuver"):
+            raise ValueError(f"Invalid prediction_level: {prediction_level}. Must be 'macro' or 'maneuver'.")
+        self._prediction_level = prediction_level
+
         # Goal recognition setup
         self._cost = Cost(factors=cost_factors) if cost_factors is not None else Cost()
-        self._astar = AStar(next_lane_offset=0.1)
 
         if velocity_smoother is None:
             velocity_smoother = {"vmin_m_s": 1, "vmax_m_s": 10, "n": 10, "amax_m_s2": 5, "lambda_acc": 10}
@@ -221,8 +234,21 @@ class SharedAutonomyAgent(Agent):
 
         if goal_recognition is None:
             goal_recognition = {"reward_as_difference": False, "n_trajectories": 2}
+
+        # Create macro-level (IGP2) recognition
+        self._astar = AStar(next_lane_offset=0.1)
         self._goal_recognition = GoalRecognition(
             astar=self._astar,
+            smoother=self._smoother,
+            scenario_map=scenario_map,
+            cost=self._cost,
+            **goal_recognition
+        )
+
+        # Create maneuver-level (epistemic) recognition
+        self._maneuver_astar = ManeuverAStar(next_lane_offset=0.1)
+        self._maneuver_recognition = ManeuverRecognition(
+            astar=self._maneuver_astar,
             smoother=self._smoother,
             scenario_map=scenario_map,
             cost=self._cost,
@@ -242,7 +268,11 @@ class SharedAutonomyAgent(Agent):
         )
 
         # Storage for predictions and plans
+        # For macro-level (IGP2) predictions
         self._goal_probabilities: Dict[int, GoalsProbabilities] = {}
+        # For maneuver-level (epistemic) predictions
+        self._maneuver_probabilities: Dict[int, ManeuverProbabilities] = {}
+        # Shared storage
         self._observations: Dict[int, Tuple[StateTrajectory, Dict[int, AgentState]]] = {}
         self._goals: List[Goal] = []
 
@@ -266,6 +296,7 @@ class SharedAutonomyAgent(Agent):
         if self._pygame_available:
             logger.info(f"SharedAutonomyAgent {agent_id} initialized. "
                        f"predict_ego={predict_ego}, ego_goal_mode={ego_goal_mode}, "
+                       f"prediction_level={prediction_level}, "
                        f"interventions={enable_interventions}")
         else:
             logger.warning(f"SharedAutonomyAgent {agent_id}: pygame unavailable, zero controls.")
@@ -436,9 +467,17 @@ class SharedAutonomyAgent(Agent):
     def _update_predictions(self, observation: Observation):
         """Run goal recognition for all agents including ego (if enabled).
 
+        The prediction level can be configured via prediction_level:
+        - "macro": Use IGP2 GoalRecognition (macro-action level: Continue, Exit, etc.)
+        - "maneuver": Use epistemic ManeuverRecognition (maneuver level: FollowLane, GiveWay, etc.)
+
         The ego agent's prediction can be done in two modes (set via ego_goal_mode):
         - "goal_recognition": Predict goal from observed trajectory
         - "true_goal": Use the actual ego goal, just run A* to find path to it
+
+        Note: MCTS always requires macro-level predictions (GoalsProbabilities) for non-ego
+        agents. When prediction_level="maneuver", we still run macro-level recognition for
+        non-ego agents to feed MCTS, while using maneuver-level for ego.
         """
         frame = observation.frame
 
@@ -451,10 +490,24 @@ class SharedAutonomyAgent(Agent):
         if not self._predict_ego:
             agents_to_predict = [aid for aid in agents_to_predict if aid != self.agent_id]
 
-        # Initialize goal probabilities for all agents
+        # Separate ego and non-ego agents
+        non_ego_agents = [aid for aid in agents_to_predict if aid != self.agent_id]
+
+        # Always initialize goal_probabilities for non-ego agents (MCTS needs them)
+        # When prediction_level="maneuver", we still need macro-level predictions for MCTS
         self._goal_probabilities = {
-            aid: GoalsProbabilities(self._goals) for aid in agents_to_predict
+            aid: GoalsProbabilities(self._goals) for aid in non_ego_agents
         }
+
+        # Initialize maneuver probabilities when using maneuver-level prediction
+        if self._prediction_level == "maneuver":
+            self._maneuver_probabilities = {
+                aid: ManeuverProbabilities(self._goals) for aid in agents_to_predict
+            }
+        else:
+            # For macro level, also add ego to goal_probabilities
+            if self.agent_id in agents_to_predict:
+                self._goal_probabilities[self.agent_id] = GoalsProbabilities(self._goals)
 
         visible_region = Circle(frame[self.agent_id].position, self._view_radius)
 
@@ -471,26 +524,70 @@ class SharedAutonomyAgent(Agent):
             if use_true_goal:
                 # Use actual ego goal - run A* to find path to true goal
                 self._update_ego_with_true_goal(observation, frame, visible_region)
+            elif aid == self.agent_id:
+                # Ego prediction based on prediction_level
+                if self._prediction_level == "macro":
+                    self._run_macro_recognition(aid, frame, visible_region)
+                else:
+                    self._run_maneuver_recognition(aid, frame, visible_region)
             else:
-                # Normal goal recognition
-                try:
-                    self._goal_recognition.update_goals_probabilities(
-                        goals_probabilities=self._goal_probabilities[aid],
-                        observed_trajectory=self._observations[aid][0],
-                        agent_id=aid,
-                        frame_ini=self._observations[aid][1],
-                        frame=frame,
-                        visible_region=visible_region,
-                        open_loop=(aid != self.agent_id)
-                    )
+                # Non-ego: always use macro-level recognition (MCTS needs GoalsProbabilities)
+                self._run_macro_recognition(aid, frame, visible_region)
+                # Additionally run maneuver recognition if prediction_level is maneuver
+                if self._prediction_level == "maneuver":
+                    self._run_maneuver_recognition(aid, frame, visible_region)
 
-                    if aid == self.agent_id:
-                        logger.debug(f"Ego goal recognition updated (mode: goal_recognition)")
-                    else:
-                        logger.debug(f"Agent {aid} goal probabilities updated")
+    def _run_macro_recognition(self, aid: int, frame: Dict, visible_region: Circle):
+        """Run macro-action level goal recognition (IGP2).
 
-                except Exception as e:
-                    logger.debug(f"Goal recognition failed for agent {aid}: {e}")
+        This uses GoalRecognition which searches over macro-actions
+        like Continue, Exit, ChangeLane, StopMA.
+        """
+        try:
+            self._goal_recognition.update_goals_probabilities(
+                goals_probabilities=self._goal_probabilities[aid],
+                observed_trajectory=self._observations[aid][0],
+                agent_id=aid,
+                frame_ini=self._observations[aid][1],
+                frame=frame,
+                visible_region=visible_region,
+                open_loop=(aid != self.agent_id)
+            )
+
+            if aid == self.agent_id:
+                logger.debug(f"Ego macro-level recognition updated")
+            else:
+                logger.debug(f"Agent {aid} macro-level probabilities updated")
+
+        except Exception as e:
+            logger.debug(f"Macro-level recognition failed for agent {aid}: {e}")
+
+    def _run_maneuver_recognition(self, aid: int, frame: Dict, visible_region: Circle):
+        """Run maneuver-level goal recognition (epistemic).
+
+        This uses ManeuverRecognition which searches over maneuvers
+        directly: FollowLane, GiveWay, Turn, Stop, SwitchLane, etc.
+        """
+        try:
+            self._maneuver_recognition.update_goals_probabilities(
+                goals_probabilities=self._maneuver_probabilities[aid],
+                observed_trajectory=self._observations[aid][0],
+                agent_id=aid,
+                frame_ini=self._observations[aid][1],
+                frame=frame,
+                visible_region=visible_region,
+                open_loop=(aid != self.agent_id)
+            )
+
+            if aid == self.agent_id:
+                # Log the predicted maneuver sequence
+                maneuvers = self._maneuver_probabilities[aid].get_maneuver_sequence()
+                logger.debug(f"Ego maneuver-level recognition updated: {maneuvers}")
+            else:
+                logger.debug(f"Agent {aid} maneuver-level probabilities updated")
+
+        except Exception as e:
+            logger.debug(f"Maneuver-level recognition failed for agent {aid}: {e}")
 
     def _update_ego_with_true_goal(self, observation: Observation, frame: Dict,
                                     visible_region: Circle):
@@ -499,33 +596,57 @@ class SharedAutonomyAgent(Agent):
         This bypasses goal prediction but still computes the path using A*.
         Useful when you want to analyze the path to a known destination
         without the uncertainty of goal recognition.
+
+        Works with both macro-level and maneuver-level prediction.
         """
         if self.goal is None or self.agent_id not in self._observations:
             return
 
         try:
-            # Create a GoalsProbabilities with just the true goal
-            ego_goals = GoalsProbabilities([self.goal])
+            if self._prediction_level == "macro":
+                # Macro-level: Use GoalsProbabilities and GoalRecognition
+                ego_goals = GoalsProbabilities([self.goal])
 
-            # Run goal recognition which will compute A* path to the goal
-            # The probability will be based on how well the observed trajectory
-            # matches the path to the true goal
-            self._goal_recognition.update_goals_probabilities(
-                goals_probabilities=ego_goals,
-                observed_trajectory=self._observations[self.agent_id][0],
-                agent_id=self.agent_id,
-                frame_ini=self._observations[self.agent_id][1],
-                frame=frame,
-                visible_region=visible_region,
-                open_loop=False
-            )
+                self._goal_recognition.update_goals_probabilities(
+                    goals_probabilities=ego_goals,
+                    observed_trajectory=self._observations[self.agent_id][0],
+                    agent_id=self.agent_id,
+                    frame_ini=self._observations[self.agent_id][1],
+                    frame=frame,
+                    visible_region=visible_region,
+                    open_loop=False
+                )
 
-            # Set probability to 1.0 for the true goal (we know this is the goal)
-            for key in ego_goals.goals_probabilities:
-                ego_goals.goals_probabilities[key] = 1.0
+                # Set probability to 1.0 for the true goal
+                for key in ego_goals.goals_probabilities:
+                    ego_goals.goals_probabilities[key] = 1.0
 
-            self._goal_probabilities[self.agent_id] = ego_goals
-            logger.debug(f"Ego prediction updated with true goal (mode: true_goal)")
+                self._goal_probabilities[self.agent_id] = ego_goals
+                logger.debug(f"Ego macro-level prediction updated with true goal")
+
+            else:  # maneuver level
+                # Maneuver-level: Use ManeuverProbabilities and ManeuverRecognition
+                ego_maneuver_probs = ManeuverProbabilities([self.goal])
+
+                self._maneuver_recognition.update_goals_probabilities(
+                    goals_probabilities=ego_maneuver_probs,
+                    observed_trajectory=self._observations[self.agent_id][0],
+                    agent_id=self.agent_id,
+                    frame_ini=self._observations[self.agent_id][1],
+                    frame=frame,
+                    visible_region=visible_region,
+                    open_loop=False
+                )
+
+                # Set probability to 1.0 for the true goal
+                for key in ego_maneuver_probs.goals_probabilities:
+                    ego_maneuver_probs.goals_probabilities[key] = 1.0
+
+                self._maneuver_probabilities[self.agent_id] = ego_maneuver_probs
+
+                # Log predicted maneuver sequence
+                maneuvers = ego_maneuver_probs.get_maneuver_sequence()
+                logger.debug(f"Ego maneuver-level prediction updated with true goal: {maneuvers}")
 
         except Exception as e:
             logger.debug(f"Failed to update ego with true goal: {e}")
@@ -644,10 +765,15 @@ class SharedAutonomyAgent(Agent):
         - Macro-actions: High-level (Continue, Exit, ChangeLane, StopMA)
         - Maneuvers: Low-level (FollowLane, Turn, GiveWay, Stop, etc.)
 
+        When prediction_level is "maneuver", the predicted plan is directly a maneuver sequence.
         Safety-critical maneuvers like GiveWay and Stop are checked specifically.
         """
-        # Get predicted ego plan from goal recognition
-        ego_probs = self._goal_probabilities.get(self.agent_id)
+        # Get predicted ego plan based on prediction level
+        if self._prediction_level == "macro":
+            ego_probs = self._goal_probabilities.get(self.agent_id)
+        else:
+            ego_probs = self._maneuver_probabilities.get(self.agent_id)
+
         if ego_probs is None:
             self._safety_analysis = SafetyAnalysis(
                 is_safe=True,
@@ -665,17 +791,23 @@ class SharedAutonomyAgent(Agent):
             self._current_message = None
             return
 
-        # Get most likely predicted goal and plan (list of macro-actions)
+        # Get most likely predicted goal and plan
         predicted_goal, predicted_prob = self._get_most_likely_goal(ego_probs)
         all_plans = ego_probs.all_plans.get((predicted_goal, None), [])
-        # all_plans is List[List[MacroAction]], get the first/best plan
         predicted_plan = all_plans[0] if all_plans and len(all_plans) > 0 else []
 
-        # Extract macro-action names
-        predicted_actions = [type(ma).__name__ for ma in predicted_plan] if predicted_plan else []
-
-        # Extract maneuvers from predicted macro-actions
-        predicted_maneuvers = self._extract_maneuvers_from_plan(predicted_plan)
+        # Extract action/maneuver names based on prediction level
+        if self._prediction_level == "macro":
+            # all_plans is List[List[MacroAction]]
+            predicted_actions = [type(ma).__name__ for ma in predicted_plan] if predicted_plan else []
+            # Extract maneuvers from macro-actions
+            predicted_maneuvers = self._extract_maneuvers_from_plan(predicted_plan)
+        else:
+            # all_plans is List[List[Maneuver]] at maneuver level
+            # No macro-actions, just maneuvers
+            predicted_actions = []  # No macro-actions in maneuver-level prediction
+            predicted_maneuvers = [type(m).__name__ for m in predicted_plan] if predicted_plan else []
+            logger.debug(f"Maneuver-level predicted sequence: {predicted_maneuvers}")
 
         # Get MCTS optimal plan macro-action names (MCTSAction wrappers)
         optimal_actions = []
@@ -1210,6 +1342,52 @@ class SharedAutonomyAgent(Agent):
             raise ValueError(f"Invalid ego_goal_mode: {mode}. "
                            f"Must be 'goal_recognition' or 'true_goal'")
         self._ego_goal_mode = mode
+
+    @property
+    def prediction_level(self) -> str:
+        """Level of prediction granularity.
+
+        Returns:
+            "macro": Uses IGP2 GoalRecognition (macro-action level)
+            "maneuver": Uses epistemic ManeuverRecognition (maneuver level)
+        """
+        return self._prediction_level
+
+    @prediction_level.setter
+    def prediction_level(self, level: str):
+        """Set the prediction level.
+
+        Args:
+            level: Either "macro" or "maneuver"
+        """
+        if level not in ("macro", "maneuver"):
+            raise ValueError(f"Invalid prediction_level: {level}. "
+                           f"Must be 'macro' or 'maneuver'")
+        self._prediction_level = level
+
+    @property
+    def maneuver_probabilities(self) -> Dict[int, ManeuverProbabilities]:
+        """Get maneuver-level probabilities for all agents (when prediction_level='maneuver').
+
+        This contains the maneuver sequences predicted for each agent.
+        """
+        return self._maneuver_probabilities
+
+    @property
+    def predicted_maneuver_sequence(self) -> List[str]:
+        """Get the predicted maneuver sequence for ego (when prediction_level='maneuver').
+
+        Returns a list of maneuver type names like ['FollowLane', 'GiveWay', 'Turn'].
+        Returns empty list if prediction_level='macro' or no prediction available.
+        """
+        if self._prediction_level != "maneuver":
+            return []
+
+        ego_probs = self._maneuver_probabilities.get(self.agent_id)
+        if ego_probs is None:
+            return []
+
+        return ego_probs.get_maneuver_sequence()
 
     @property
     def predicted_plan(self) -> List[MacroAction]:

@@ -31,6 +31,12 @@ from igp2.core.goal import Goal
 from igp2.core.trajectory import VelocityTrajectory
 from igp2.recognition.goalprobabilities import GoalsProbabilities
 
+# Import ManeuverProbabilities if available (for maneuver-level predictions)
+try:
+    from igp2.epistemic.maneuver_probabilities import ManeuverProbabilities
+except ImportError:
+    ManeuverProbabilities = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -114,9 +120,14 @@ class PredictionVisualizer:
         self._predicted_plan: List[Any] = []  # List of MacroAction from goal recognition
         self._predicted_maneuvers: List[List[Any]] = []  # Maneuvers per predicted macro-action
         self._predicted_trajectory: Optional[VelocityTrajectory] = None
+        self._predicted_maneuver_sequence: List[str] = []  # Maneuver-level prediction for ego
         self._safety_analysis: Optional[Any] = None
         self._driver_message: Optional[Any] = None
         self._intervention_active: bool = False
+
+        # Maneuver-level prediction data
+        self._maneuver_probabilities: Dict[int, Any] = {}  # ManeuverProbabilities per agent
+        self._prediction_level: str = "macro"  # "macro" or "maneuver"
 
     def initialize(self) -> bool:
         """Initialize pygame and create the window.
@@ -161,6 +172,7 @@ class PredictionVisualizer:
                frame: Dict[int, AgentState],
                ego_id: int,
                goal_probabilities: Dict[int, GoalsProbabilities] = None,
+               maneuver_probabilities: Dict[int, Any] = None,
                possible_goals: List[Goal] = None,
                view_radius: float = 50.0,
                failure_zones: List[dict] = None,
@@ -171,26 +183,33 @@ class PredictionVisualizer:
                predicted_plan: List[Any] = None,
                predicted_maneuvers: List[List[Any]] = None,
                predicted_trajectory: VelocityTrajectory = None,
+               predicted_maneuver_sequence: List[str] = None,
                safety_analysis: Any = None,
                driver_message: Any = None,
-               intervention_active: bool = False) -> bool:
+               intervention_active: bool = False,
+               prediction_level: str = "macro") -> bool:
         """Update the visualization with new data.
 
         Args:
             frame: Current frame with agent states
             ego_id: ID of the ego agent
-            goal_probabilities: Goal probabilities for each agent
+            goal_probabilities: Goal probabilities for each agent (macro-level)
+            maneuver_probabilities: Maneuver probabilities for each agent (maneuver-level)
             possible_goals: List of possible goals
             view_radius: View radius of ego agent
             failure_zones: List of failure zone dicts
             timestep: Current simulation timestep
             mcts_trajectory: MCTS optimal plan trajectory
             mcts_plan: List of MCTS macro actions
+            mcts_maneuvers: List of maneuver lists per macro-action
             predicted_plan: List of predicted macro actions from goal recognition
+            predicted_maneuvers: List of maneuver lists per predicted macro-action
             predicted_trajectory: Predicted trajectory from goal recognition
+            predicted_maneuver_sequence: Predicted maneuver sequence for ego (maneuver-level)
             safety_analysis: SafetyAnalysis object from SharedAutonomyAgent
             driver_message: DriverMessage object from SharedAutonomyAgent
             intervention_active: Whether an intervention is currently active
+            prediction_level: "macro" or "maneuver" - determines what predictions to show
 
         Returns:
             True if should continue, False if window was closed.
@@ -217,6 +236,7 @@ class PredictionVisualizer:
         self._frame = frame
         self._ego_id = ego_id
         self._goal_probabilities = goal_probabilities or {}
+        self._maneuver_probabilities = maneuver_probabilities or {}
         self._possible_goals = possible_goals or []
         self._view_radius = view_radius
         self._failure_zones = failure_zones or []
@@ -227,9 +247,11 @@ class PredictionVisualizer:
         self._predicted_plan = predicted_plan or []
         self._predicted_trajectory = predicted_trajectory
         self._predicted_maneuvers = predicted_maneuvers or []
+        self._predicted_maneuver_sequence = predicted_maneuver_sequence or []
         self._safety_analysis = safety_analysis
         self._driver_message = driver_message
         self._intervention_active = intervention_active
+        self._prediction_level = prediction_level
 
         # Update center if following ego
         if self._follow_ego and ego_id in frame:
@@ -388,7 +410,11 @@ class PredictionVisualizer:
                         break
 
     def _draw_trajectories(self):
-        """Draw predicted trajectories for all agents."""
+        """Draw predicted trajectories for all agents.
+
+        Draws from goal_probabilities (macro-level) or maneuver_probabilities (maneuver-level).
+        """
+        # Draw macro-level trajectories (always available for non-ego agents)
         for aid, goal_probs in self._goal_probabilities.items():
             if goal_probs is None:
                 continue
@@ -433,6 +459,60 @@ class PredictionVisualizer:
                 if len(screen_points) >= 2:
                     opt_color = self.COLOR_TRAJECTORY_OPT if aid == self._ego_id else self.COLOR_TRAJECTORY
                     pygame.draw.lines(self._display, opt_color, False, screen_points, 2)
+
+        # Draw maneuver-level trajectories (when using maneuver prediction)
+        if self._prediction_level == "maneuver" and self._maneuver_probabilities:
+            for aid, maneuver_probs in self._maneuver_probabilities.items():
+                if maneuver_probs is None:
+                    continue
+
+                # Skip if we already drew trajectories from goal_probabilities
+                if aid in self._goal_probabilities:
+                    continue
+
+                color = self.COLOR_EGO if aid == self._ego_id else self.COLOR_TRAFFIC
+
+                try:
+                    for (goal, _), trajs in maneuver_probs.all_trajectories.items():
+                        prob = maneuver_probs.goals_probabilities.get((goal, None), 0.0)
+                        if prob < 0.01:
+                            continue
+
+                        for traj in trajs[:2]:
+                            if traj is None:
+                                continue
+
+                            path = traj.path
+                            if len(path) < 2:
+                                continue
+
+                            alpha = int(255 * min(1.0, prob * 2))
+                            traj_color = (*color[:3], alpha)
+
+                            screen_points = [self.world_to_screen(p) for p in path[::3]]
+                            if len(screen_points) >= 2:
+                                s = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+                                pygame.draw.lines(s, traj_color, False, screen_points, 2)
+                                self._display.blit(s, (0, 0))
+
+                    for (goal, _), opt_traj in maneuver_probs.optimum_trajectory.items():
+                        if opt_traj is None:
+                            continue
+
+                        prob = maneuver_probs.goals_probabilities.get((goal, None), 0.0)
+                        if prob < 0.1:
+                            continue
+
+                        path = opt_traj.path
+                        if len(path) < 2:
+                            continue
+
+                        screen_points = [self.world_to_screen(p) for p in path[::3]]
+                        if len(screen_points) >= 2:
+                            opt_color = self.COLOR_TRAJECTORY_OPT if aid == self._ego_id else self.COLOR_TRAJECTORY
+                            pygame.draw.lines(self._display, opt_color, False, screen_points, 2)
+                except Exception:
+                    pass  # Skip if maneuver_probs doesn't have trajectory data
 
     def _draw_mcts_trajectory(self):
         """Draw the MCTS optimal plan trajectory."""
@@ -574,24 +654,42 @@ class PredictionVisualizer:
         self._draw_plan_comparison_panel()
 
     def _draw_goal_panel(self):
-        """Draw goal probabilities panel on the right side."""
-        panel_width = 200
+        """Draw goal/maneuver probabilities panel on the right side."""
+        panel_width = 220
         panel_x = self.width - panel_width - 10
         y_offset = 10
         line_height = 16
 
-        # Panel background
-        panel_rect = pygame.Rect(panel_x - 5, 5, panel_width + 10, 200)
+        # Panel background - make taller for maneuver info
+        panel_height = 280 if self._prediction_level == "maneuver" else 200
+        panel_rect = pygame.Rect(panel_x - 5, 5, panel_width + 10, panel_height)
         s = pygame.Surface((panel_rect.width, panel_rect.height), pygame.SRCALPHA)
         s.fill((30, 30, 30, 180))
         self._display.blit(s, (panel_rect.x, panel_rect.y))
 
-        # Title
-        text = self._font.render("Goal Probabilities", True, self.COLOR_TEXT)
+        # Title - changes based on prediction level
+        if self._prediction_level == "maneuver":
+            title = "Agent Maneuver Predictions"
+        else:
+            title = "Goal Probabilities"
+        text = self._font.render(title, True, self.COLOR_TEXT)
         self._display.blit(text, (panel_x, y_offset))
-        y_offset += line_height + 10
+        y_offset += line_height + 5
 
-        # For each agent with predictions
+        # Show prediction level indicator
+        level_text = f"[{self._prediction_level.upper()} level]"
+        text = self._font_small.render(level_text, True, (150, 150, 150))
+        self._display.blit(text, (panel_x, y_offset))
+        y_offset += line_height + 5
+
+        # Determine which agents to show based on what data we have
+        if self._prediction_level == "maneuver" and self._maneuver_probabilities:
+            self._draw_maneuver_predictions(panel_x, y_offset, line_height, panel_height - 50)
+        else:
+            self._draw_goal_predictions(panel_x, y_offset, line_height, panel_height - 50)
+
+    def _draw_goal_predictions(self, panel_x: int, y_offset: int, line_height: int, max_height: int):
+        """Draw macro-level goal predictions for agents."""
         for aid in sorted(self._goal_probabilities.keys()):
             goal_probs = self._goal_probabilities[aid]
             if goal_probs is None:
@@ -619,7 +717,6 @@ class PredictionVisualizer:
                 bar_color = self.COLOR_GOAL_BEST if i == 0 else self.COLOR_GOAL
                 pygame.draw.rect(self._display, (*bar_color, 100), bar_rect)
 
-                goal_pos = goal.center if hasattr(goal, 'center') else np.array([0, 0])
                 label = f"{prob:.2f}"
                 text = self._font_small.render(label, True, (200, 200, 200))
                 self._display.blit(text, (panel_x + 10, y_offset))
@@ -627,7 +724,70 @@ class PredictionVisualizer:
 
             y_offset += 5
 
-            if y_offset > 190:
+            if y_offset > max_height:
+                break
+
+    def _draw_maneuver_predictions(self, panel_x: int, y_offset: int, line_height: int, max_height: int):
+        """Draw maneuver-level predictions for agents."""
+        for aid in sorted(self._maneuver_probabilities.keys()):
+            maneuver_probs = self._maneuver_probabilities[aid]
+            if maneuver_probs is None:
+                continue
+
+            is_ego = aid == self._ego_id
+            color = self.COLOR_EGO if is_ego else self.COLOR_TRAFFIC
+            agent_label = f"Agent {aid}" + (" (EGO)" if is_ego else "")
+            text = self._font_small.render(agent_label, True, color)
+            self._display.blit(text, (panel_x, y_offset))
+            y_offset += line_height
+
+            # Get maneuver sequence for this agent
+            try:
+                maneuver_seq = maneuver_probs.get_maneuver_sequence()
+                if maneuver_seq:
+                    # Show maneuver sequence as arrows
+                    seq_str = " > ".join(maneuver_seq[:4])  # Limit to 4 maneuvers
+                    if len(seq_str) > 28:
+                        seq_str = seq_str[:25] + "..."
+                    text = self._font_small.render(f"  {seq_str}", True, (180, 220, 180))
+                    self._display.blit(text, (panel_x, y_offset))
+                    y_offset += line_height
+                else:
+                    text = self._font_small.render("  (no sequence)", True, (120, 120, 120))
+                    self._display.blit(text, (panel_x, y_offset))
+                    y_offset += line_height
+            except Exception:
+                text = self._font_small.render("  (error)", True, (120, 120, 120))
+                self._display.blit(text, (panel_x, y_offset))
+                y_offset += line_height
+
+            # Show top goal probabilities
+            try:
+                sorted_goals = sorted(
+                    maneuver_probs.goals_probabilities.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+
+                for i, ((goal, _), prob) in enumerate(sorted_goals):
+                    if prob < 0.05 or i >= 2:
+                        break
+
+                    bar_width = int(prob * 80)
+                    bar_rect = pygame.Rect(panel_x + 15, y_offset + 2, bar_width, line_height - 6)
+                    bar_color = self.COLOR_GOAL_BEST if i == 0 else self.COLOR_GOAL
+                    pygame.draw.rect(self._display, (*bar_color, 80), bar_rect)
+
+                    label = f"  {prob:.2f}"
+                    text = self._font_small.render(label, True, (160, 160, 160))
+                    self._display.blit(text, (panel_x + 15, y_offset))
+                    y_offset += line_height - 2
+            except Exception:
+                pass
+
+            y_offset += 8
+
+            if y_offset > max_height:
                 break
 
     def _draw_plan_comparison_panel(self):
@@ -635,10 +795,12 @@ class PredictionVisualizer:
 
         Shows both macro-actions (Continue, Exit, ChangeLane, StopMA) and their
         constituent maneuvers (FollowLane, Turn, GiveWay, Stop, etc.).
+
+        When prediction_level is "maneuver", shows maneuver sequences directly.
         """
         panel_width = 240
         panel_x = self.width - panel_width - 10
-        y_offset = 220
+        y_offset = 300 if self._prediction_level == "maneuver" else 220
         line_height = 14
 
         # Panel background
@@ -669,33 +831,63 @@ class PredictionVisualizer:
                 self._display.blit(risk_text, (panel_x + 80, y_offset + 2))
             y_offset += line_height + 6
 
-        # --- Predicted Plan Section (with maneuvers) ---
-        text = self._font.render("Predicted Plan:", True, self.COLOR_TRAJECTORY_OPT)
-        self._display.blit(text, (panel_x, y_offset))
-        y_offset += line_height + 2
-
-        if self._predicted_plan:
-            for i, ma in enumerate(self._predicted_plan[:4]):  # Limit to 4 macro-actions
-                ma_name = self._get_macro_action_name(ma)
-                label = f"{i+1}. {ma_name}"
-                text = self._font_small.render(label, True, self.COLOR_TRAJECTORY_OPT)
-                self._display.blit(text, (panel_x + 3, y_offset))
-                y_offset += line_height - 2
-
-                # Show maneuvers for this macro-action
-                maneuvers = self._get_maneuvers_from_ma(ma, i)
-                if maneuvers:
-                    maneuver_names = [type(m).__name__ for m in maneuvers[:3]]  # Limit to 3
-                    maneuver_str = " > ".join(maneuver_names)
-                    if len(maneuver_str) > 30:
-                        maneuver_str = maneuver_str[:27] + "..."
-                    man_text = self._font_small.render(f"   [{maneuver_str}]", True, (120, 160, 120))
-                    self._display.blit(man_text, (panel_x + 3, y_offset))
-                    y_offset += line_height - 2
-        else:
-            text = self._font_small.render("  (no prediction)", True, (120, 120, 120))
+        # --- Predicted Plan Section ---
+        if self._prediction_level == "maneuver":
+            # Show maneuver-level prediction directly
+            text = self._font.render("Predicted Maneuvers:", True, self.COLOR_TRAJECTORY_OPT)
             self._display.blit(text, (panel_x, y_offset))
-            y_offset += line_height
+            y_offset += line_height + 2
+
+            if self._predicted_maneuver_sequence:
+                # Show maneuver sequence as numbered list
+                for i, man_name in enumerate(self._predicted_maneuver_sequence[:6]):
+                    label = f"{i+1}. {man_name}"
+                    text = self._font_small.render(label, True, self.COLOR_TRAJECTORY_OPT)
+                    self._display.blit(text, (panel_x + 5, y_offset))
+                    y_offset += line_height - 2
+                if len(self._predicted_maneuver_sequence) > 6:
+                    text = self._font_small.render(f"   ... +{len(self._predicted_maneuver_sequence) - 6} more", True, (120, 160, 120))
+                    self._display.blit(text, (panel_x + 5, y_offset))
+                    y_offset += line_height - 2
+            elif self._safety_analysis and hasattr(self._safety_analysis, 'predicted_maneuvers') and self._safety_analysis.predicted_maneuvers:
+                # Fall back to safety_analysis predicted maneuvers
+                for i, man_name in enumerate(self._safety_analysis.predicted_maneuvers[:6]):
+                    label = f"{i+1}. {man_name}"
+                    text = self._font_small.render(label, True, self.COLOR_TRAJECTORY_OPT)
+                    self._display.blit(text, (panel_x + 5, y_offset))
+                    y_offset += line_height - 2
+            else:
+                text = self._font_small.render("  (no maneuver prediction)", True, (120, 120, 120))
+                self._display.blit(text, (panel_x, y_offset))
+                y_offset += line_height
+        else:
+            # Show macro-level prediction with maneuvers
+            text = self._font.render("Predicted Plan:", True, self.COLOR_TRAJECTORY_OPT)
+            self._display.blit(text, (panel_x, y_offset))
+            y_offset += line_height + 2
+
+            if self._predicted_plan:
+                for i, ma in enumerate(self._predicted_plan[:4]):  # Limit to 4 macro-actions
+                    ma_name = self._get_macro_action_name(ma)
+                    label = f"{i+1}. {ma_name}"
+                    text = self._font_small.render(label, True, self.COLOR_TRAJECTORY_OPT)
+                    self._display.blit(text, (panel_x + 3, y_offset))
+                    y_offset += line_height - 2
+
+                    # Show maneuvers for this macro-action
+                    maneuvers = self._get_maneuvers_from_ma(ma, i)
+                    if maneuvers:
+                        maneuver_names = [type(m).__name__ for m in maneuvers[:3]]  # Limit to 3
+                        maneuver_str = " > ".join(maneuver_names)
+                        if len(maneuver_str) > 30:
+                            maneuver_str = maneuver_str[:27] + "..."
+                        man_text = self._font_small.render(f"   [{maneuver_str}]", True, (120, 160, 120))
+                        self._display.blit(man_text, (panel_x + 3, y_offset))
+                        y_offset += line_height - 2
+            else:
+                text = self._font_small.render("  (no prediction)", True, (120, 120, 120))
+                self._display.blit(text, (panel_x, y_offset))
+                y_offset += line_height
 
         y_offset += 6
 

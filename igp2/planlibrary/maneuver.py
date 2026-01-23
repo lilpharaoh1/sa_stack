@@ -333,7 +333,7 @@ class FollowLane(Maneuver):
         # This can happen when the termination point is on a different lane
         # In this case, use the lane's end point as termination instead
         if current_lon >= termination_lon:
-            print("Would have been an error")
+            logger.debug(f"Agent {self.agent_id}: termination point behind current position, using lane end")
             termination_lon = lane_ls.length
             termination_point = lane_ls.coords[-1]
             # If agent is already at or past the lane end, return minimal trajectory
