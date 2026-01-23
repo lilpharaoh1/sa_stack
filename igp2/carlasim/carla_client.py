@@ -433,6 +433,10 @@ class CarlaSim:
 
     def __update_spectator(self):
         if self.__spectator_parent is not None and self.__spectator_transform is not None:
+            # Check if the spectator parent actor is still alive (e.g., ego reached goal and was deleted)
+            if not self.__spectator_parent.is_alive:
+                self.__spectator_parent = None
+                return
             actor_transform = self.__spectator_parent.get_transform()
 
             # Get the actor's forward and right vectors based on its rotation
