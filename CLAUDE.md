@@ -23,8 +23,10 @@ This repository uses three main branches for different purposes:
 
 **soa-tests** - For keyboard-controlled driving experiments
 - KeyboardAgent for manual WASD/arrow key control
+- SharedAutonomyAgent with epistemic maneuver-level prediction
 - SOA scenario configs (soa1.json, soa2.json, soa3.json)
 - StatusWindow for failure zone monitoring
+- `igp2/epistemic/` - Maneuver-level goal recognition module
 - Run with: `python scripts/debug/soa_examples.py --carla -m soa1`
 
 **pgp** - For neural network trajectory prediction work
@@ -52,6 +54,11 @@ IGP2/
 │   ├── planning/            # MCTS implementation
 │   ├── planlibrary/         # Macro actions (Continue, Exit, LaneChange, etc.)
 │   ├── recognition/         # Goal recognition and A* search
+│   ├── epistemic/           # Maneuver-level goal recognition (soa-tests only)
+│   │   ├── maneuver_astar.py       # A* search over maneuvers
+│   │   ├── maneuver_recognition.py # Maneuver-level goal recognition
+│   │   ├── maneuver_probabilities.py # Probability tracking for maneuvers
+│   │   └── maneuver_factory.py     # Maneuver instantiation
 │   ├── opendrive/           # OpenDRIVE map parsing
 │   ├── pgp/                 # Neural network prediction (pgp branch only)
 │   └── vector_map/          # Lane graphs (pgp branch only)
@@ -132,6 +139,7 @@ Scenarios are defined in JSON files under `scenarios/configs/`. Example structur
 | `MCTSAgent` | Plans using MCTS with goal recognition | Ego vehicle, complex decision making |
 | `TrafficAgent` | Follows A* computed macro actions | Background traffic, simple navigation |
 | `KeyboardAgent` | Manual WASD/arrow control | Testing, experiments (soa-tests only) |
+| `SharedAutonomyAgent` | MCTS + epistemic maneuver prediction | SOA experiments (soa-tests only) |
 
 ## Key Classes
 
@@ -140,6 +148,32 @@ Scenarios are defined in JSON files under `scenarios/configs/`. Example structur
 - `MCTS` (`igp2/planning/mcts.py`) - Monte Carlo Tree Search planner
 - `MacroAction` (`igp2/planlibrary/macro_action.py`) - High-level trajectory segments
 - `GoalRecognition` (`igp2/recognition/goalrecognition.py`) - Infer agent goals
+- `ManeuverRecognition` (`igp2/epistemic/maneuver_recognition.py`) - Maneuver-level goal recognition
+- `SharedAutonomyAgent` (`igp2/agents/shared_autonomy_agent.py`) - SOA agent with epistemic prediction
+
+## Epistemic Module (soa-tests branch)
+
+The epistemic module (`igp2/epistemic/`) provides maneuver-level goal recognition, operating at a finer granularity than the macro-action level used by standard IGP2.
+
+### Prediction Levels
+- **Macro level** (`prediction_level="macro"`): Uses `GoalRecognition` with macro-actions (Continue, Exit, ChangeLane, Stop)
+- **Maneuver level** (`prediction_level="maneuver"`): Uses `ManeuverRecognition` with maneuvers (FollowLane, Turn, GiveWay, Stop, SwitchLaneLeft/Right)
+
+### Key Components
+- `ManeuverAStar`: A* search over maneuver sequences to find paths to goals
+- `ManeuverRecognition`: Compares observed trajectory against optimal maneuver trajectories
+- `ManeuverProbabilities`: Tracks goal probabilities based on maneuver-level costs
+- `ManeuverFactory`: Creates maneuver instances and determines applicable maneuvers
+
+### SharedAutonomyAgent Configuration
+```python
+SharedAutonomyAgent(
+    prediction_level="maneuver",  # or "macro"
+    ego_goal_mode="true_goal",    # or "goal_recognition"
+    predict_ego=True,
+    # ... other params
+)
+```
 
 ## Development Notes
 

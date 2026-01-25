@@ -306,6 +306,7 @@ class FollowLane(Maneuver):
         Returns:
             Boolean indicating whether the maneuver is applicable
         """
+        # print(f"FollowLane.applicable) condition: {scenario_map.lanes_at(state.position, drivable_only=True)}")
         return len(scenario_map.lanes_at(state.position, drivable_only=True)) > 0
 
     def _get_lane_sequence(self, state: AgentState, scenario_map: Map) -> List[Lane]:
@@ -519,6 +520,8 @@ class Turn(FollowLane):
         next_lanes = current_lane.link.successor
         next_lane_is_junction = (next_lanes is not None and
                                  any([ll.parent_road.junction is not None for ll in next_lanes]))
+        
+        # print(f"Turn.applicable) currently_in_junction, next_lane_is_junction: {currently_in_junction} {next_lane_is_junction}")
         return currently_in_junction or next_lane_is_junction
 
     def get_velocity(self, path: np.ndarray, frame: Dict[int, AgentState], lane_path: List[Lane]) -> np.ndarray:

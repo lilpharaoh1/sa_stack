@@ -533,9 +533,9 @@ class SharedAutonomyAgent(Agent):
             else:
                 # Non-ego: always use macro-level recognition (MCTS needs GoalsProbabilities)
                 self._run_macro_recognition(aid, frame, visible_region)
-                # Additionally run maneuver recognition if prediction_level is maneuver
-                if self._prediction_level == "maneuver":
-                    self._run_maneuver_recognition(aid, frame, visible_region)
+                # # Additionally run maneuver recognition if prediction_level is maneuver
+                # if self._prediction_level == "maneuver":
+                #     self._run_maneuver_recognition(aid, frame, visible_region)
 
     def _run_macro_recognition(self, aid: int, frame: Dict, visible_region: Circle):
         """Run macro-action level goal recognition (IGP2).
