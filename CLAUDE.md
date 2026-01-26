@@ -55,8 +55,10 @@ IGP2/
 │   ├── planlibrary/         # Macro actions (Continue, Exit, LaneChange, etc.)
 │   ├── recognition/         # Goal recognition and A* search
 │   ├── epistemic/           # Maneuver-level goal recognition (soa-tests only)
-│   │   ├── maneuver_astar.py       # A* search over maneuvers
-│   │   ├── maneuver_recognition.py # Maneuver-level goal recognition
+│   │   ├── macro_guided_generator.py  # BFS maneuver sequence generation using macro-actions
+│   │   ├── macro_guided_recognition.py # Inverse planning recognition (recommended)
+│   │   ├── maneuver_astar.py       # A* search over maneuvers (legacy)
+│   │   ├── maneuver_recognition.py # Direct maneuver recognition (legacy)
 │   │   ├── maneuver_probabilities.py # Probability tracking for maneuvers
 │   │   └── maneuver_factory.py     # Maneuver instantiation
 │   ├── opendrive/           # OpenDRIVE map parsing
@@ -171,9 +173,104 @@ SharedAutonomyAgent(
     prediction_level="maneuver",  # or "macro"
     ego_goal_mode="true_goal",    # or "goal_recognition"
     predict_ego=True,
+    human={"type": "KeyboardAgent"},  # or "TrafficAgent"
     # ... other params
 )
 ```
+
+### SharedAutonomyAgent Human Agent Architecture
+
+The SharedAutonomyAgent uses a pluggable "human" agent architecture to separate the source of driver actions from the safety/prediction system:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  SharedAutonomyAgent                         │
+│  ┌─────────────────┐    ┌──────────────────────────────┐   │
+│  │   Human Agent   │───▶│  Intervention/Safety System  │   │
+│  │  (configurable) │    │  - Goal Recognition (ego)    │   │
+│  └─────────────────┘    │  - MCTS optimal planning     │   │
+│          │              │  - Safety analysis           │   │
+│          ▼              │  - Apply interventions       │   │
+│    Base Actions         └──────────────────────────────┘   │
+│          │                         │                        │
+│          └─────────────────────────┘                        │
+│                         │                                   │
+│                   Final Actions                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Supported Human Agent Types:**
+
+| Type | Description | Use Case |
+|------|-------------|----------|
+| `KeyboardAgent` | Manual WASD/arrow control | Real human-in-the-loop testing |
+| `TrafficAgent` | Follows A* path to goal | Simulated human (open-loop, no beliefs) |
+| `EpistemicHumanAgent` | (FUTURE) Agent with beliefs | Simulated human with epistemic state |
+
+**JSON Config Example:**
+```json
+{
+  "id": 0,
+  "type": "SharedAutonomyAgent",
+  "human": {
+    "type": "TrafficAgent",
+    "config": {
+      "open_loop": true
+    }
+  },
+  "mcts": { ... }
+}
+```
+
+The `human` key has two sub-keys:
+- `type`: The agent class name (KeyboardAgent, TrafficAgent, MCTSAgent, etc.)
+- `config`: All parameters to pass to the agent constructor (except agent_id, initial_state, goal, fps which are auto-provided)
+
+**TrafficAgent open_loop option:**
+- `open_loop: false` (default, recommended) - Closed-loop execution with feedback control. The agent uses maneuver-level control to follow lanes, reacting to deviations.
+- `open_loop: true` - Open-loop execution (NOT fully supported yet). Would follow pre-computed trajectory without feedback control, but requires MacroAction modifications.
+
+**Future: EpistemicHumanAgent**
+
+The plan is to create an `EpistemicHumanAgent` that:
+- Acts like a TrafficAgent (follows A* to goal) but with beliefs
+- Has beliefs about other agents (e.g., assumed velocities, goals)
+- Makes decisions based on those beliefs (which may be incorrect)
+- Can be used to simulate human drivers with imperfect perception
+
+Example future config:
+```json
+{
+  "type": "SharedAutonomyAgent",
+  "human": {
+    "type": "EpistemicHumanAgent",
+    "config": {
+      "open_loop": true,
+      "beliefs": {
+        "agent_velocities": { "1": 5.0 },
+        "agent_goals": { "1": "straight" }
+      }
+    }
+  }
+}
+```
+
+This architecture allows:
+1. Testing with real human keyboard input
+2. Running automated experiments with simulated humans
+3. Studying how belief mismatches affect safety interventions
+
+### Macro-Guided Recognition (Inverse Planning)
+
+The `MacroGuidedRecognition` class uses inverse planning to determine which maneuver sequence the driver is following:
+
+1. **Generate OPTIMAL trajectory** from initial position (benchmark)
+2. **Generate CANDIDATE trajectories** from current position (possible futures)
+3. **Prepend observed trajectory** to candidates (what driver DID + future)
+4. **Compare using cost functions** - the candidate closest to optimal is selected
+5. **Select best match** based on reward difference (not raw reward)
+
+Key insight: Selection uses `reward_difference` (closeness to optimal) not raw `reward`, because we want to find which plan best explains the observed behavior.
 
 ## Development Notes
 
