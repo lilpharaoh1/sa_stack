@@ -331,7 +331,7 @@ class TurnCL(Turn, WaypointManeuver):
     in a junction, the vehicle should continue through rather than stopping.
     Yielding should happen in the GiveWay maneuver BEFORE entering the junction.
     """
-    # COLLISION_CHECK_ENABLED = False
+    COLLISION_CHECK_ENABLED = False # EMRAN TODO: Problem really lies with _check_trajectory_collision predicting imminent collisions when they aren't so imminent (e.x. the ego vehicle can or has pass the oncoming traffic in time). Maybe predictions are made with the assumption that the other agents are closed loop?
 
 
 class SwitchLaneLeftCL(SwitchLaneLeft, WaypointManeuver):
