@@ -325,8 +325,13 @@ class FollowLaneCL(FollowLane, WaypointManeuver):
 
 
 class TurnCL(Turn, WaypointManeuver):
-    """ Closed loop turn maneuver """
-    pass
+    """ Closed loop turn maneuver.
+
+    Collision avoidance is disabled for turns because once committed to a turn
+    in a junction, the vehicle should continue through rather than stopping.
+    Yielding should happen in the GiveWay maneuver BEFORE entering the junction.
+    """
+    # COLLISION_CHECK_ENABLED = False
 
 
 class SwitchLaneLeftCL(SwitchLaneLeft, WaypointManeuver):
