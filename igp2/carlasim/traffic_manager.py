@@ -222,7 +222,7 @@ class TrafficManager:
         agent = agent_wrapper.agent
         agent_position = state.position
         
-        use_expanded_goals = False
+        use_expanded_goals = True
         if use_expanded_goals:
             # Use reachable goals from road network (these are lane endpoints with predecessors)
             valid_goals = []
@@ -236,8 +236,13 @@ class TrafficManager:
                                 f"all {len(self.reachable_goals)} reachable goals too close")
         else:
             valid_goals = self.spawns
-
-        for goal_position in random.sample(valid_goals, len(valid_goals)):  # random order
+        for goal_item in random.sample(valid_goals, len(valid_goals)):  # random order
+            # Handle both carla.Transform (from spawns) and np.ndarray (from reachable_goals)
+            if hasattr(goal_item, 'location'):
+                # It's a carla.Transform - extract coordinates (convert y for IGP2 coordinate system)
+                goal_position = np.array([goal_item.location.x, -goal_item.location.y])
+            else:
+                goal_position = goal_item
             goal = PointGoal(goal_position, 1.0)
 
             try:

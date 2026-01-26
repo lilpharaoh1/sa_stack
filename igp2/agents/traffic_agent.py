@@ -13,17 +13,31 @@ logger = logging.getLogger(__name__)
 
 
 class TrafficAgent(MacroAgent):
-    """ Agent that follows a list of MAs, optionally calculated using A*. """
+    """ Agent that follows a list of MAs, optionally calculated using A*.
+
+    Args:
+        agent_id: ID of the agent
+        initial_state: Starting state of the agent
+        goal: Optional final goal of the agent
+        fps: Execution rate of the environment simulation
+        macro_actions: Optional pre-specified macro actions to follow
+        open_loop: If True, follow pre-computed trajectory without feedback control.
+                   If False, use closed-loop maneuver control. Default: False.
+                   NOTE: open_loop=True requires MacroAction to support trajectory-based
+                   execution, which is not fully implemented. Use closed-loop for now.
+    """
 
     def __init__(self,
                  agent_id: int,
                  initial_state: AgentState,
                  goal: "Goal" = None,
                  fps: int = 20,
-                 macro_actions: List[MacroAction] = None):
+                 macro_actions: List[MacroAction] = None,
+                 open_loop: bool = False):
         super(TrafficAgent, self).__init__(agent_id, initial_state, goal, fps)
         self._astar = AStar(max_iter=1000)
         self._macro_actions = []
+        self._open_loop = open_loop
         if macro_actions is not None and macro_actions:
             self.set_macro_actions(macro_actions)
         self._current_macro_id = 0
@@ -57,8 +71,9 @@ class TrafficAgent(MacroAgent):
     def set_macro_actions(self, new_macros: List[MacroAction]):
         """ Specify a new set of macro actions to follow. """
         assert len(new_macros) > 0, "Empty macro list given!"
-        for macro in new_macros:
-            macro.to_closed_loop()
+        if not self._open_loop:
+            for macro in new_macros:
+                macro.to_closed_loop()
         self._macro_actions = new_macros
         self._current_macro = new_macros[0]
 
@@ -72,7 +87,7 @@ class TrafficAgent(MacroAgent):
         if goal is not None:
             self._goal = goal
 
-        logger.info(f"Finding path for TrafficAgent ID {self.agent_id}")
+        logger.info(f"Finding path for TrafficAgent ID {self.agent_id} (open_loop={self._open_loop})")
         _, actions = self._astar.search(self.agent_id,
                                         observation.frame,
                                         self._goal,
@@ -83,9 +98,10 @@ class TrafficAgent(MacroAgent):
             print("len actions == 0 so failing due to astar")
             raise RuntimeError(f"Couldn't find path to goal {self.goal} for TrafficAgent {self.agent_id}.")
         self._macro_actions = actions[0]
-        # Convert open-loop macro actions to closed-loop for execution
-        for macro in self._macro_actions:
-            macro.to_closed_loop()
+        # Convert to closed-loop if configured
+        if not self._open_loop:
+            for macro in self._macro_actions:
+                macro.to_closed_loop()
         self._current_macro = self._macro_actions[0]
 
     def done(self, observation: Observation) -> bool:
@@ -169,3 +185,8 @@ class TrafficAgent(MacroAgent):
     def macro_actions(self) -> List[MacroAction]:
         """ The current macro actions to be executed by the agent. """
         return self._macro_actions
+
+    @property
+    def open_loop(self) -> bool:
+        """ Whether the agent executes in open-loop (trajectory following) or closed-loop (feedback control). """
+        return self._open_loop

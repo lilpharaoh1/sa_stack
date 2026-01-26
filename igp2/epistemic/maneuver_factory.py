@@ -4,6 +4,11 @@ Factory for creating and configuring maneuvers for A* search.
 This provides similar functionality to MacroActionFactory but operates
 at the maneuver level, returning applicable maneuver types and their
 possible argument variations.
+
+Detection Flexibility:
+- Turn: Detectable when approaching OR inside a junction
+- GiveWay: Detectable when slowing down near a junction (velocity < threshold)
+- Stop: Detectable when at low velocity (approaching stop or stopped)
 """
 
 import logging
@@ -22,6 +27,12 @@ from igp2.planlibrary.maneuver import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Thresholds for flexible maneuver detection
+GIVE_WAY_APPROACH_DISTANCE = 30.0  # meters - distance to junction for GiveWay detection
+GIVE_WAY_VELOCITY_THRESHOLD = 8.0  # m/s - if slower than this near junction, might be giving way
+STOP_VELOCITY_THRESHOLD = 2.0  # m/s - if slower than this, might be stopping
+JUNCTION_APPROACH_DISTANCE = 5.0  # meters - distance to junction for Turn detection
 
 
 class ManeuverFactory:
@@ -75,6 +86,9 @@ class ManeuverFactory:
                                   goal: Goal = None) -> List[Type[Maneuver]]:
         """Return all applicable maneuver types for the given state.
 
+        This method uses flexible detection thresholds to better capture
+        maneuvers like GiveWay and Stop based on observed behavior.
+
         Args:
             agent_state: Current state of the agent
             scenario_map: The road layout
@@ -96,21 +110,74 @@ class ManeuverFactory:
         if SwitchLaneRight.applicable(agent_state, scenario_map):
             maneuvers.append(SwitchLaneRight)
 
-        # Turn is applicable when approaching/in a junction
+        # Turn is only applicable when inside a junction
         if Turn.applicable(agent_state, scenario_map):
             maneuvers.append(Turn)
 
         # GiveWay is applicable when approaching a junction
+        # Use flexible detection: also consider velocity-based detection
+        # print(f"\nGiveWay Applicability: {GiveWay.applicable(agent_state, scenario_map)} {cls._is_giving_way(agent_state, scenario_map)}")
         if GiveWay.applicable(agent_state, scenario_map):
+            maneuvers.append(GiveWay)
+        elif cls._is_giving_way(agent_state, scenario_map):
+            # Flexible detection: slowing down near a junction
             maneuvers.append(GiveWay)
 
         # Stop is applicable when not in a junction
+        # Use flexible detection: also consider low velocity states
         if Stop.applicable(agent_state, scenario_map):
-            # Only include Stop if we have a StoppingGoal or if explicitly needed
-            if isinstance(goal, StoppingGoal):
+            # Include Stop if we have a StoppingGoal or if agent is nearly stopped
+            if isinstance(goal, StoppingGoal) or agent_state.speed < STOP_VELOCITY_THRESHOLD:
                 maneuvers.append(Stop)
 
         return maneuvers
+
+    @classmethod
+    def _approaching_junction(cls, agent_state: AgentState, scenario_map: Map,
+                               max_distance: float) -> bool:
+        """Check if agent is approaching a junction within max_distance.
+
+        This is more lenient than Turn.applicable() which requires being
+        right at the junction entrance.
+        """
+        current_lane = scenario_map.best_lane_at(agent_state.position, agent_state.heading)
+        if current_lane is None:
+            return False
+
+        # Check if currently in junction
+        if current_lane.parent_road.junction is not None:
+            return True
+
+        # Check distance to lane end (junction entrance)
+        lane_midline = current_lane.midline
+        current_point = Point(agent_state.position)
+        current_lon = lane_midline.project(current_point)
+        distance_to_end = lane_midline.length - current_lon
+
+        if distance_to_end > max_distance:
+            return False
+
+        # Check if successor lanes are in a junction
+        next_lanes = current_lane.link.successor
+        if next_lanes is not None:
+            return any(ll.parent_road.junction is not None for ll in next_lanes)
+
+        return False
+
+    @classmethod
+    def _is_giving_way(cls, agent_state: AgentState, scenario_map: Map) -> bool:
+        """Check if agent appears to be giving way (slowing near junction).
+
+        Flexible detection based on:
+        - Approaching a junction within GIVE_WAY_APPROACH_DISTANCE
+        - Moving slower than GIVE_WAY_VELOCITY_THRESHOLD
+        """
+        # Must be moving slowly
+        if agent_state.speed > GIVE_WAY_VELOCITY_THRESHOLD:
+            return False
+
+        # Must be approaching a junction
+        return cls._approaching_junction(agent_state, scenario_map, GIVE_WAY_APPROACH_DISTANCE)
 
     @classmethod
     def get_possible_args(cls, maneuver_class: Type[Maneuver],
@@ -217,33 +284,40 @@ class ManeuverFactory:
         """Get Turn parameter variations.
 
         Returns one argument dict for each possible turn direction at the junction.
+        Turn is only applicable when the agent is inside a junction.
         """
         current_lane = scenario_map.best_lane_at(agent_state.position, agent_state.heading)
         if current_lane is None:
             return []
 
-        # Check if approaching junction
-        successor_lanes = current_lane.link.successor if current_lane.link.successor else []
-        junction_lanes = [l for l in successor_lanes if l.parent_road.junction is not None]
-
-        if not junction_lanes:
+        # Turn is only applicable when inside a junction
+        if current_lane.parent_road.junction is None:
             return []
 
         args_list = []
-        for junction_lane in junction_lanes:
-            # Find where this junction lane leads
-            junction_successor = junction_lane.link.successor
-            if junction_successor:
-                endpoint = np.array(junction_successor[0].midline.coords[-1])
-            else:
-                endpoint = np.array(junction_lane.midline.coords[-1])
 
-            args_list.append({
-                "type": "turn",
-                "junction_road_id": junction_lane.parent_road.id,
-                "junction_lane_id": junction_lane.id,
-                "termination_point": endpoint
-            })
+
+        # Current lane is a junction lane - find where it leads
+        if not current_lane.link.predecessor is None and len(current_lane.link.predecessor) == 1:
+            for succ_lane in current_lane.link.predecessor[0].link.successor:
+                endpoint = np.array(succ_lane.midline.coords[-1])
+                args_list.append({
+                    "type": "turn",
+                    "junction_road_id": current_lane.parent_road.id,
+                    "junction_lane_id": current_lane.id,
+                    "termination_point": endpoint
+                })
+        else:
+            raise RuntimeError(f"Junction road {current_lane.parent_road.id} had "
+            f"zero or more than one predecessor road.")
+            # # No successor - terminate at end of junction lane
+            # endpoint = np.array(current_lane.midline.coords[-1])
+            # args_list.append({
+            #     "type": "turn",
+            #     "junction_road_id": current_lane.parent_road.id,
+            #     "junction_lane_id": current_lane.id,
+            #     "termination_point": endpoint
+            # })
 
         return args_list
 
@@ -254,13 +328,16 @@ class ManeuverFactory:
 
         GiveWay is typically followed by Turn, so we return args for each
         possible turn direction at the junction.
+
+        Uses flexible detection to find junction lanes even when not
+        immediately at the junction entrance.
         """
         current_lane = scenario_map.best_lane_at(agent_state.position, agent_state.heading)
         if current_lane is None:
             return []
 
-        successor_lanes = current_lane.link.successor if current_lane.link.successor else []
-        junction_lanes = [l for l in successor_lanes if l.parent_road.junction is not None]
+        # Find junction lanes - either direct successors or through lane following
+        junction_lanes = cls._find_upcoming_junction_lanes(current_lane, scenario_map)
 
         if not junction_lanes:
             return []
@@ -269,6 +346,7 @@ class ManeuverFactory:
         for junction_lane in junction_lanes:
             junction_successor = junction_lane.link.successor
             if junction_successor:
+                # Termination point is start of post-junction lane
                 endpoint = np.array(junction_successor[0].midline.coords[0])
             else:
                 endpoint = np.array(junction_lane.midline.coords[-1])
@@ -284,21 +362,71 @@ class ManeuverFactory:
         return args_list
 
     @classmethod
+    def _find_upcoming_junction_lanes(cls, current_lane: Lane, scenario_map: Map,
+                                       max_depth: int = 3) -> List[Lane]:
+        """Find junction lanes reachable from current lane.
+
+        Searches through lane successors up to max_depth to find junction lanes.
+        This allows detection of GiveWay even when not immediately at junction.
+        """
+        junction_lanes = []
+
+        # Check direct successors first
+        successor_lanes = current_lane.link.successor if current_lane.link.successor else []
+        for succ in successor_lanes:
+            if succ.parent_road.junction is not None:
+                junction_lanes.append(succ)
+
+        if junction_lanes:
+            return junction_lanes
+
+        # If no direct junction successors, search deeper (but limit depth)
+        if max_depth > 1:
+            for succ in successor_lanes:
+                # Don't search through junctions
+                if succ.parent_road.junction is None:
+                    deeper_junctions = cls._find_upcoming_junction_lanes(
+                        succ, scenario_map, max_depth - 1
+                    )
+                    junction_lanes.extend(deeper_junctions)
+
+        return junction_lanes
+
+    @classmethod
     def _get_stop_args(cls, agent_state: AgentState, scenario_map: Map,
                         goal: Goal = None) -> List[Dict]:
-        """Get Stop parameter variations."""
+        """Get Stop parameter variations.
+
+        Handles:
+        - Explicit StoppingGoal
+        - Low velocity states (agent appears to be stopping)
+        """
+        args_list = []
+
         if isinstance(goal, StoppingGoal):
-            return [{
+            args_list.append({
                 "type": "stop",
                 "termination_point": goal.center,
                 "stop_duration": Stop.DEFAULT_STOP_DURATION
-            }]
+            })
+            return args_list
 
-        # Otherwise, stop at current position
+        # For low velocity states, generate stop at current/nearby position
         direction = np.array([np.cos(agent_state.heading), np.sin(agent_state.heading)])
-        stop_point = agent_state.position + direction * 2.0  # 2m ahead
-        return [{
+
+        # Stop point depends on current velocity
+        if agent_state.speed < 1.0:
+            # Nearly stopped - stop at current position
+            stop_point = agent_state.position + direction * 0.5
+        else:
+            # Slowing down - stop a bit ahead (approximate stopping distance)
+            stopping_distance = min(agent_state.speed * 1.0, 5.0)  # 1s of travel or 5m max
+            stop_point = agent_state.position + direction * stopping_distance
+
+        args_list.append({
             "type": "stop",
             "termination_point": stop_point,
             "stop_duration": Stop.DEFAULT_STOP_DURATION
-        }]
+        })
+
+        return args_list

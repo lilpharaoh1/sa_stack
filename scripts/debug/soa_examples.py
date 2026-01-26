@@ -237,11 +237,30 @@ def create_agent(agent_config, scenario_map, frame, fps, args):
             **agent_config["mcts"],
         )
     elif agent_type == "SharedAutonomyAgent":
+        # Handle human agent config for SharedAutonomyAgent
+        # New format: {"type": "AgentType", "config": {...agent params...}}
+        human_config = agent_config.get("human", {"type": "KeyboardAgent", "config": {}})
+
+        # Ensure config key exists
+        if "config" not in human_config:
+            human_config["config"] = {}
+
+        # If human is TrafficAgent with macro_actions in config, convert them
+        human_agent_config = human_config.get("config", {})
+        if human_config.get("type") == "TrafficAgent" and human_agent_config.get("macro_actions"):
+            human_agent_config["macro_actions"] = to_ma_list(
+                human_agent_config["macro_actions"],
+                agent_config["id"],
+                frame,
+                scenario_map,
+            )
+
         agent = ip.SharedAutonomyAgent(
             **base_agent,
             **planning_common,
             # t_update=agent_config.get("t_update", 1.0),
             predict_ego=agent_config.get("predict_ego", True),
+            human=human_config,
             **agent_config["mcts"],
         )
     elif agent_type == "TrafficAgent":
@@ -320,24 +339,24 @@ if __name__ == '__main__':
         for static_obj in scenario_config["static_objects"]:
             static_objs.append(static_obj)
 
-    ip.plot_map(scenario_map, markings=True, midline=True)
-    for spawn in agent_spawns:
-        plt.plot(*list(zip(*spawn[0].boundary)))
-    for aid, state in frame.items():
-        plt.plot(*state.position, marker="x", color='k')
-        plt.text(*state.position, aid)
-    for aid, goal in goals.items():
-        plt.plot(*goal.box.center, marker="x", color='k')
-        plt.text(*goal.box.center, aid)
-        plt.plot(*list(zip(*goal.box.boundary)), c="g")
-    for failure_zone in failure_zones:
-        print(failure_zone)
-        plt.plot(*failure_zone["box"].center, marker="x", color='k')
-        plt.text(*failure_zone["box"].center, \
-                 f"{failure_zone['frames']['start']}-{failure_zone['frames']['end']}")
-        plt.plot(*list(zip(*failure_zone["box"].boundary)), c="r")
-    plt.gca().add_patch(plt.Circle(frame[0].position, 100, color='b', fill=False))
-    plt.show()
+    # ip.plot_map(scenario_map, markings=True, midline=True)
+    # for spawn in agent_spawns:
+    #     plt.plot(*list(zip(*spawn[0].boundary)))
+    # for aid, state in frame.items():
+    #     plt.plot(*state.position, marker="x", color='k')
+    #     plt.text(*state.position, aid)
+    # for aid, goal in goals.items():
+    #     plt.plot(*goal.box.center, marker="x", color='k')
+    #     plt.text(*goal.box.center, aid)
+    #     plt.plot(*list(zip(*goal.box.boundary)), c="g")
+    # for failure_zone in failure_zones:
+    #     print(failure_zone)
+    #     plt.plot(*failure_zone["box"].center, marker="x", color='k')
+    #     plt.text(*failure_zone["box"].center, \
+    #              f"{failure_zone['frames']['start']}-{failure_zone['frames']['end']}")
+    #     plt.plot(*list(zip(*failure_zone["box"].boundary)), c="r")
+    # plt.gca().add_patch(plt.Circle(frame[0].position, 100, color='b', fill=False))
+    # plt.show()
 
     cost_factors = {"time": 0.1, "velocity": 0.0, "acceleration": 0.1, "jerk": 0., "heading": 0.0,
                     "angular_velocity": 0.1, "angular_acceleration": 0.1, "curvature": 0.0, "safety": 0.}
@@ -387,6 +406,7 @@ if __name__ == '__main__':
         # Update prediction visualizer with MCTS plan and safety analysis
         ego_agent_obj = agents[ego_id]
         goal_probs = getattr(ego_agent_obj, 'goal_probabilities', {})
+        maneuver_probs = getattr(ego_agent_obj, 'maneuver_probabilities', {})
         possible_goals = getattr(ego_agent_obj, 'possible_goals', [])
         view_radius = getattr(ego_agent_obj, 'view_radius', 50.0)
         mcts_trajectory = getattr(ego_agent_obj, 'mcts_trajectory', None)
@@ -395,14 +415,17 @@ if __name__ == '__main__':
         predicted_plan = getattr(ego_agent_obj, 'predicted_plan', [])
         predicted_maneuvers = getattr(ego_agent_obj, 'predicted_maneuvers', [])
         predicted_trajectory = getattr(ego_agent_obj, 'predicted_trajectory', None)
+        predicted_maneuver_sequence = getattr(ego_agent_obj, 'predicted_maneuver_sequence', [])
         safety_analysis = getattr(ego_agent_obj, 'safety_analysis', None)
         driver_message = getattr(ego_agent_obj, 'current_message', None)
         intervention_active = getattr(ego_agent_obj, 'intervention_active', False)
+        prediction_level = getattr(ego_agent_obj, 'prediction_level', 'macro')
 
         if not pred_viz.update(
             frame=obs.frame,
             ego_id=ego_id,
             goal_probabilities=goal_probs,
+            maneuver_probabilities=maneuver_probs,
             possible_goals=possible_goals,
             view_radius=view_radius,
             failure_zones=failure_zones,
@@ -413,9 +436,11 @@ if __name__ == '__main__':
             predicted_plan=predicted_plan,
             predicted_maneuvers=predicted_maneuvers,
             predicted_trajectory=predicted_trajectory,
+            predicted_maneuver_sequence=predicted_maneuver_sequence,
             safety_analysis=safety_analysis,
             driver_message=driver_message,
-            intervention_active=intervention_active
+            intervention_active=intervention_active,
+            prediction_level=prediction_level
         ):
             break  # Visualizer window was closed
 

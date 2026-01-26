@@ -727,9 +727,6 @@ class Exit(MacroAction):
             if distance < self.TURN_TARGET_THRESHOLD and distance < best_distance:
                 best_lane = connecting_lane
                 best_distance = distance
-        if best_lane is None:
-            logger.debug(f"best_lane is None -> distance, self.turn_target, end_midline_coords:, {distance, self.turn_target, np.array(connecting_lane.midline.coords[-1])}")    
-            logger.debug(f"best_lane is None -> distance, self.turn_target, start_midline_coords:, {distance, self.turn_target, np.array(connecting_lane.midline.coords[0])}")
         return best_lane
 
     def _find_current_lane(self, state: AgentState, in_junction: bool) -> Lane:
