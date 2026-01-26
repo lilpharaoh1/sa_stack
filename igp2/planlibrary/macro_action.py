@@ -613,6 +613,8 @@ class Exit(MacroAction):
 
         in_junction = self.scenario_map.junction_at(state.position, max_distance=0.1) is not None
         current_lane = self._find_current_lane(state, in_junction)
+        if current_lane is None:
+            raise RuntimeError(f"Exit.get_maneuvers: Could not find current lane at {state.position}")
         current_distance = current_lane.distance_at(state.position)
 
         frame = self.start_frame
