@@ -732,11 +732,21 @@ class Exit(MacroAction):
         return best_lane
 
     def _find_current_lane(self, state: AgentState, in_junction: bool) -> Lane:
-        if not in_junction:
-            return self.scenario_map.best_lane_at(state.position, state.heading) # 0.15, md_max=1.5)
-        all_lanes = self.scenario_map.lanes_at(state.position) # 0.15, md_max=1.5)
-        out = self._nearest_lane_to_goal(all_lanes)
-        return out
+        # First try best_lane_at which works well for most cases
+        lane = self.scenario_map.best_lane_at(state.position, state.heading)
+        if lane is not None:
+            return lane
+
+        # Fallback: find closest lane by position with larger search radius
+        # This handles edge cases where best_lane_at fails (e.g., at junction boundaries)
+        from shapely.geometry import Point
+        all_lanes = self.scenario_map.lanes_at(state.position, max_distance=3.0)
+        if all_lanes:
+            # Find lane whose boundary is closest to current position
+            best_lane = min(all_lanes, key=lambda l: l.boundary.distance(Point(state.position)) if l.boundary is not None else float('inf'))
+            return best_lane
+
+        return None
 
     def _find_connecting_lane(self, current_lane: Lane) -> Optional[Lane]:
         if current_lane.link.successor is None:
