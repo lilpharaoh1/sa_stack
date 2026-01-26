@@ -2,20 +2,33 @@
 Shared Autonomy Agent for human-in-the-loop driving with MCTS predictions and safety interventions.
 
 This agent combines:
-- Keyboard control for manual driving (like KeyboardAgent)
+- A configurable "human" agent (KeyboardAgent, TrafficAgent, or future EpistemicHumanAgent)
 - Goal recognition and predictions for ALL agents including ego
 - MCTS planning to generate an "optimal" safe plan
 - Safety analysis comparing predicted driver intent vs optimal plan
 - Interventions when the predicted plan is unsafe
 
 The system:
-1. Predicts what the driver intends to do (goal recognition on ego)
-2. Generates what the driver SHOULD do (MCTS optimal plan)
-3. Compares the two to identify safety issues
-4. Applies interventions (slow down, stop) when needed
-5. Communicates changes to the driver
+1. Gets actions from the human agent (keyboard, simulated traffic, or epistemic)
+2. Predicts what the driver intends to do (goal recognition on ego)
+3. Generates what the driver SHOULD do (MCTS optimal plan)
+4. Compares the two to identify safety issues
+5. Applies interventions (slow down, stop) when needed
+6. Communicates changes to the driver
 
-Controls:
+Human Agent Configuration:
+    The 'human' parameter accepts a dict with:
+    - "type": "KeyboardAgent" | "TrafficAgent" (default: "KeyboardAgent")
+    - Additional parameters specific to the agent type
+
+    Examples:
+        human={"type": "KeyboardAgent"}  # Manual keyboard control
+        human={"type": "TrafficAgent"}   # Simulated traffic agent (uses A* to goal)
+        human={"type": "TrafficAgent", "macro_actions": [...]}  # Pre-specified path
+
+    Future: "EpistemicHumanAgent" - simulated human with beliefs about other agents
+
+Controls (when using KeyboardAgent):
     W / UP      : Accelerate
     S / DOWN    : Brake / Reverse
     A / LEFT    : Steer left
@@ -23,21 +36,16 @@ Controls:
 """
 
 import logging
-import os
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from enum import Enum
 
-# Set SDL to use dummy video driver if no display is available
-if os.environ.get('DISPLAY') is None and os.environ.get('SDL_VIDEODRIVER') is None:
-    os.environ['SDL_VIDEODRIVER'] = 'dummy'
-
-import pygame
-from pygame.locals import K_w, K_s, K_a, K_d, K_UP, K_DOWN, K_LEFT, K_RIGHT
 from shapely.geometry import Point
 
 from igp2.agents.agent import Agent
+from igp2.agents.keyboard_agent import KeyboardAgent
+from igp2.agents.traffic_agent import TrafficAgent
 from igp2.core.agentstate import AgentState
 from igp2.core.goal import Goal, PointGoal, StoppingGoal, PointCollectionGoal
 from igp2.core.vehicle import Action, Observation, TrajectoryPrediction, KinematicVehicle
@@ -136,18 +144,9 @@ class SharedAutonomyAgent(Agent):
         current_message: Current message to display to driver
     """
 
-    # Control parameters
-    MAX_ACCELERATION = 5.0  # m/s^2
-    MAX_BRAKE = 8.0  # m/s^2
-    MAX_STEER = 0.7  # radians
-    STEER_SPEED = 0.05
-
     # Intervention parameters
     INTERVENTION_DECEL = 3.0  # m/s^2 deceleration when slowing down
     STOP_DECEL = 6.0  # m/s^2 deceleration when stopping
-
-    # Class-level pygame tracking
-    _pygame_initialized = False
 
     def __init__(self,
                  agent_id: int,
@@ -169,8 +168,9 @@ class SharedAutonomyAgent(Agent):
                  stop_goals: bool = False,
                  predict_ego: bool = True,
                  ego_goal_mode: str = "true_goal",
-                 enable_interventions: bool = False, # True, 
-                 prediction_level: str = "maneuver"):
+                 enable_interventions: bool = False,
+                 prediction_level: str = "maneuver",
+                 human: dict = None):
         """Initialize a shared autonomy agent.
 
         Args:
@@ -199,16 +199,26 @@ class SharedAutonomyAgent(Agent):
             prediction_level: Level of prediction granularity:
                 - "macro": Use macro-action level (Continue, Exit, etc.) via IGP2 GoalRecognition
                 - "maneuver": Use maneuver level (FollowLane, GiveWay, Turn, etc.) via epistemic module
+            human: Configuration for the human agent that provides base actions.
+                Dict with "type" key specifying agent class:
+                - {"type": "KeyboardAgent"} - Manual keyboard control (default)
+                - {"type": "TrafficAgent"} - Simulated agent following A* path
+                - {"type": "TrafficAgent", "macro_actions": [...]} - Pre-specified path
+                Future: {"type": "EpistemicHumanAgent", "beliefs": {...}}
         """
         super().__init__(agent_id, initial_state, goal, fps)
 
         # Vehicle for state tracking
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
 
-        # Keyboard control state
-        self._reverse = False
-        self._current_steer = 0.0
-        self._pygame_available = self._ensure_pygame_initialized()
+        # Store config for human agent creation
+        self._human_config = human or {"type": "KeyboardAgent"}
+        self._scenario_map = scenario_map  # Needed for TrafficAgent
+
+        # Create the human agent that provides base actions
+        self._human_agent = self._create_human_agent(
+            agent_id, initial_state, goal, fps, scenario_map
+        )
 
         # Prediction system
         self._view_radius = view_radius
@@ -311,34 +321,71 @@ class SharedAutonomyAgent(Agent):
         self._pgp_control = False
         self._pgp_drive = False
 
-        if self._pygame_available:
-            logger.info(f"SharedAutonomyAgent {agent_id} initialized. "
-                       f"predict_ego={predict_ego}, ego_goal_mode={ego_goal_mode}, "
-                       f"prediction_level={prediction_level}, "
-                       f"interventions={enable_interventions}")
+        human_type = self._human_config.get("type", "KeyboardAgent")
+        logger.info(f"SharedAutonomyAgent {agent_id} initialized. "
+                   f"human={human_type}, predict_ego={predict_ego}, "
+                   f"ego_goal_mode={ego_goal_mode}, prediction_level={prediction_level}, "
+                   f"interventions={enable_interventions}")
+
+    def _create_human_agent(self, agent_id: int, initial_state: AgentState,
+                            goal: Goal, fps: int, scenario_map: Map) -> Agent:
+        """Create the human agent based on configuration.
+
+        The human agent provides the base actions that may be modified by
+        safety interventions.
+
+        Config format:
+            {
+                "type": "KeyboardAgent" | "TrafficAgent" | "MCTSAgent" | ...,
+                "config": {
+                    // All parameters to pass to the agent constructor
+                    // (except agent_id, initial_state, goal, fps which are auto-provided)
+                }
+            }
+
+        Args:
+            agent_id: ID of the agent
+            initial_state: Starting state
+            goal: Goal of the agent
+            fps: Frames per second
+            scenario_map: The road network map
+
+        Returns:
+            An agent instance (KeyboardAgent, TrafficAgent, MCTSAgent, etc.)
+        """
+        human_type = self._human_config.get("type", "KeyboardAgent")
+        human_agent_config = self._human_config.get("config", {})
+
+        # Base arguments provided to all agent types
+        base_args = {
+            "agent_id": agent_id,
+            "initial_state": initial_state,
+            "goal": goal,
+            "fps": fps,
+        }
+
+        logger.debug(f"Creating {human_type} for human control with config: {human_agent_config}")
+
+        if human_type == "KeyboardAgent":
+            return KeyboardAgent(**base_args, **human_agent_config)
+
+        elif human_type == "TrafficAgent":
+            # TrafficAgent accepts: macro_actions, open_loop
+            agent = TrafficAgent(**base_args, **human_agent_config)
+            # Store reference to set destination later if no macro_actions provided
+            self._human_needs_destination = (
+                human_agent_config.get("macro_actions") is None
+            )
+            return agent
+
+        elif human_type == "MCTSAgent":
+            # MCTSAgent needs scenario_map and many other params
+            from igp2.agents.mcts_agent import MCTSAgent
+            return MCTSAgent(**base_args, scenario_map=scenario_map, **human_agent_config)
+
         else:
-            logger.warning(f"SharedAutonomyAgent {agent_id}: pygame unavailable, zero controls.")
-
-    @classmethod
-    def _ensure_pygame_initialized(cls) -> bool:
-        """Ensure pygame is initialized for keyboard input."""
-        if cls._pygame_initialized:
-            return True
-
-        try:
-            pygame.init()
-            if not pygame.display.get_init():
-                pygame.display.init()
-            if pygame.display.get_surface() is None:
-                pygame.display.set_mode((100, 100), pygame.NOFRAME)
-            pygame.event.pump()
-            pygame.key.get_pressed()
-            cls._pygame_initialized = True
-            return True
-        except Exception as e:
-            logger.warning(f"Could not initialize pygame: {e}")
-            cls._pygame_initialized = True
-            return False
+            raise ValueError(f"Unknown human agent type: {human_type}. "
+                           f"Supported: KeyboardAgent, TrafficAgent, MCTSAgent")
 
     def done(self, observation: Observation) -> bool:
         """Keyboard-controlled agent is never 'done' automatically."""
@@ -347,7 +394,7 @@ class SharedAutonomyAgent(Agent):
         return False
 
     def next_action(self, observation: Observation, prediction: TrajectoryPrediction = None) -> Action:
-        """Get next action from keyboard with safety interventions.
+        """Get next action from human agent with safety interventions.
 
         This method:
         1. Updates observations for all agents
@@ -355,15 +402,25 @@ class SharedAutonomyAgent(Agent):
         3. Runs MCTS to generate optimal plan
         4. Analyzes safety by comparing predicted vs optimal
         5. Applies interventions if needed
-        6. Returns (possibly modified) keyboard action
+        6. Returns (possibly modified) human action
 
         Args:
             observation: Current observation of the environment
             prediction: Optional external prediction (unused)
 
         Returns:
-            Action from keyboard input, possibly modified by interventions
+            Action from human agent, possibly modified by interventions
         """
+        # Initialize TrafficAgent destination on first call if needed
+        if hasattr(self, '_human_needs_destination') and self._human_needs_destination:
+            if isinstance(self._human_agent, TrafficAgent) and self.goal is not None:
+                try:
+                    self._human_agent.set_destination(observation, self.goal)
+                    self._human_needs_destination = False
+                    logger.debug(f"Set destination for TrafficAgent human (open_loop={self._human_agent.open_loop})")
+                except Exception as e:
+                    logger.warning(f"Failed to set TrafficAgent destination: {e}")
+
         # Update observations for all agents
         self._update_observations(observation)
 
@@ -377,8 +434,8 @@ class SharedAutonomyAgent(Agent):
                 self._analyze_safety()
             self._k = 0
 
-        # Get keyboard action
-        action = self._get_keyboard_action(observation)
+        # Get action from human agent
+        action = self._get_human_action(observation)
 
         # Apply interventions if enabled and needed
         if self._enable_interventions and self._safety_analysis is not None:
@@ -386,47 +443,42 @@ class SharedAutonomyAgent(Agent):
 
         return action
 
-    def _get_keyboard_action(self, observation: Observation) -> Action:
-        """Read keyboard input and return corresponding action."""
-        current_state = observation.frame.get(self.agent_id)
-        current_speed = current_state.speed if current_state else 0.0
+    def _get_human_action(self, observation: Observation) -> Action:
+        """Get action from the human agent.
 
-        if not self._pygame_available:
-            return Action(0.0, 0.0, target_speed=current_speed)
+        This delegates to whatever human agent type was configured
+        (KeyboardAgent, TrafficAgent, etc.)
+        """
+        # # === DEBUG: Print agent state ===
+        # state = observation.frame[self.agent_id]
+        # print(f"\n=== Human Agent Debug ===")
+        # print(f"Agent state: pos={state.position}, heading={state.heading:.3f}, speed={state.speed:.2f}")
 
-        try:
-            pygame.event.pump()
-            if not pygame.key.get_focused():
-                return Action(0.0, 0.0, target_speed=current_speed)
-            keys = pygame.key.get_pressed()
-        except pygame.error:
-            return Action(0.0, 0.0, target_speed=current_speed)
+        # # === DEBUG: Print macro/maneuver info (if TrafficAgent) ===
+        # if isinstance(self._human_agent, TrafficAgent):
+        #     macro = self._human_agent._current_macro
+        #     print(f"Current macro: {macro}")
+        #     if macro is not None:
+        #         print(f"  Macro open_loop: {macro.open_loop}")
+        #         print(f"  Current maneuver: {macro.current_maneuver}")
+        #         print(f"  Current maneuver type: {type(macro.current_maneuver).__name__}")
+        #         if hasattr(macro.current_maneuver, '_lane') and macro.current_maneuver._lane is not None:
+        #             print(f"  Maneuver lane: {macro.current_maneuver._lane}")
 
-        # Calculate acceleration
-        acceleration = 0.0
-        if keys[K_w] or keys[K_UP]:
-            acceleration = -self.MAX_BRAKE if self._reverse else self.MAX_ACCELERATION
-        elif keys[K_s] or keys[K_DOWN]:
-            acceleration = self.MAX_ACCELERATION if self._reverse else -self.MAX_BRAKE
+        # # === DEBUG: Print lane detection ===
+        # lane = observation.scenario_map.best_lane_at(state.position, state.heading)
+        # print(f"Detected lane: {lane}")
+        # if lane is not None:
+        #     lane_heading = lane.get_heading_at(lane.distance_at(state.position))
+        #     print(f"  Lane heading at agent pos: {lane_heading:.3f}")
+        #     print(f"  Heading diff: {abs(state.heading - lane_heading):.3f}")
 
-        # Calculate steering
-        target_steer = 0.0
-        if keys[K_a] or keys[K_LEFT]:
-            target_steer = -self.MAX_STEER
-        elif keys[K_d] or keys[K_RIGHT]:
-            target_steer = self.MAX_STEER
+        # action = self._human_agent.next_action(observation)
+        # print(f"Action: accel={action.acceleration:.3f}, steer={action.steer_angle:.3f}, target_speed={action.target_speed:.2f}")
+        # print(f"=========================\n")
+        action = self._human_agent.next_action(observation)
 
-        # Smooth steering
-        steer_diff = target_steer - self._current_steer
-        if abs(steer_diff) > self.STEER_SPEED:
-            self._current_steer += self.STEER_SPEED if steer_diff > 0 else -self.STEER_SPEED
-        else:
-            self._current_steer = target_steer
-
-        dt = 1.0 / self._fps
-        target_speed = max(0.0, current_speed + acceleration * dt)
-
-        return Action(acceleration, self._current_steer, target_speed=target_speed)
+        return action
 
     def _apply_intervention(self, action: Action, observation: Observation) -> Action:
         """Apply safety intervention to the action if needed."""
@@ -1284,8 +1336,6 @@ class SharedAutonomyAgent(Agent):
         """Reset agent to initial state."""
         super().reset()
         self._vehicle = KinematicVehicle(self._initial_state, self.metadata, self._fps)
-        self._reverse = False
-        self._current_steer = 0.0
         self._observations = {}
         self._goal_probabilities = {}
         self._goals = []
@@ -1297,6 +1347,16 @@ class SharedAutonomyAgent(Agent):
         self._current_message = None
         self._intervention_active = False
         self._k = 0
+
+        # Reset the human agent
+        if hasattr(self, '_human_agent') and self._human_agent is not None:
+            self._human_agent.reset()
+
+        # Reset TrafficAgent destination flag
+        if hasattr(self, '_human_needs_destination'):
+            human_type = self._human_config.get("type", "KeyboardAgent")
+            if human_type == "TrafficAgent" and self._human_config.get("macro_actions") is None:
+                self._human_needs_destination = True
 
     # ==================== Public API for Visualization ====================
 
@@ -1537,3 +1597,19 @@ class SharedAutonomyAgent(Agent):
             return None
 
         return self._macro_guided_recognition.get_give_way_analysis(ego_probs)
+
+    @property
+    def human_agent(self) -> Agent:
+        """The human agent that provides base actions.
+
+        This can be:
+        - KeyboardAgent: Manual keyboard control
+        - TrafficAgent: Simulated traffic agent following A* path
+        - Future: EpistemicHumanAgent with beliefs about other agents
+        """
+        return self._human_agent
+
+    @property
+    def human_type(self) -> str:
+        """The type of human agent being used."""
+        return self._human_config.get("type", "KeyboardAgent")

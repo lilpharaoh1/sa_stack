@@ -88,8 +88,10 @@ class CarlaAgentWrapper:
 
         # Convert steering angle to CARLA steering [-1, 1]
         # action.steer_angle is in radians, CARLA expects [-1, 1]
+        # Negate because IGP2 uses y-up coordinate system while CARLA uses y-down,
+        # which mirrors the steering direction
         max_steer_angle = 0.7  # radians (about 40 degrees)
-        control.steer = np.clip(action.steer_angle / max_steer_angle, -1.0, 1.0)
+        control.steer = np.clip(-action.steer_angle / max_steer_angle, -1.0, 1.0)
 
         control.hand_brake = False
         control.manual_gear_shift = False

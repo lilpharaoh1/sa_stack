@@ -720,7 +720,6 @@ class Exit(MacroAction):
     def _nearest_lane_to_goal(self, lane_list: List[Lane]) -> Lane:
         best_lane = None
         best_distance = np.inf
-        print(lane_list)
         for connecting_lane in lane_list:
             distance = min(np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[-1])), \
                                 np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[0])))

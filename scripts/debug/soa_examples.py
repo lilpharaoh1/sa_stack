@@ -237,11 +237,30 @@ def create_agent(agent_config, scenario_map, frame, fps, args):
             **agent_config["mcts"],
         )
     elif agent_type == "SharedAutonomyAgent":
+        # Handle human agent config for SharedAutonomyAgent
+        # New format: {"type": "AgentType", "config": {...agent params...}}
+        human_config = agent_config.get("human", {"type": "KeyboardAgent", "config": {}})
+
+        # Ensure config key exists
+        if "config" not in human_config:
+            human_config["config"] = {}
+
+        # If human is TrafficAgent with macro_actions in config, convert them
+        human_agent_config = human_config.get("config", {})
+        if human_config.get("type") == "TrafficAgent" and human_agent_config.get("macro_actions"):
+            human_agent_config["macro_actions"] = to_ma_list(
+                human_agent_config["macro_actions"],
+                agent_config["id"],
+                frame,
+                scenario_map,
+            )
+
         agent = ip.SharedAutonomyAgent(
             **base_agent,
             **planning_common,
             # t_update=agent_config.get("t_update", 1.0),
             predict_ego=agent_config.get("predict_ego", True),
+            human=human_config,
             **agent_config["mcts"],
         )
     elif agent_type == "TrafficAgent":
