@@ -1,23 +1,24 @@
 """
 Epistemic module for maneuver-level goal recognition.
 
-This module provides the same functionality as the recognition module,
-but operates at the MANEUVER level instead of the MACRO-ACTION level.
+This module provides maneuver-level goal recognition with two approaches:
 
-Where recognition uses:
-    Goal -> A*(MacroActions) -> Maneuvers -> Trajectory
+1. Direct maneuver search (ManeuverAStar, ManeuverSequenceGenerator):
+   Goal -> A*/BFS(Maneuvers) -> Trajectory
+   - Searches directly over maneuvers
+   - Issues: maneuver applicability can be tricky
 
-Epistemic uses:
-    Goal -> A*(Maneuvers) -> Trajectory
-    or
-    Goal -> BFS(Maneuvers) -> Trajectory  (similarity mode)
+2. Macro-guided maneuver generation (MacroGuidedSequenceGenerator):
+   Goal -> BFS(MacroActions) -> Expand to Maneuvers -> Trajectory
+   - Uses macro-action structure to guide search
+   - Expands each macro-action into its maneuvers
+   - More robust: uses well-tested macro-action applicability
+   - Generates variations (with/without GiveWay)
 
-This provides finer-grained recognition of driver intent by working
-directly with primitive maneuvers like FollowLane, Turn, GiveWay, Stop, etc.
-
-Recognition Modes:
-- "cost": Original A*-based approach with cost comparison (time-optimal)
-- "similarity": BFS-based approach with trajectory similarity (interpretable)
+The macro-guided approach is recommended as it:
+- Uses macro-action applicability (robust, well-tested)
+- Provides maneuver-level granularity for comparison
+- Supports generating plan variations for reasoning
 """
 
 from igp2.epistemic.maneuver_factory import ManeuverFactory
@@ -25,6 +26,8 @@ from igp2.epistemic.maneuver_astar import ManeuverAStar
 from igp2.epistemic.maneuver_probabilities import ManeuverProbabilities
 from igp2.epistemic.maneuver_recognition import ManeuverRecognition
 from igp2.epistemic.sequence_generator import ManeuverSequenceGenerator
+from igp2.epistemic.macro_guided_generator import MacroGuidedSequenceGenerator
+from igp2.epistemic.macro_guided_recognition import MacroGuidedRecognition
 from igp2.epistemic.trajectory_similarity import (
     path_similarity,
     velocity_similarity,
@@ -38,6 +41,8 @@ __all__ = [
     'ManeuverProbabilities',
     'ManeuverRecognition',
     'ManeuverSequenceGenerator',
+    'MacroGuidedSequenceGenerator',
+    'MacroGuidedRecognition',
     'path_similarity',
     'velocity_similarity',
     'combined_similarity',

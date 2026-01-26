@@ -58,6 +58,7 @@ from igp2.recognition.goalprobabilities import GoalsProbabilities
 from igp2.epistemic.maneuver_astar import ManeuverAStar
 from igp2.epistemic.maneuver_recognition import ManeuverRecognition
 from igp2.epistemic.maneuver_probabilities import ManeuverProbabilities
+from igp2.epistemic.macro_guided_recognition import MacroGuidedRecognition
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,7 @@ class SharedAutonomyAgent(Agent):
         )
 
         # Create maneuver-level (epistemic) recognition
+        # Option 1: Direct maneuver search (original approach - has applicability issues)
         self._maneuver_astar = ManeuverAStar(next_lane_offset=0.1)
         self._maneuver_recognition = ManeuverRecognition(
             astar=self._maneuver_astar,
@@ -253,6 +255,22 @@ class SharedAutonomyAgent(Agent):
             scenario_map=scenario_map,
             cost=self._cost,
             **goal_recognition
+        )
+
+        # Option 2: Macro-guided recognition (recommended - uses macro-action structure)
+        # This generates maneuver sequences guided by macro-action applicability,
+        # and creates variations (with/without GiveWay) for detecting yielding behavior.
+        # Uses inverse planning approach (like standard IGP2 GoalRecognition).
+        n_trajectories = goal_recognition.get('n_trajectories', 5)
+        self._macro_guided_recognition = MacroGuidedRecognition(
+            scenario_map=scenario_map,
+            smoother=self._smoother,
+            cost=self._cost,
+            n_trajectories=n_trajectories,
+            beta=1.0,
+            gamma=1.0,
+            reward_as_difference=True,
+            generate_variations=True
         )
 
         # MCTS setup
@@ -563,13 +581,19 @@ class SharedAutonomyAgent(Agent):
             logger.debug(f"Macro-level recognition failed for agent {aid}: {e}")
 
     def _run_maneuver_recognition(self, aid: int, frame: Dict, visible_region: Circle):
-        """Run maneuver-level goal recognition (epistemic).
+        """Run maneuver-level goal recognition using macro-guided approach.
 
-        This uses ManeuverRecognition which searches over maneuvers
-        directly: FollowLane, GiveWay, Turn, Stop, SwitchLane, etc.
+        This uses MacroGuidedRecognition which:
+        1. Uses macro-action structure to guide maneuver expansion (robust applicability)
+        2. Expands each macro-action into its maneuvers
+        3. Generates variations (with/without GiveWay) for detecting yielding behavior
+        4. Compares observed trajectory to candidates using similarity metrics
+
+        The result provides maneuver-level granularity while leveraging the
+        well-tested macro-action applicability logic.
         """
         try:
-            self._maneuver_recognition.update_goals_probabilities(
+            self._macro_guided_recognition.update_goals_probabilities(
                 goals_probabilities=self._maneuver_probabilities[aid],
                 observed_trajectory=self._observations[aid][0],
                 agent_id=aid,
@@ -583,6 +607,15 @@ class SharedAutonomyAgent(Agent):
                 # Log the predicted maneuver sequence
                 maneuvers = self._maneuver_probabilities[aid].get_maneuver_sequence()
                 logger.debug(f"Ego maneuver-level recognition updated: {maneuvers}")
+
+                # Analyze GiveWay behavior
+                gw_analysis = self._macro_guided_recognition.get_give_way_analysis(
+                    self._maneuver_probabilities[aid]
+                )
+                if gw_analysis['best_plan_has_give_way']:
+                    logger.debug(f"  GiveWay detected: {gw_analysis['analysis']}")
+                else:
+                    logger.debug(f"  No GiveWay: {gw_analysis['analysis']}")
             else:
                 logger.debug(f"Agent {aid} maneuver-level probabilities updated")
 
@@ -625,10 +658,10 @@ class SharedAutonomyAgent(Agent):
                 logger.debug(f"Ego macro-level prediction updated with true goal")
 
             else:  # maneuver level
-                # Maneuver-level: Use ManeuverProbabilities and ManeuverRecognition
+                # Maneuver-level: Use ManeuverProbabilities and MacroGuidedRecognition
                 ego_maneuver_probs = ManeuverProbabilities([self.goal])
 
-                self._maneuver_recognition.update_goals_probabilities(
+                self._macro_guided_recognition.update_goals_probabilities(
                     goals_probabilities=ego_maneuver_probs,
                     observed_trajectory=self._observations[self.agent_id][0],
                     agent_id=self.agent_id,
@@ -647,6 +680,12 @@ class SharedAutonomyAgent(Agent):
                 # Log predicted maneuver sequence
                 maneuvers = ego_maneuver_probs.get_maneuver_sequence()
                 logger.debug(f"Ego maneuver-level prediction updated with true goal: {maneuvers}")
+
+                # Log GiveWay analysis
+                gw_analysis = self._macro_guided_recognition.get_give_way_analysis(
+                    ego_maneuver_probs
+                )
+                logger.debug(f"  GiveWay analysis: {gw_analysis['analysis']}")
 
         except Exception as e:
             logger.debug(f"Failed to update ego with true goal: {e}")
@@ -831,6 +870,21 @@ class SharedAutonomyAgent(Agent):
         # Analyze differences at maneuver level (safety-critical maneuvers)
         missing_maneuvers = self._find_missing_safety_maneuvers(predicted_maneuvers, mcts_maneuvers)
 
+        # For maneuver-level prediction, use GiveWay analysis from MacroGuidedRecognition
+        # This provides a more sophisticated comparison based on trajectory similarity
+        gw_analysis = None
+        if self._prediction_level == "maneuver":
+            gw_analysis = self._macro_guided_recognition.get_give_way_analysis(ego_probs)
+
+            # If MCTS plan has GiveWay but driver's best-matching plan doesn't,
+            # that's a safety concern regardless of what maneuvers are in the predicted list
+            mcts_has_gw = any(m in ['GiveWay', 'GiveWayCL'] for m in mcts_maneuvers)
+            if mcts_has_gw and gw_analysis and not gw_analysis['best_plan_has_give_way']:
+                if 'GiveWay' not in missing_maneuvers:
+                    missing_maneuvers.append('GiveWay')
+                logger.debug(f"GiveWay analysis: MCTS requires yield, driver not yielding "
+                           f"(confidence: {gw_analysis['give_way_confidence']:.2f})")
+
         # Calculate risk score based on all levels including sequence differences
         risk_score = self._calculate_risk_score(
             predicted_actions, optimal_actions, missing_actions, missing_maneuvers,
@@ -840,7 +894,7 @@ class SharedAutonomyAgent(Agent):
         # Determine intervention based on sequence differences
         intervention_type, message = self._determine_intervention(
             missing_actions, missing_maneuvers, risk_score, predicted_prob,
-            sequence_differences
+            sequence_differences, gw_analysis
         )
 
         self._safety_analysis = SafetyAnalysis(
@@ -1026,7 +1080,8 @@ class SharedAutonomyAgent(Agent):
 
     def _determine_intervention(self, missing_actions: List[str], missing_maneuvers: List[str],
                                 risk_score: float, predicted_prob: float,
-                                sequence_differences: List[SequenceDifference] = None) -> Tuple[InterventionType, str]:
+                                sequence_differences: List[SequenceDifference] = None,
+                                gw_analysis: Dict = None) -> Tuple[InterventionType, str]:
         """Determine what intervention to apply based on safety analysis.
 
         Checks macro-action level, maneuver level, and sequence-level differences.
@@ -1038,6 +1093,7 @@ class SharedAutonomyAgent(Agent):
             risk_score: Calculated risk score (0.0 to 1.0)
             predicted_prob: Confidence in the predicted goal
             sequence_differences: Position-by-position differences in plans
+            gw_analysis: Optional GiveWay analysis from MacroGuidedRecognition
         """
         # Low confidence prediction - be cautious
         if predicted_prob < 0.3:
@@ -1063,6 +1119,13 @@ class SharedAutonomyAgent(Agent):
         # Check for critical missing maneuvers
         if any(m in missing_maneuvers for m in ["Stop", "StopCL"]):
             return InterventionType.STOP, "STOP REQUIRED - Missing stop maneuver!"
+
+        # Check GiveWay using similarity-based analysis (when available)
+        if gw_analysis and not gw_analysis['best_plan_has_give_way']:
+            # If we have high confidence that driver is not yielding
+            if gw_analysis['give_way_confidence'] > 0.5:
+                msg = f"YIELD REQUIRED - {gw_analysis['analysis']}"
+                return InterventionType.YIELD, msg
 
         if any(m in missing_maneuvers for m in ["GiveWay", "GiveWayCL"]):
             return InterventionType.YIELD, "YIELD REQUIRED - Give way to other traffic!"
@@ -1453,3 +1516,24 @@ class SharedAutonomyAgent(Agent):
 
         # Get the optimum trajectory for this goal
         return ego_probs.optimum_trajectory.get((best_goal, None))
+
+    @property
+    def give_way_analysis(self) -> Optional[Dict]:
+        """Get GiveWay analysis for ego (when prediction_level='maneuver').
+
+        Returns analysis of whether the driver appears to be executing GiveWay:
+        - 'best_plan_has_give_way': bool - whether best-matching plan has GiveWay
+        - 'give_way_confidence': float - confidence in the assessment (0-1)
+        - 'analysis': str - human-readable description
+        - 'best_plan_maneuvers': List[str] - maneuver names in best plan
+
+        Returns None if prediction_level='macro' or no prediction available.
+        """
+        if self._prediction_level != "maneuver":
+            return None
+
+        ego_probs = self._maneuver_probabilities.get(self.agent_id)
+        if ego_probs is None:
+            return None
+
+        return self._macro_guided_recognition.get_give_way_analysis(ego_probs)

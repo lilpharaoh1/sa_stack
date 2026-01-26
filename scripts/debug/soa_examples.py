@@ -264,7 +264,7 @@ def create_agent(agent_config, scenario_map, frame, fps, args):
 # from scripts.experiments.scenarios.util import parse_args, generate_random_frame
 
 if __name__ == '__main__':
-    ip.setup_logging(level=logging.INFO)
+    ip.setup_logging()
     logger = logging.getLogger(__name__)
     args = parse_args()
 
