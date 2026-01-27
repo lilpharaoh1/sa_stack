@@ -16,6 +16,7 @@ This approach:
 import logging
 import numpy as np
 from typing import Dict, List, Tuple, Optional
+import matplotlib.pyplot as plt
 
 from igp2.core.trajectory import Trajectory, VelocityTrajectory
 from igp2.core.agentstate import AgentState
@@ -54,7 +55,8 @@ class MacroGuidedRecognition:
                  beta: float = 1.0,
                  gamma: float = 1.0,
                  reward_as_difference: bool = True,
-                 generate_variations: bool = True):
+                 generate_variations: bool = True,
+                 debug_plot: bool = False):
         """Initialize macro-guided recognition.
 
         Args:
@@ -66,8 +68,10 @@ class MacroGuidedRecognition:
             gamma: Temperature for trajectory probability computation
             reward_as_difference: If True, use cost_difference_resampled for comparison
             generate_variations: Whether to generate with/without GiveWay variations
+            debug_plot: If True, show debug plots between Step 2 and Step 3
         """
         self._scenario_map = scenario_map
+        self._debug_plot = debug_plot
         self._smoother = smoother or VelocitySmoother(
             vmin_m_s=1, vmax_m_s=10, n=10, amax_m_s2=5, lambda_acc=10
         )
@@ -180,10 +184,18 @@ class MacroGuidedRecognition:
                 opt_trajectory = goals_probabilities.optimum_trajectory[goal_and_type]
 
                 # === STEP 2: Generate candidate trajectories from CURRENT position ===
-                # These represent possible futures (with/without GiveWay, etc.)
+                # These represent possible futures (with/without optional maneuvers, etc.)
+                # If an MCTS plan is available, seed the generator with it so it
+                # appears as a candidate alongside BFS-discovered alternatives.
+                seed_plans = None
+                if mcts_opt is not None:
+                    mcts_traj, mcts_plan = mcts_opt
+                    seed_plans = [(mcts_plan, mcts_traj)]
+
                 logger.info(f"    [CANDIDATES from CURRENT pos] Generating possible futures...")
                 all_trajectories, all_plans = self._generator.generate(
-                    agent_id, frame, goal, visible_region
+                    agent_id, frame, goal, visible_region,
+                    seed_plans=seed_plans
                 )
 
                 if len(all_trajectories) == 0:
@@ -204,6 +216,21 @@ class MacroGuidedRecognition:
                     maneuver_names = [type(m).__name__ for m in plan]
                     has_gw = any(isinstance(m, GiveWay) for m in plan)
                     logger.info(f"      Candidate {i}: {maneuver_names} (GiveWay: {has_gw})")
+
+                # === DEBUG PLOT ===
+                if self._debug_plot:
+                    from igp2.epistemic.plot_recognition import plot_recognition_debug
+                    plot_recognition_debug(
+                        scenario_map=self._scenario_map,
+                        goal=goal,
+                        agent_id=agent_id,
+                        frame=frame,
+                        opt_trajectory=opt_trajectory,
+                        opt_plan=goals_probabilities.optimum_plan[goal_and_type],
+                        all_trajectories=all_trajectories,
+                        all_plans=all_plans,
+                        observed_trajectory=observed_trajectory,
+                    )
 
                 # === STEP 3: Prepend observed trajectory to each candidate ===
                 # This creates: what agent DID + what they would optimally do from here

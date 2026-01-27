@@ -10,14 +10,14 @@ This generator uses macro-action structure to guide maneuver expansion:
 This approach:
 - Uses macro-action applicability logic (which is well-tested)
 - Generates plans at maneuver-level granularity
-- Allows for variations (with/without certain maneuvers like GiveWay)
+- Allows for variations (with/without optional maneuver types)
 """
 
 import logging
 from typing import Dict, List, Tuple, Optional, Set
 from collections import deque
 from dataclasses import dataclass
-from copy import deepcopy
+from copy import copy, deepcopy
 
 import numpy as np
 
@@ -60,7 +60,7 @@ class MacroGuidedSequenceGenerator:
     but tracks and queues at the maneuver level. This provides:
     - Robust applicability checks (from macro-action logic)
     - Fine-grained maneuver-level plans
-    - Ability to generate variations (with/without GiveWay, etc.)
+    - Ability to generate variations (with/without optional maneuvers)
 
     The BFS explores:
     1. Get applicable macro-actions at current state
@@ -68,6 +68,10 @@ class MacroGuidedSequenceGenerator:
     3. Queue each complete maneuver sequence as a potential path
     4. Continue until goal is reached
     """
+
+    # Maneuver types considered optional (can be removed to create variations).
+    # Extend this set to add more optional types (e.g., Stop).
+    OPTIONAL_MANEUVER_TYPES = {GiveWay}
 
     def __init__(self,
                  scenario_map: Map,
@@ -94,7 +98,9 @@ class MacroGuidedSequenceGenerator:
                  agent_id: int,
                  frame: Dict[int, AgentState],
                  goal: Goal,
-                 visible_region: Circle = None) -> Tuple[List[VelocityTrajectory], List[List[Maneuver]]]:
+                 visible_region: Circle = None,
+                 seed_plans: List[Tuple[List[Maneuver], VelocityTrajectory]] = None
+                 ) -> Tuple[List[VelocityTrajectory], List[List[Maneuver]]]:
         """Generate candidate maneuver sequences to reach the goal.
 
         Uses macro-action structure to guide BFS exploration at maneuver level.
@@ -104,6 +110,9 @@ class MacroGuidedSequenceGenerator:
             frame: Current state of the environment
             goal: The target goal
             visible_region: Region visible to ego vehicle
+            seed_plans: Optional list of (maneuver_list, trajectory) tuples to
+                seed the BFS. Seeds that reach the goal are added directly as
+                solutions; others are added to the BFS queue for expansion.
 
         Returns:
             Tuple of:
@@ -111,6 +120,7 @@ class MacroGuidedSequenceGenerator:
             - List of maneuver sequences (List[Maneuver])
         """
         solutions = []  # List of (maneuver_list, trajectory)
+        seen_signatures = set()  # Track maneuver-type signatures to avoid duplicates
 
         # BFS queue
         initial_entry = QueueEntry(
@@ -120,6 +130,36 @@ class MacroGuidedSequenceGenerator:
             completed_macro_actions=[]
         )
         queue = deque([initial_entry])
+
+        # Add seed plans to queue/solutions
+        if seed_plans:
+            for maneuver_list, trajectory in seed_plans:
+                steps = [
+                    ManeuverStep(
+                        maneuver=m,
+                        macro_action_type="seed",
+                        step_index=i,
+                        total_steps=len(maneuver_list)
+                    )
+                    for i, m in enumerate(maneuver_list)
+                ]
+                if trajectory is not None and self._goal_reached(goal, trajectory):
+                    sig = self._plan_signature(maneuver_list)
+                    if sig not in seen_signatures:
+                        seen_signatures.add(sig)
+                        solutions.append((maneuver_list, trajectory))
+                        logger.debug(f"Seed plan added as solution: "
+                                     f"{[type(m).__name__ for m in maneuver_list]}")
+                else:
+                    seed_entry = QueueEntry(
+                        maneuver_steps=steps,
+                        frame=frame.copy(),
+                        depth=0,
+                        completed_macro_actions=["seed"]
+                    )
+                    queue.appendleft(seed_entry)
+                    logger.debug(f"Seed plan added to BFS queue: "
+                                 f"{[type(m).__name__ for m in maneuver_list]}")
 
         iterations = 0
         visited = set()  # Track visited states to avoid loops
@@ -132,6 +172,12 @@ class MacroGuidedSequenceGenerator:
             trajectory = self._build_trajectory(entry.maneuver_steps)
             if trajectory is not None and self._goal_reached(goal, trajectory):
                 maneuvers = [step.maneuver for step in entry.maneuver_steps]
+                sig = self._plan_signature(maneuvers)
+                if sig in seen_signatures:
+                    logger.debug(f"Skipping duplicate solution: "
+                                 f"{[type(m).__name__ for m in maneuvers]}")
+                    continue
+                seen_signatures.add(sig)
                 solutions.append((maneuvers, trajectory))
                 logger.debug(f"Found solution with {len(maneuvers)} maneuvers: "
                            f"{[type(m).__name__ for m in maneuvers]}")
@@ -232,10 +278,13 @@ class MacroGuidedSequenceGenerator:
                                       new_steps: List[ManeuverStep],
                                       agent_id: int,
                                       ma_type: str) -> List[QueueEntry]:
-        """Generate variations of a maneuver sequence (e.g., without GiveWay).
+        """Generate variations by removing optional maneuver types.
 
-        Currently generates:
-        - Variation without GiveWay maneuvers (if present)
+        For each optional maneuver type present in new_steps (as defined by
+        OPTIONAL_MANEUVER_TYPES), builds a variation with that type removed.
+        When a maneuver is removed, the preceding maneuver's trajectory is
+        extended to absorb the removed maneuver's path segment, preventing
+        spatial gaps in the combined trajectory.
 
         Args:
             base_entry: The entry before adding new_steps
@@ -248,20 +297,59 @@ class MacroGuidedSequenceGenerator:
         """
         variations = []
 
-        # Check if any of the new steps is a GiveWay
-        has_give_way = any(isinstance(step.maneuver, GiveWay) for step in new_steps)
+        # Find which optional types are present in the new steps
+        optional_types_present = (
+            {type(step.maneuver) for step in new_steps}
+            & self.OPTIONAL_MANEUVER_TYPES
+        )
 
-        if has_give_way:
-            # Create variation without GiveWay
-            steps_without_gw = [s for s in new_steps if not isinstance(s.maneuver, GiveWay)]
+        for opt_type in optional_types_present:
+            # Build variation without this optional type, extending the
+            # preceding maneuver's trajectory to cover the gap left by removal.
+            filtered_steps = []
 
-            if steps_without_gw:  # Only if there are remaining steps
+            for step in new_steps:
+                if isinstance(step.maneuver, opt_type):
+                    # Extend the preceding step's trajectory to cover this gap
+                    removed_traj = step.maneuver.trajectory
+                    if filtered_steps and removed_traj is not None and len(removed_traj.path) > 1:
+                        prev_step = filtered_steps[-1]
+                        prev_traj = prev_step.maneuver.trajectory
+
+                        if prev_traj is not None:
+                            extended_path = np.concatenate(
+                                [prev_traj.path, removed_traj.path[1:]])
+                            extended_vel = np.concatenate(
+                                [prev_traj.velocity, removed_traj.velocity[1:]])
+                            extended_traj = VelocityTrajectory(
+                                extended_path, extended_vel)
+
+                            # Shallow-copy the maneuver so the original is unaffected
+                            extended_maneuver = copy(prev_step.maneuver)
+                            extended_maneuver.trajectory = extended_traj
+
+                            filtered_steps[-1] = ManeuverStep(
+                                maneuver=extended_maneuver,
+                                macro_action_type=prev_step.macro_action_type,
+                                step_index=prev_step.step_index,
+                                total_steps=prev_step.total_steps,
+                            )
+                    # else: removed maneuver is first step with no predecessor — drop it
+                else:
+                    filtered_steps.append(ManeuverStep(
+                        maneuver=step.maneuver,
+                        macro_action_type=step.macro_action_type,
+                        step_index=step.step_index,
+                        total_steps=step.total_steps,
+                    ))
+
+            if filtered_steps:  # Only if there are remaining steps
                 # Re-index the steps
-                for i, step in enumerate(steps_without_gw):
+                for i, step in enumerate(filtered_steps):
                     step.step_index = i
-                    step.total_steps = len(steps_without_gw)
+                    step.total_steps = len(filtered_steps)
 
-                all_steps = base_entry.maneuver_steps + steps_without_gw
+                all_steps = base_entry.maneuver_steps + filtered_steps
 
                 # Build trajectory to get new frame
                 trajectory = self._build_trajectory(all_steps)
@@ -270,11 +358,12 @@ class MacroGuidedSequenceGenerator:
                     new_frame = base_entry.frame.copy()
                     new_frame[agent_id] = trajectory.final_agent_state
 
+                    opt_type_name = opt_type.__name__
                     var_entry = QueueEntry(
                         maneuver_steps=all_steps,
                         frame=new_frame,
                         depth=base_entry.depth + 1,
-                        completed_macro_actions=base_entry.completed_macro_actions + [f"{ma_type}_noGW"]
+                        completed_macro_actions=base_entry.completed_macro_actions + [f"{ma_type}_no{opt_type_name}"]
                     )
                     variations.append(var_entry)
 
@@ -339,6 +428,11 @@ class MacroGuidedSequenceGenerator:
         elif not isinstance(goal, StoppingGoal):
             return goal.passed_through_goal(trajectory)
         return False
+
+    @staticmethod
+    def _plan_signature(maneuvers: List[Maneuver]) -> tuple:
+        """Create a hashable signature from a maneuver list for deduplication."""
+        return tuple(type(m).__name__ for m in maneuvers)
 
     def _make_state_key(self, state: AgentState, completed_mas: List[str]) -> tuple:
         """Create a hashable key for state tracking."""
