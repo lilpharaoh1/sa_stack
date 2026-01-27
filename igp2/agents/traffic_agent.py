@@ -21,10 +21,11 @@ class TrafficAgent(MacroAgent):
         goal: Optional final goal of the agent
         fps: Execution rate of the environment simulation
         macro_actions: Optional pre-specified macro actions to follow
-        open_loop: If True, follow pre-computed trajectory without feedback control.
-                   If False, use closed-loop maneuver control. Default: False.
-                   NOTE: open_loop=True requires MacroAction to support trajectory-based
-                   execution, which is not fully implemented. Use closed-loop for now.
+        open_loop: If True, the agent follows the pre-computed trajectory path
+                   using PID waypoint tracking but ignores surrounding traffic
+                   (no ACC, no collision avoidance, no GiveWay junction stopping).
+                   If False (default), uses full closed-loop control with reactive
+                   traffic behaviors.
     """
 
     def __init__(self,
@@ -71,9 +72,10 @@ class TrafficAgent(MacroAgent):
     def set_macro_actions(self, new_macros: List[MacroAction]):
         """ Specify a new set of macro actions to follow. """
         assert len(new_macros) > 0, "Empty macro list given!"
-        if not self._open_loop:
-            for macro in new_macros:
-                macro.to_closed_loop()
+        for macro in new_macros:
+            macro.to_closed_loop()
+            if self._open_loop:
+                macro.set_ignore_traffic(True)
         self._macro_actions = new_macros
         self._current_macro = new_macros[0]
 
@@ -98,10 +100,12 @@ class TrafficAgent(MacroAgent):
             print("len actions == 0 so failing due to astar")
             raise RuntimeError(f"Couldn't find path to goal {self.goal} for TrafficAgent {self.agent_id}.")
         self._macro_actions = actions[0]
-        # Convert to closed-loop if configured
-        if not self._open_loop:
-            for macro in self._macro_actions:
-                macro.to_closed_loop()
+        # Always convert to closed-loop: real-time simulation requires
+        # frame-by-frame actions which only closed-loop maneuvers provide.
+        for macro in self._macro_actions:
+            macro.to_closed_loop()
+            if self._open_loop:
+                macro.set_ignore_traffic(True)
         self._current_macro = self._macro_actions[0]
 
     def done(self, observation: Observation) -> bool:
