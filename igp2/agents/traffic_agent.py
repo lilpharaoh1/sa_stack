@@ -75,7 +75,7 @@ class TrafficAgent(MacroAgent):
         for macro in new_macros:
             macro.to_closed_loop()
             if self._open_loop:
-                macro.set_ignore_traffic(True)
+                macro.set_open_loop(True)
         self._macro_actions = new_macros
         self._current_macro = new_macros[0]
 
@@ -105,7 +105,7 @@ class TrafficAgent(MacroAgent):
         for macro in self._macro_actions:
             macro.to_closed_loop()
             if self._open_loop:
-                macro.set_ignore_traffic(True)
+                macro.set_open_loop(True)
         self._current_macro = self._macro_actions[0]
 
     def done(self, observation: Observation) -> bool:

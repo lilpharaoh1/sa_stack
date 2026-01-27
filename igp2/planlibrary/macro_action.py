@@ -215,22 +215,22 @@ class MacroAction(abc.ABC):
                 np.append(velocity, trajectory.velocity[1:], axis=0)
         return VelocityTrajectory(points, velocity)
 
-    def set_ignore_traffic(self, ignore: bool = True):
-        """ Set whether closed-loop maneuvers should ignore other traffic.
+    def set_open_loop(self, open_loop: bool = True):
+        """ Set whether closed-loop maneuvers should execute in open-loop mode.
 
         When True, maneuvers follow the pre-computed trajectory waypoints via PID
         control but skip all reactive behaviors (ACC, collision avoidance, GiveWay
-        junction stopping). This is used for open-loop style execution where the
-        agent follows its planned path regardless of surrounding traffic.
+        junction stopping). The agent follows its planned path regardless of
+        surrounding traffic.
 
         Args:
-            ignore: If True, disable traffic-reactive behaviors.
+            open_loop: If True, disable traffic-reactive behaviors.
         """
         if self._maneuvers is None:
             return
         for man in self._maneuvers:
-            if hasattr(man, '_ignore_traffic'):
-                man._ignore_traffic = ignore
+            if hasattr(man, '_open_loop'):
+                man._open_loop = open_loop
 
     def to_closed_loop(self):
         """ Convert an open-loop macro action to closed-loop.
