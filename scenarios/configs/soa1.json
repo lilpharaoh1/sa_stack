@@ -17,7 +17,7 @@
       "human": {
         "type": "TrafficAgent",
         "config": {
-          "open_loop": false
+          "open_loop": true
         }
       },
       "spawn": {

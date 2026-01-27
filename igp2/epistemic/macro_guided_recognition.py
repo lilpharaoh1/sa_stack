@@ -94,11 +94,13 @@ class MacroGuidedRecognition:
                                    frame: Dict[int, AgentState],
                                    visible_region: Circle = None,
                                    open_loop: bool = True,
-                                   debug: bool = False) -> ManeuverProbabilities:
+                                   debug: bool = False,
+                                   optimum_trajectories: Dict = None) -> ManeuverProbabilities:
         """Update goal probabilities using inverse planning.
 
         For each goal:
         1. Generate optimal trajectory from frame_ini (what agent SHOULD have done)
+           - OR use a pre-computed optimal (e.g. from MCTS) if provided
         2. Generate candidate trajectories from frame (possible futures)
         3. Prepend observed trajectory to each candidate
         4. Compute likelihood by comparing against optimal
@@ -113,6 +115,10 @@ class MacroGuidedRecognition:
             visible_region: Visible region constraint
             open_loop: Whether to use open-loop planning
             debug: Enable debug output
+            optimum_trajectories: Optional dict mapping (goal, None) -> (trajectory, plan).
+                When provided and an entry exists for the current goal, that trajectory/plan
+                is used as the optimal benchmark instead of generating from frame_ini.
+                Goals without an entry fall back to the default generator-based optimal.
 
         Returns:
             Updated ManeuverProbabilities
@@ -131,32 +137,45 @@ class MacroGuidedRecognition:
                 if goal.reached(frame_ini[agent_id].position) and not isinstance(goal, StoppingGoal):
                     raise RuntimeError(f"Agent {agent_id} already at goal")
 
-                # === STEP 1: Generate OPTIMAL trajectory from initial position ===
-                # This represents what a rational agent SHOULD have done
+                # === STEP 1: Generate OPTIMAL trajectory (benchmark) ===
+                # Check if a pre-computed optimal (e.g. from MCTS) is available for this goal
+                mcts_opt = None
+                if optimum_trajectories is not None:
+                    mcts_opt = optimum_trajectories.get(goal_and_type)
+
                 if goals_probabilities.optimum_trajectory[goal_and_type] is None:
-                    logger.info(f"    [OPTIMAL from INITIAL pos] Generating benchmark trajectory...")
-                    opt_trajectories, opt_plans = self._generator.generate(
-                        agent_id, frame_ini, goal, visible_region
-                    )
+                    if mcts_opt is not None:
+                        # Use pre-computed MCTS trajectory as the optimal benchmark
+                        opt_traj, opt_plan = mcts_opt
+                        goals_probabilities.optimum_trajectory[goal_and_type] = opt_traj
+                        goals_probabilities.optimum_plan[goal_and_type] = opt_plan
+                        opt_maneuvers = [type(m).__name__ for m in opt_plan]
+                        logger.info(f"    [OPTIMAL from MCTS] Using MCTS trajectory as benchmark: {opt_maneuvers}")
+                    else:
+                        # Fall back to generating from initial position
+                        logger.info(f"    [OPTIMAL from INITIAL pos] Generating benchmark trajectory...")
+                        opt_trajectories, opt_plans = self._generator.generate(
+                            agent_id, frame_ini, goal, visible_region
+                        )
 
-                    if len(opt_trajectories) == 0:
-                        raise RuntimeError(f"No optimal paths found to {goal}")
+                        if len(opt_trajectories) == 0:
+                            raise RuntimeError(f"No optimal paths found to {goal}")
 
-                    # Log the optimal plan
-                    opt_maneuvers = [type(m).__name__ for m in opt_plans[0]]
-                    logger.info(f"    [OPTIMAL from INITIAL pos] Result: {opt_maneuvers}")
+                        # Log the optimal plan
+                        opt_maneuvers = [type(m).__name__ for m in opt_plans[0]]
+                        logger.info(f"    [OPTIMAL from INITIAL pos] Result: {opt_maneuvers}")
 
-                    # Smooth the optimal trajectory
-                    opt_traj = opt_trajectories[0]
-                    opt_traj.velocity[0] = frame_ini[agent_id].speed
-                    self._smoother.load_trajectory(opt_traj)
-                    opt_traj.velocity = self._smoother.split_smooth()
+                        # Smooth the optimal trajectory
+                        opt_traj = opt_trajectories[0]
+                        opt_traj.velocity[0] = frame_ini[agent_id].speed
+                        self._smoother.load_trajectory(opt_traj)
+                        opt_traj.velocity = self._smoother.split_smooth()
 
-                    goals_probabilities.optimum_trajectory[goal_and_type] = opt_traj
-                    goals_probabilities.optimum_plan[goal_and_type] = opt_plans[0]
+                        goals_probabilities.optimum_trajectory[goal_and_type] = opt_traj
+                        goals_probabilities.optimum_plan[goal_and_type] = opt_plans[0]
                 else:
                     opt_maneuvers = [type(m).__name__ for m in goals_probabilities.optimum_plan[goal_and_type]]
-                    logger.debug(f"    [OPTIMAL from INITIAL pos] Using cached: {opt_maneuvers}")
+                    logger.debug(f"    [OPTIMAL] Using cached: {opt_maneuvers}")
 
                 opt_trajectory = goals_probabilities.optimum_trajectory[goal_and_type]
 

@@ -425,12 +425,20 @@ class SharedAutonomyAgent(Agent):
         self._update_observations(observation)
 
         # Periodically update predictions and MCTS plan
+        # Flow: non-ego predictions → MCTS → extract trajectory → ego prediction → safety
         self._k += 1
         if self._k >= self._kmax:
             self._goals = self._get_goals(observation)
             if self._goals:
-                self._update_predictions(observation)
+                # Step 1: Run recognition for non-ego agents (MCTS needs these)
+                self._update_non_ego_predictions(observation)
+                # Step 2: Run MCTS (uses non-ego predictions)
                 self._update_mcts_plan(observation)
+                # Step 3: Extract trajectory from MCTS plan
+                self._extract_mcts_trajectory()
+                # Step 4: Run ego recognition (uses MCTS trajectory as benchmark)
+                self._update_ego_prediction(observation)
+                # Step 5: Compare predicted ego vs MCTS for safety
                 self._analyze_safety()
             self._k = 0
 
@@ -534,78 +542,79 @@ class SharedAutonomyAgent(Agent):
             if aid not in frame:
                 self._observations.pop(aid)
 
-    def _update_predictions(self, observation: Observation):
-        """Run goal recognition for all agents including ego (if enabled).
+    def _update_non_ego_predictions(self, observation: Observation):
+        """Run goal recognition for non-ego agents only.
 
-        The prediction level can be configured via prediction_level:
-        - "macro": Use IGP2 GoalRecognition (macro-action level: Continue, Exit, etc.)
-        - "maneuver": Use epistemic ManeuverRecognition (maneuver level: FollowLane, GiveWay, etc.)
-
-        The ego agent's prediction can be done in two modes (set via ego_goal_mode):
-        - "goal_recognition": Predict goal from observed trajectory
-        - "true_goal": Use the actual ego goal, just run A* to find path to it
-
-        Note: MCTS always requires macro-level predictions (GoalsProbabilities) for non-ego
-        agents. When prediction_level="maneuver", we still run macro-level recognition for
-        non-ego agents to feed MCTS, while using maneuver-level for ego.
+        This must run before MCTS, since MCTS needs GoalsProbabilities for non-ego agents.
+        Always uses macro-level recognition (GoalRecognition) regardless of prediction_level,
+        because MCTS requires GoalsProbabilities.
         """
         frame = observation.frame
 
         if not self._goals:
-            logger.debug("No goals found in view, skipping prediction update")
+            logger.debug("No goals found in view, skipping non-ego prediction update")
             return
 
-        # Determine which agents to predict
-        agents_to_predict = list(frame.keys())
-        if not self._predict_ego:
-            agents_to_predict = [aid for aid in agents_to_predict if aid != self.agent_id]
+        # Identify non-ego agents
+        non_ego_agents = [aid for aid in frame.keys() if aid != self.agent_id]
 
-        # Separate ego and non-ego agents
-        non_ego_agents = [aid for aid in agents_to_predict if aid != self.agent_id]
-
-        # Always initialize goal_probabilities for non-ego agents (MCTS needs them)
-        # When prediction_level="maneuver", we still need macro-level predictions for MCTS
+        # Initialize goal_probabilities for non-ego agents (MCTS needs them)
         self._goal_probabilities = {
             aid: GoalsProbabilities(self._goals) for aid in non_ego_agents
         }
 
-        # Initialize maneuver probabilities when using maneuver-level prediction
+        visible_region = Circle(frame[self.agent_id].position, self._view_radius)
+
+        # Run macro-level recognition for each non-ego agent
+        for aid in non_ego_agents:
+            if aid not in self._observations:
+                continue
+            self._run_macro_recognition(aid, frame, visible_region)
+
+    def _update_ego_prediction(self, observation: Observation):
+        """Run goal recognition for the ego agent.
+
+        Called AFTER MCTS, so the MCTS trajectory can be used as the optimal benchmark
+        for maneuver-level recognition (instead of generating from initial position).
+
+        For prediction_level="maneuver": passes the MCTS trajectory to
+        MacroGuidedRecognition via the optimum_trajectories parameter.
+        For prediction_level="macro": uses existing behavior unchanged.
+        """
+        if not self._predict_ego:
+            return
+
+        frame = observation.frame
+
+        if not self._goals:
+            logger.debug("No goals found in view, skipping ego prediction update")
+            return
+
+        if self.agent_id not in self._observations:
+            return
+
+        # Initialize probability containers for ego
         if self._prediction_level == "maneuver":
             self._maneuver_probabilities = {
-                aid: ManeuverProbabilities(self._goals) for aid in agents_to_predict
+                self.agent_id: ManeuverProbabilities(self._goals)
             }
         else:
-            # For macro level, also add ego to goal_probabilities
-            if self.agent_id in agents_to_predict:
-                self._goal_probabilities[self.agent_id] = GoalsProbabilities(self._goals)
+            self._goal_probabilities[self.agent_id] = GoalsProbabilities(self._goals)
 
         visible_region = Circle(frame[self.agent_id].position, self._view_radius)
 
-        # Run goal recognition for each agent
-        for aid in agents_to_predict:
-            if aid not in self._observations:
-                continue
+        # Check if we should use true goal mode
+        use_true_goal = (self._ego_goal_mode == "true_goal" and self.goal is not None)
 
-            # Check if this is ego and we should use true goal mode
-            use_true_goal = (aid == self.agent_id and
-                            self._ego_goal_mode == "true_goal" and
-                            self.goal is not None)
-
-            if use_true_goal:
-                # Use actual ego goal - run A* to find path to true goal
-                self._update_ego_with_true_goal(observation, frame, visible_region)
-            elif aid == self.agent_id:
-                # Ego prediction based on prediction_level
-                if self._prediction_level == "macro":
-                    self._run_macro_recognition(aid, frame, visible_region)
-                else:
-                    self._run_maneuver_recognition(aid, frame, visible_region)
-            else:
-                # Non-ego: always use macro-level recognition (MCTS needs GoalsProbabilities)
-                self._run_macro_recognition(aid, frame, visible_region)
-                # # Additionally run maneuver recognition if prediction_level is maneuver
-                # if self._prediction_level == "maneuver":
-                #     self._run_maneuver_recognition(aid, frame, visible_region)
+        if use_true_goal:
+            self._update_ego_with_true_goal(observation, frame, visible_region)
+        elif self._prediction_level == "macro":
+            self._run_macro_recognition(self.agent_id, frame, visible_region)
+        else:
+            # Maneuver-level: pass MCTS trajectory as optimal benchmark
+            optimum_dict = self._build_mcts_optimum_dict()
+            self._run_maneuver_recognition(self.agent_id, frame, visible_region,
+                                           optimum_trajectories=optimum_dict)
 
     def _run_macro_recognition(self, aid: int, frame: Dict, visible_region: Circle):
         """Run macro-action level goal recognition (IGP2).
@@ -632,7 +641,8 @@ class SharedAutonomyAgent(Agent):
         except Exception as e:
             logger.debug(f"Macro-level recognition failed for agent {aid}: {e}")
 
-    def _run_maneuver_recognition(self, aid: int, frame: Dict, visible_region: Circle):
+    def _run_maneuver_recognition(self, aid: int, frame: Dict, visible_region: Circle,
+                                   optimum_trajectories: Dict = None):
         """Run maneuver-level goal recognition using macro-guided approach.
 
         This uses MacroGuidedRecognition which:
@@ -643,6 +653,15 @@ class SharedAutonomyAgent(Agent):
 
         The result provides maneuver-level granularity while leveraging the
         well-tested macro-action applicability logic.
+
+        Args:
+            aid: Agent ID
+            frame: Current frame
+            visible_region: Visible region constraint
+            optimum_trajectories: Optional dict mapping (goal, None) -> (trajectory, plan).
+                When provided, used as the optimal benchmark in MacroGuidedRecognition
+                instead of generating from frame_ini. Only goals with entries use the
+                pre-computed optimal; others fall back to generator-based.
         """
         try:
             self._macro_guided_recognition.update_goals_probabilities(
@@ -652,7 +671,8 @@ class SharedAutonomyAgent(Agent):
                 frame_ini=self._observations[aid][1],
                 frame=frame,
                 visible_region=visible_region,
-                open_loop=(aid != self.agent_id)
+                open_loop=(aid != self.agent_id),
+                optimum_trajectories=optimum_trajectories
             )
 
             if aid == self.agent_id:
@@ -713,6 +733,9 @@ class SharedAutonomyAgent(Agent):
                 # Maneuver-level: Use ManeuverProbabilities and MacroGuidedRecognition
                 ego_maneuver_probs = ManeuverProbabilities([self.goal])
 
+                # Pass MCTS trajectory as optimal benchmark if available
+                optimum_dict = self._build_mcts_optimum_dict()
+
                 self._macro_guided_recognition.update_goals_probabilities(
                     goals_probabilities=ego_maneuver_probs,
                     observed_trajectory=self._observations[self.agent_id][0],
@@ -720,7 +743,8 @@ class SharedAutonomyAgent(Agent):
                     frame_ini=self._observations[self.agent_id][1],
                     frame=frame,
                     visible_region=visible_region,
-                    open_loop=False
+                    open_loop=False,
+                    optimum_trajectories=optimum_dict
                 )
 
                 # Set probability to 1.0 for the true goal
@@ -779,6 +803,89 @@ class SharedAutonomyAgent(Agent):
             self._mcts_macro_actions = []
             self._mcts_maneuvers = []
             self._mcts_trajectory = None
+
+    def _extract_mcts_trajectory(self):
+        """Build a VelocityTrajectory from the instantiated MCTS macro actions.
+
+        Iterates over self._mcts_macro_actions, concatenates their trajectories,
+        smooths the result, and stores it in self._mcts_trajectory.
+        """
+        if not self._mcts_macro_actions:
+            self._mcts_trajectory = None
+            return
+
+        try:
+            points = None
+            velocity = None
+            for macro_action in self._mcts_macro_actions:
+                traj = macro_action.get_trajectory()
+                if points is None:
+                    points = traj.path.copy()
+                    velocity = traj.velocity.copy()
+                else:
+                    points = np.append(points, traj.path[1:], axis=0)
+                    velocity = np.append(velocity, traj.velocity[1:], axis=0)
+
+            if points is not None and len(points) > 0:
+                combined = VelocityTrajectory(points, velocity)
+                self._smoother.load_trajectory(combined)
+                combined.velocity = self._smoother.split_smooth()
+                self._mcts_trajectory = combined
+                logger.debug(f"Extracted MCTS trajectory: {len(points)} points")
+            else:
+                self._mcts_trajectory = None
+        except Exception as e:
+            logger.debug(f"Failed to extract MCTS trajectory: {e}")
+            self._mcts_trajectory = None
+
+    def _build_mcts_optimum_dict(self) -> Optional[Dict]:
+        """Build a dict mapping (goal, None) -> (trajectory, plan) for the ego's true goal.
+
+        MCTS only plans for one goal (the ego's true goal). This dict is passed to
+        MacroGuidedRecognition so that the MCTS trajectory is used as the optimal
+        benchmark for that goal. Other goals fall back to the generator-based optimal.
+
+        Returns:
+            Dict mapping (goal, None) -> (VelocityTrajectory, List[Maneuver]) for the
+            true goal, or None if MCTS trajectory is not available.
+        """
+        if self._mcts_trajectory is None or self.goal is None:
+            return None
+
+        # Build a flat maneuver plan from the MCTS macro actions
+        mcts_maneuver_plan = []
+        for ma_maneuvers in self._mcts_maneuvers:
+            mcts_maneuver_plan.extend(ma_maneuvers)
+
+        if not mcts_maneuver_plan:
+            return None
+
+        # Map only the true goal (MCTS only plans for one goal)
+        # Other goals will fall back to generator-based optimal in MacroGuidedRecognition
+        optimum_dict = {}
+        for goal_key in [(self.goal, None)]:
+            optimum_dict[goal_key] = (self._mcts_trajectory, mcts_maneuver_plan)
+
+        logger.debug(f"Built MCTS optimum dict for true goal "
+                     f"({len(mcts_maneuver_plan)} maneuvers)")
+        return optimum_dict
+
+    @staticmethod
+    def _is_same_goal(goal_a: Goal, goal_b: Goal, tolerance: float = 2.0) -> bool:
+        """Compare two goals by center position with tolerance.
+
+        Args:
+            goal_a: First goal
+            goal_b: Second goal
+            tolerance: Maximum distance (meters) between centers to consider same
+
+        Returns:
+            True if goals are close enough to be considered the same
+        """
+        try:
+            return np.allclose(goal_a.center, goal_b.center, atol=tolerance)
+        except (AttributeError, TypeError):
+            return False
 
     # Mapping from class names to MacroActionFactory registered names
     _MA_CLASS_TO_FACTORY_NAME = {
