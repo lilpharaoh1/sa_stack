@@ -896,36 +896,60 @@ class PredictionVisualizer:
         self._display.blit(text, (panel_x, y_offset))
         y_offset += line_height + 2
 
-        if self._mcts_plan:
-            for i, ma in enumerate(self._mcts_plan[:4]):  # Limit to 4 macro-actions
-                ma_name = self._get_macro_action_name(ma)
+        if self._prediction_level == "maneuver":
+            # Show flat maneuver list (same format as predicted maneuvers)
+            mcts_maneuver_names = []
+            for ma_maneuvers in self._mcts_maneuvers:
+                for m in ma_maneuvers:
+                    mcts_maneuver_names.append(type(m).__name__)
 
-                # Check if this action type is missing from predicted
-                is_missing = False
-                if self._safety_analysis and hasattr(self._safety_analysis, 'missing_actions'):
-                    if ma_name in self._safety_analysis.missing_actions:
-                        is_missing = True
-
-                color = self.COLOR_CRITICAL if is_missing else self.COLOR_MCTS_TRAJECTORY
-                label = f"{i+1}. {ma_name}" + (" !" if is_missing else "")
-                text = self._font_small.render(label, True, color)
-                self._display.blit(text, (panel_x + 3, y_offset))
-                y_offset += line_height - 2
-
-                # Show maneuvers for this MCTS macro-action (if available)
-                mcts_maneuvers = self._get_mcts_maneuvers(i)
-                if mcts_maneuvers:
-                    maneuver_names = [type(m).__name__ for m in mcts_maneuvers[:3]]
-                    maneuver_str = " > ".join(maneuver_names)
-                    if len(maneuver_str) > 30:
-                        maneuver_str = maneuver_str[:27] + "..."
-                    man_text = self._font_small.render(f"   [{maneuver_str}]", True, (160, 120, 180))
-                    self._display.blit(man_text, (panel_x + 3, y_offset))
+            if mcts_maneuver_names:
+                for i, man_name in enumerate(mcts_maneuver_names[:6]):
+                    label = f"{i+1}. {man_name}"
+                    text = self._font_small.render(label, True, self.COLOR_MCTS_TRAJECTORY)
+                    self._display.blit(text, (panel_x + 5, y_offset))
                     y_offset += line_height - 2
+                if len(mcts_maneuver_names) > 6:
+                    text = self._font_small.render(
+                        f"   ... +{len(mcts_maneuver_names) - 6} more",
+                        True, (160, 120, 180))
+                    self._display.blit(text, (panel_x + 5, y_offset))
+                    y_offset += line_height - 2
+            else:
+                text = self._font_small.render("  (no MCTS plan)", True, (120, 120, 120))
+                self._display.blit(text, (panel_x, y_offset))
+                y_offset += line_height
         else:
-            text = self._font_small.render("  (no MCTS plan)", True, (120, 120, 120))
-            self._display.blit(text, (panel_x, y_offset))
-            y_offset += line_height
+            if self._mcts_plan:
+                for i, ma in enumerate(self._mcts_plan[:4]):  # Limit to 4 macro-actions
+                    ma_name = self._get_macro_action_name(ma)
+
+                    # Check if this action type is missing from predicted
+                    is_missing = False
+                    if self._safety_analysis and hasattr(self._safety_analysis, 'missing_actions'):
+                        if ma_name in self._safety_analysis.missing_actions:
+                            is_missing = True
+
+                    color = self.COLOR_CRITICAL if is_missing else self.COLOR_MCTS_TRAJECTORY
+                    label = f"{i+1}. {ma_name}" + (" !" if is_missing else "")
+                    text = self._font_small.render(label, True, color)
+                    self._display.blit(text, (panel_x + 3, y_offset))
+                    y_offset += line_height - 2
+
+                    # Show maneuvers for this MCTS macro-action (if available)
+                    mcts_maneuvers = self._get_mcts_maneuvers(i)
+                    if mcts_maneuvers:
+                        maneuver_names = [type(m).__name__ for m in mcts_maneuvers[:3]]
+                        maneuver_str = " > ".join(maneuver_names)
+                        if len(maneuver_str) > 30:
+                            maneuver_str = maneuver_str[:27] + "..."
+                        man_text = self._font_small.render(f"   [{maneuver_str}]", True, (160, 120, 180))
+                        self._display.blit(man_text, (panel_x + 3, y_offset))
+                        y_offset += line_height - 2
+            else:
+                text = self._font_small.render("  (no MCTS plan)", True, (120, 120, 120))
+                self._display.blit(text, (panel_x, y_offset))
+                y_offset += line_height
 
         y_offset += 6
 

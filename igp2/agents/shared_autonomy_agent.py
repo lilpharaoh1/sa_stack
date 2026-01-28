@@ -93,9 +93,10 @@ class SequenceDifference:
 class SafetyAnalysis:
     """Results of comparing predicted plan vs MCTS optimal plan.
 
-    Comparison happens at two levels:
-    - Macro-actions: High-level actions like Continue, Exit, ChangeLane, StopMA
-    - Maneuvers: Low-level actions like FollowLane, Turn, GiveWay, Stop
+    When prediction_level="macro", sequence comparison uses macro-action names
+    (Continue, Exit, etc.). When prediction_level="maneuver", it uses maneuver
+    names (FollowLane, Turn, GiveWay, etc.) so both sides are at the same
+    granularity.
 
     Sequence comparison:
     - sequence_differences: List of differences at each position where plans diverge
@@ -104,10 +105,10 @@ class SafetyAnalysis:
     is_safe: bool
     intervention_type: InterventionType
     message: str
-    # Macro-action level
-    predicted_actions: List[str]  # MacroAction types in predicted plan
-    optimal_actions: List[str]    # MacroAction types in MCTS plan
-    missing_actions: List[str]    # MacroActions in optimal but not in predicted (set-based)
+    # Sequence-level (macro-actions for "macro" level, maneuvers for "maneuver" level)
+    predicted_actions: List[str]  # Action types in predicted plan
+    optimal_actions: List[str]    # Action types in MCTS plan
+    missing_actions: List[str]    # Actions in optimal but not in predicted (set-based)
     # Sequence-level comparison
     sequence_differences: List[SequenceDifference]  # Differences at each position
     first_divergence: int         # Position of first difference (-1 if identical)
@@ -995,37 +996,39 @@ class SharedAutonomyAgent(Agent):
         all_plans = ego_probs.all_plans.get((predicted_goal, None), [])
         predicted_plan = all_plans[0] if all_plans and len(all_plans) > 0 else []
 
+        # Extract maneuvers from MCTS plan (needed for both levels)
+        mcts_maneuvers = self._extract_maneuvers_from_list(self._mcts_maneuvers)
+
         # Extract action/maneuver names based on prediction level
         if self._prediction_level == "macro":
             # all_plans is List[List[MacroAction]]
             predicted_actions = [type(ma).__name__ for ma in predicted_plan] if predicted_plan else []
             # Extract maneuvers from macro-actions
             predicted_maneuvers = self._extract_maneuvers_from_plan(predicted_plan)
+
+            # Get MCTS optimal plan macro-action names (MCTSAction wrappers)
+            optimal_actions = []
+            for ma in self._mcts_plan:
+                if hasattr(ma, 'macro_action_type'):
+                    optimal_actions.append(ma.macro_action_type.__name__)
+                else:
+                    optimal_actions.append(type(ma).__name__)
         else:
             # all_plans is List[List[Maneuver]] at maneuver level
-            # No macro-actions, just maneuvers
-            predicted_actions = []  # No macro-actions in maneuver-level prediction
+            # Compare at the maneuver level, not macro-action level
             predicted_maneuvers = [type(m).__name__ for m in predicted_plan] if predicted_plan else []
+            predicted_actions = predicted_maneuvers
+            optimal_actions = mcts_maneuvers
             logger.debug(f"Maneuver-level predicted sequence: {predicted_maneuvers}")
+            logger.debug(f"Maneuver-level MCTS sequence: {mcts_maneuvers}")
 
-        # Get MCTS optimal plan macro-action names (MCTSAction wrappers)
-        optimal_actions = []
-        for ma in self._mcts_plan:
-            if hasattr(ma, 'macro_action_type'):
-                optimal_actions.append(ma.macro_action_type.__name__)
-            else:
-                optimal_actions.append(type(ma).__name__)
-
-        # Analyze differences at macro-action level (set-based)
+        # Analyze differences (macro-action level for "macro", maneuver level for "maneuver")
         missing_actions = self._find_missing_macro_actions(predicted_actions, optimal_actions)
 
         # Analyze sequence differences (position-based)
         sequence_differences, first_divergence = self._compare_action_sequences(
             predicted_actions, optimal_actions
         )
-
-        # Extract maneuvers from MCTS plan
-        mcts_maneuvers = self._extract_maneuvers_from_list(self._mcts_maneuvers)
 
         # Analyze differences at maneuver level (safety-critical maneuvers)
         missing_maneuvers = self._find_missing_safety_maneuvers(predicted_maneuvers, mcts_maneuvers)
@@ -1036,10 +1039,11 @@ class SharedAutonomyAgent(Agent):
         if self._prediction_level == "maneuver":
             gw_analysis = self._macro_guided_recognition.get_give_way_analysis(ego_probs)
 
-            # If MCTS plan has GiveWay but driver's best-matching plan doesn't,
-            # that's a safety concern regardless of what maneuvers are in the predicted list
+            # If MCTS plan has GiveWay but predicted plan doesn't,
+            # and trajectory analysis confirms driver is not yielding, flag it
             mcts_has_gw = any(m in ['GiveWay', 'GiveWayCL'] for m in mcts_maneuvers)
-            if mcts_has_gw and gw_analysis and not gw_analysis['best_plan_has_give_way']:
+            predicted_has_gw = any(m in ['GiveWay', 'GiveWayCL'] for m in predicted_maneuvers)
+            if mcts_has_gw and not predicted_has_gw and gw_analysis and not gw_analysis['best_plan_has_give_way']:
                 if 'GiveWay' not in missing_maneuvers:
                     missing_maneuvers.append('GiveWay')
                 logger.debug(f"GiveWay analysis: MCTS requires yield, driver not yielding "
@@ -1280,15 +1284,14 @@ class SharedAutonomyAgent(Agent):
         if any(m in missing_maneuvers for m in ["Stop", "StopCL"]):
             return InterventionType.STOP, "STOP REQUIRED - Missing stop maneuver!"
 
-        # Check GiveWay using similarity-based analysis (when available)
-        if gw_analysis and not gw_analysis['best_plan_has_give_way']:
-            # If we have high confidence that driver is not yielding
-            if gw_analysis['give_way_confidence'] > 0.5:
-                msg = f"YIELD REQUIRED - {gw_analysis['analysis']}"
-                return InterventionType.YIELD, msg
-
+        # Check for missing GiveWay maneuvers
         if any(m in missing_maneuvers for m in ["GiveWay", "GiveWayCL"]):
-            return InterventionType.YIELD, "YIELD REQUIRED - Give way to other traffic!"
+            # Use GiveWay analysis for a more detailed message if available
+            if gw_analysis and gw_analysis['give_way_confidence'] > 0.5:
+                msg = f"YIELD REQUIRED - {gw_analysis['analysis']}"
+            else:
+                msg = "YIELD REQUIRED - Give way to other traffic!"
+            return InterventionType.YIELD, msg
 
         # Check for early sequence divergences (non-critical)
         if sequence_differences:
