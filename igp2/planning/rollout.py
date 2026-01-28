@@ -145,6 +145,13 @@ class Rollout:
                     continue
 
                 new_state = agent.next_state(current_observation)
+
+                # print("\n")
+                # print(f"Agent {agent} - > t = {t}")
+                # print(f"current_state: {current_frame[agent_id]}")
+                # print(f"new_state: {new_state}")
+                # print("\n")
+
                 agent.trajectory_cl.add_state(new_state, reload_path=False)
                 current_frame[agent_id] = new_state
 
@@ -158,6 +165,7 @@ class Rollout:
                 goal_reached = ego.goal.reached(ego.state.position)
 
             if plot_rollout and t % 5 == 0:
+            # if t % 25 == 0:
                 self.plot(t)
                 plt.show()
 

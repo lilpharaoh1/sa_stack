@@ -68,6 +68,7 @@ class WaypointManeuver(ClosedLoopManeuver, abc.ABC):
         super().__init__(config, agent_id, frame, scenario_map)
         self._controller = PIDController(1 / self.config.fps, self.LATERAL_ARGS, self.LONGITUDINAL_ARGS)
         self._acc = AdaptiveCruiseControl(1 / self.config.fps, **self.ACC_ARGS)
+        self._open_loop = False  # When True, skip reactive behaviors (ACC, collision avoidance, yielding)
 
     def get_target_waypoint(self, state: AgentState):
         """ Get the index of the target waypoint in the reference trajectory"""
@@ -107,6 +108,10 @@ class WaypointManeuver(ClosedLoopManeuver, abc.ABC):
     def _get_acceleration(self, target_velocity: float, frame: Dict[int, AgentState]):
         state = frame[self.agent_id]
         acceleration = target_velocity - state.speed
+
+        # In open-loop mode, skip all traffic-reactive behavior
+        if self._open_loop:
+            return acceleration
 
         # Original lane-based vehicle-in-front check
         vehicle_in_front, dist, _ = self.get_vehicle_in_front(self.agent_id, frame, self.lane_sequence)
@@ -361,6 +366,10 @@ class GiveWayCL(GiveWay, WaypointManeuver):
         return max(time_until_clear, blocked_time) > 0
 
     def next_action(self, observation: Observation) -> Action:
+        # In open-loop mode, skip junction-stopping logic entirely
+        if self._open_loop:
+            return WaypointManeuver.next_action(self, observation)
+
         state = observation.frame[self.agent_id]
         target_wp_idx, closest_idx = self.get_target_waypoint(state)
         target_waypoint = self.trajectory.path[target_wp_idx]
@@ -388,6 +397,11 @@ class StopCL(Stop, WaypointManeuver):
         super(StopCL, self).__init__(config, agent_id, frame, scenario_map)
 
     def next_action(self, observation: Observation) -> Action:
+        # In open-loop mode, follow the trajectory velocity profile
+        # (already decelerates) without forcing a stop hold
+        if self._open_loop:
+            return WaypointManeuver.next_action(self, observation)
+
         state = observation.frame[self.agent_id]
         target_wp_idx, closest_idx = self.get_target_waypoint(state)
         target_waypoint = self.trajectory.path[target_wp_idx]
@@ -401,6 +415,10 @@ class StopCL(Stop, WaypointManeuver):
         return self._get_action(target_waypoint, target_velocity, observation)
 
     def done(self, observation: Observation) -> bool:
+        # In open-loop mode, complete when reaching end of trajectory
+        # instead of waiting for stop_duration to elapse
+        if self._open_loop:
+            return WaypointManeuver.done(self, observation)
         return self.__stop_duration >= self.config.stop_duration * self.config.fps
 
     def reset(self):

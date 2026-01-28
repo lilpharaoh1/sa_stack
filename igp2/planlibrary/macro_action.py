@@ -215,6 +215,23 @@ class MacroAction(abc.ABC):
                 np.append(velocity, trajectory.velocity[1:], axis=0)
         return VelocityTrajectory(points, velocity)
 
+    def set_open_loop(self, open_loop: bool = True):
+        """ Set whether closed-loop maneuvers should execute in open-loop mode.
+
+        When True, maneuvers follow the pre-computed trajectory waypoints via PID
+        control but skip all reactive behaviors (ACC, collision avoidance, GiveWay
+        junction stopping). The agent follows its planned path regardless of
+        surrounding traffic.
+
+        Args:
+            open_loop: If True, disable traffic-reactive behaviors.
+        """
+        if self._maneuvers is None:
+            return
+        for man in self._maneuvers:
+            if hasattr(man, '_open_loop'):
+                man._open_loop = open_loop
+
     def to_closed_loop(self):
         """ Convert an open-loop macro action to closed-loop.
         If already closed-loop then this will reset the macro action's state.
@@ -613,6 +630,7 @@ class Exit(MacroAction):
 
         in_junction = self.scenario_map.junction_at(state.position, max_distance=0.1) is not None
         current_lane = self._find_current_lane(state, in_junction)
+        # print(f"\nIn Exit, current_lane = {current_lane} {current_lane.midline.coords[0], current_lane.midline.coords[-1]}")
         if current_lane is None:
             raise RuntimeError(f"Exit.get_maneuvers: Could not find current lane at {state.position}")
         current_distance = current_lane.distance_at(state.position)
@@ -621,6 +639,20 @@ class Exit(MacroAction):
         # logger.debug(f"Start Point) {state.position}")
 
         connecting_lane = current_lane
+        if in_junction:
+            # When already inside the junction, best_lane_at may return the
+            # wrong connecting road (it matches position + heading, ignoring
+            # the turn target).  Go back to the predecessor (approach road)
+            # and select the successor whose exit matches turn_target.
+            if (current_lane.link.predecessor is not None
+                    and len(current_lane.link.predecessor) == 1
+                    and current_lane.link.predecessor[0].link.successor is not None):
+                correct = self._nearest_lane_to_goal(
+                    current_lane.link.predecessor[0].link.successor,
+                    state.position)
+                if correct is not None:
+                    connecting_lane = correct
+
         if not in_junction:
             # Follow lane until start of turn if outside of give-way distance
             if current_lane.length - current_distance > GiveWay.GIVE_WAY_DISTANCE + Maneuver.POINT_SPACING:
@@ -640,7 +672,7 @@ class Exit(MacroAction):
                 maneuvers.append(man)
                 frame = Maneuver.play_forward_maneuver(self.agent_id, self.scenario_map, frame, man)
 
-            connecting_lane = self._find_connecting_lane(current_lane)
+            connecting_lane = self._find_connecting_lane(current_lane, state.position)
 
             if connecting_lane is None:
                 # No connecting lane found - just drive to the end of the current lane
@@ -719,13 +751,37 @@ class Exit(MacroAction):
 
         return maneuvers
 
-    def _nearest_lane_to_goal(self, lane_list: List[Lane]) -> Lane:
+    def _nearest_lane_to_goal(self, lane_list: List[Lane],
+                              agent_position: np.ndarray = None) -> Lane:
+        """Find the connecting lane whose exit endpoint is closest to the turn target.
+
+        Args:
+            lane_list: Candidate connecting lanes (successors of the approach lane).
+            agent_position: Position of the agent on the approach lane. Used to
+                determine which endpoint of each connecting lane is the exit
+                (the one furthest from the approaching agent). When None, falls
+                back to checking both endpoints.
+        """
         best_lane = None
         best_distance = np.inf
         for connecting_lane in lane_list:
-            distance = min(np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[-1])), \
-                                np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[0])))
-            # distance = np.linalg.norm(self.turn_target - np.array(connecting_lane.midline.coords[-1]))
+            start = np.array(connecting_lane.midline.coords[0])
+            end = np.array(connecting_lane.midline.coords[-1])
+
+            if agent_position is not None:
+                # The exit endpoint is the one furthest from the approaching agent.
+                # Midline coordinate order varies with the road's reference line
+                # direction, so we cannot assume coords[-1] is always the exit.
+                if np.linalg.norm(end - agent_position) >= np.linalg.norm(start - agent_position):
+                    exit_point = end
+                else:
+                    exit_point = start
+                distance = np.linalg.norm(self.turn_target - exit_point)
+            else:
+                # Fallback: check both endpoints
+                distance = min(np.linalg.norm(self.turn_target - end),
+                               np.linalg.norm(self.turn_target - start))
+
             if distance < self.TURN_TARGET_THRESHOLD and distance < best_distance:
                 best_lane = connecting_lane
                 best_distance = distance
@@ -748,10 +804,11 @@ class Exit(MacroAction):
 
         return None
 
-    def _find_connecting_lane(self, current_lane: Lane) -> Optional[Lane]:
+    def _find_connecting_lane(self, current_lane: Lane,
+                              agent_position: np.ndarray = None) -> Optional[Lane]:
         if current_lane.link.successor is None:
             return None
-        return self._nearest_lane_to_goal(current_lane.link.successor)
+        return self._nearest_lane_to_goal(current_lane.link.successor, agent_position)
 
     @staticmethod
     def applicable(state: AgentState, scenario_map: Map) -> bool:
