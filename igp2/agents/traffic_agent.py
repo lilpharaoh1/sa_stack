@@ -6,6 +6,7 @@ from igp2.agents.macro_agent import MacroAgent
 from igp2.core.agentstate import AgentState
 from igp2.core.vehicle import Action, Observation, TrajectoryPrediction
 from igp2.core.goal import Goal
+from igp2.core.velocitysmoother import VelocitySmoother
 from igp2.planlibrary.macro_action import MacroAction, Continue, Exit
 from igp2.recognition.astar import AStar
 
@@ -39,6 +40,7 @@ class TrafficAgent(MacroAgent):
         self._astar = AStar(max_iter=1000)
         self._macro_actions = []
         self._open_loop = open_loop
+        self._smoother = VelocitySmoother(vmin_m_s=1, vmax_m_s=10, n=10, amax_m_s2=5, lambda_acc=10)
         if macro_actions is not None and macro_actions:
             self.set_macro_actions(macro_actions)
         self._current_macro_id = 0
@@ -76,6 +78,7 @@ class TrafficAgent(MacroAgent):
             macro.to_closed_loop()
             if self._open_loop:
                 macro.set_open_loop(True)
+            macro.smooth_velocities(self._smoother)
         self._macro_actions = new_macros
         self._current_macro = new_macros[0]
 
@@ -106,6 +109,7 @@ class TrafficAgent(MacroAgent):
             macro.to_closed_loop()
             if self._open_loop:
                 macro.set_open_loop(True)
+            macro.smooth_velocities(self._smoother)
         self._current_macro = self._macro_actions[0]
 
     def done(self, observation: Observation) -> bool:

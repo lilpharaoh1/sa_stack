@@ -102,7 +102,18 @@ class Tree:
             #  As states are not explicitly represented in nodes, sometimes termination can occur even though the
             #  current node is non-terminal due to a collision. In this case, we want to force using the reward
             #  to update the Q-values for the occurrence of a collision.
-            q = r if child is None or child.is_leaf or force_reward else np.max(child.q_values)
+            if child is None or child.is_leaf or force_reward:
+                q = r
+            else:
+                # Only consider Q-values for actions that have been visited.
+                # Unvisited actions have Q=0 from initialization, which would incorrectly
+                # inflate the max Q-value when the actual rewards are negative.
+                visited_mask = child.action_visits > 0
+                if np.any(visited_mask):
+                    q = np.max(child.q_values[visited_mask])
+                else:
+                    # Fall back to raw reward if no actions have been visited
+                    q = r
             node.q_values[idx] += (q - node.q_values[idx]) / action_visit
             node.store_q_values()
 

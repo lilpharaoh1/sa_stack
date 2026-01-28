@@ -191,4 +191,92 @@ def plot_recognition_debug(
         fontsize=12
     )
     plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-    plt.show()
+
+
+def plot_velocity_profiles_debug(
+    agent_id: int,
+    opt_trajectory: VelocityTrajectory,
+    opt_plan: List[Maneuver],
+    all_trajectories: List[VelocityTrajectory],
+    all_plans: List[List[Maneuver]],
+    observed_trajectory: Optional[Trajectory] = None,
+):
+    """Plot velocity profiles for the optimal and candidate trajectories.
+
+    Creates a separate figure showing velocity (m/s) vs path length (m)
+    for the optimal trajectory and each candidate. Maneuver boundaries
+    are marked with vertical dashed lines.
+
+    Args:
+        agent_id: The ego agent ID.
+        opt_trajectory: The optimal (benchmark) trajectory.
+        opt_plan: The maneuver plan for the optimal trajectory.
+        all_trajectories: Candidate trajectories from current position.
+        all_plans: Maneuver plans for each candidate trajectory.
+        observed_trajectory: The ego's observed trajectory so far.
+    """
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    # Plot observed trajectory velocity profile
+    if observed_trajectory is not None and hasattr(observed_trajectory, 'velocity') \
+            and len(observed_trajectory.velocity) > 1:
+        obs_pathlength = _compute_pathlength(observed_trajectory.path)
+        ax.plot(obs_pathlength, observed_trajectory.velocity,
+                color="grey", linewidth=2.5, alpha=0.8, label="Observed")
+
+    # Plot optimal trajectory velocity profile
+    if opt_trajectory is not None and len(opt_trajectory.velocity) > 1:
+        opt_pathlength = _compute_pathlength(opt_trajectory.path)
+        opt_label = "Optimal"
+        if opt_plan is not None:
+            names = [type(m).__name__ for m in opt_plan]
+            opt_label = f"Optimal: {names}"
+        ax.plot(opt_pathlength, opt_trajectory.velocity,
+                color="black", linewidth=2, linestyle="--", label=opt_label)
+
+        # Mark maneuver boundaries on optimal
+        _plot_maneuver_boundaries(ax, opt_plan, color="black", alpha=0.3)
+
+    # Color cycle for candidates
+    cmap = plt.cm.get_cmap("tab10")
+
+    # Plot each candidate velocity profile
+    for i, (traj, plan) in enumerate(zip(all_trajectories, all_plans)):
+        if traj is None or len(traj.velocity) < 2:
+            continue
+        pathlength = _compute_pathlength(traj.path)
+        names = [type(m).__name__ for m in plan]
+        color = cmap(i % 10)
+        ax.plot(pathlength, traj.velocity,
+                color=color, linewidth=1.5, alpha=0.85,
+                label=f"Candidate {i}: {names}")
+
+    ax.set_xlabel("Path length (m)")
+    ax.set_ylabel("Velocity (m/s)")
+    ax.set_title(f"Agent {agent_id} — Velocity Profiles")
+    ax.legend(fontsize=8, loc="best")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+
+def _compute_pathlength(path: np.ndarray) -> np.ndarray:
+    """Compute cumulative path length from a 2D path array."""
+    if len(path) < 2:
+        return np.array([0.0])
+    diffs = np.linalg.norm(np.diff(path, axis=0), axis=1)
+    return np.concatenate([[0.0], np.cumsum(diffs)])
+
+
+def _plot_maneuver_boundaries(ax: plt.Axes, plan: List[Maneuver],
+                               color: str = "black", alpha: float = 0.3):
+    """Plot vertical dashed lines at maneuver boundaries along path length."""
+    if plan is None:
+        return
+    cumulative = 0.0
+    for maneuver in plan[:-1]:  # skip last (no boundary after it)
+        if maneuver.trajectory is None or len(maneuver.trajectory.path) < 2:
+            continue
+        path = maneuver.trajectory.path
+        segment_len = np.sum(np.linalg.norm(np.diff(path, axis=0), axis=1))
+        cumulative += segment_len
+        ax.axvline(x=cumulative, color=color, linestyle=":", alpha=alpha)

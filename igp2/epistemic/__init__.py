@@ -34,6 +34,19 @@ from igp2.epistemic.trajectory_similarity import (
     combined_similarity,
     trajectory_overlap_similarity
 )
+from igp2.epistemic.intervention_optimizer import (
+    InterventionOptimizer,
+    GradientInterventionOptimizer,
+    InterventionResult,
+    OptimizerConfig,
+    compute_intervention
+)
+from igp2.epistemic.plot_intervention import (
+    plot_intervention_result,
+    plot_intervention_comparison,
+    plot_velocity_colored_trajectory,
+    create_intervention_animation_frames
+)
 
 __all__ = [
     'ManeuverFactory',
@@ -46,5 +59,14 @@ __all__ = [
     'path_similarity',
     'velocity_similarity',
     'combined_similarity',
-    'trajectory_overlap_similarity'
+    'trajectory_overlap_similarity',
+    'InterventionOptimizer',
+    'GradientInterventionOptimizer',
+    'InterventionResult',
+    'OptimizerConfig',
+    'compute_intervention',
+    'plot_intervention_result',
+    'plot_intervention_comparison',
+    'plot_velocity_colored_trajectory',
+    'create_intervention_animation_frames'
 ]

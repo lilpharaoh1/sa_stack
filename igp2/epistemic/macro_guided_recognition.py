@@ -219,7 +219,9 @@ class MacroGuidedRecognition:
 
                 # === DEBUG PLOT ===
                 if self._debug_plot:
-                    from igp2.epistemic.plot_recognition import plot_recognition_debug
+                    from igp2.epistemic.plot_recognition import (
+                        plot_recognition_debug, plot_velocity_profiles_debug
+                    )
                     plot_recognition_debug(
                         scenario_map=self._scenario_map,
                         goal=goal,
@@ -231,6 +233,15 @@ class MacroGuidedRecognition:
                         all_plans=all_plans,
                         observed_trajectory=observed_trajectory,
                     )
+                    plot_velocity_profiles_debug(
+                        agent_id=agent_id,
+                        opt_trajectory=opt_trajectory,
+                        opt_plan=goals_probabilities.optimum_plan[goal_and_type],
+                        all_trajectories=all_trajectories,
+                        all_plans=all_plans,
+                        observed_trajectory=observed_trajectory,
+                    )
+                    plt.show()
 
                 # === STEP 3: Prepend observed trajectory to each candidate ===
                 # This creates: what agent DID + what they would optimally do from here

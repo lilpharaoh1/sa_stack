@@ -215,6 +215,41 @@ class MacroAction(abc.ABC):
                 np.append(velocity, trajectory.velocity[1:], axis=0)
         return VelocityTrajectory(points, velocity)
 
+    def smooth_velocities(self, smoother):
+        """Smooth the velocity profile of all maneuvers using the given VelocitySmoother.
+
+        Builds the combined macro-action trajectory, smooths velocities, then
+        propagates the smoothed values back to individual maneuver trajectories.
+        This ensures execution uses the same velocity profiles as prediction.
+
+        Args:
+            smoother: A VelocitySmoother instance to use for smoothing.
+        """
+        if self._maneuvers is None or len(self._maneuvers) == 0:
+            return
+
+        traj = self.get_trajectory()
+        if traj is None or len(traj.velocity) < 2:
+            return
+
+        traj.velocity[0] = self.start_frame[self.agent_id].speed
+        smoother.load_trajectory(traj)
+        smoothed = smoother.split_smooth()
+
+        # Propagate smoothed velocities back to individual maneuver trajectories.
+        # get_trajectory() skips the first point of each subsequent maneuver,
+        # so the boundary point is shared between adjacent maneuvers.
+        idx = 0
+        for i, maneuver in enumerate(self._maneuvers):
+            man_len = len(maneuver.trajectory.velocity)
+            if i == 0:
+                maneuver.trajectory.velocity = smoothed[0:man_len]
+                idx = man_len
+            else:
+                start = idx - 1  # overlap with previous maneuver's last point
+                maneuver.trajectory.velocity = smoothed[start:start + man_len]
+                idx = start + man_len
+
     def set_open_loop(self, open_loop: bool = True):
         """ Set whether closed-loop maneuvers should execute in open-loop mode.
 

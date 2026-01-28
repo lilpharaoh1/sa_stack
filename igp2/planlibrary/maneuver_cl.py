@@ -84,7 +84,8 @@ class WaypointManeuver(ClosedLoopManeuver, abc.ABC):
     def next_action(self, observation: Observation) -> Action:
         target_wp_idx, closest_idx = self.get_target_waypoint(observation.frame[self.agent_id])
         target_waypoint = self.trajectory.path[target_wp_idx]
-        target_velocity = max(Maneuver.MIN_SPEED, self.trajectory.velocity[closest_idx])
+        # Use velocity from target waypoint (with lookahead) to anticipate upcoming velocity changes
+        target_velocity = max(Maneuver.MIN_SPEED, self.trajectory.velocity[target_wp_idx])
         return self._get_action(target_waypoint, target_velocity, observation)
 
     def _get_action(self, target_waypoint: np.ndarray, target_velocity: float, observation: Observation):

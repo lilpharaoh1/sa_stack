@@ -67,6 +67,17 @@ from igp2.epistemic.maneuver_astar import ManeuverAStar
 from igp2.epistemic.maneuver_recognition import ManeuverRecognition
 from igp2.epistemic.maneuver_probabilities import ManeuverProbabilities
 from igp2.epistemic.macro_guided_recognition import MacroGuidedRecognition
+from igp2.epistemic.intervention_optimizer import (
+    InterventionOptimizer,
+    GradientInterventionOptimizer,
+    InterventionResult,
+    OptimizerConfig,
+    compute_intervention
+)
+from igp2.epistemic.plot_intervention import (
+    plot_intervention_result,
+    plot_intervention_comparison
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +180,7 @@ class SharedAutonomyAgent(Agent):
                  stop_goals: bool = False,
                  predict_ego: bool = True,
                  ego_goal_mode: str = "true_goal",
-                 enable_interventions: bool = False,
+                 enable_interventions: bool = True,
                  prediction_level: str = "maneuver",
                  human: dict = None):
         """Initialize a shared autonomy agent.
@@ -318,6 +329,10 @@ class SharedAutonomyAgent(Agent):
         self._current_message: Optional[DriverMessage] = None
         self._intervention_active = False
 
+        # Intervention optimization
+        self._intervention_optimizer = GradientInterventionOptimizer(cost=self._cost)
+        self._intervention_result: Optional[InterventionResult] = None
+
         # For compatibility
         self._current_macro = None
         self._pgp_control = False
@@ -450,6 +465,7 @@ class SharedAutonomyAgent(Agent):
         # Apply interventions if enabled and needed
         if self._enable_interventions and self._safety_analysis is not None:
             action = self._apply_intervention(action, observation)
+            self.plot_intervention(comparison=True)     # Side-by-side comparison 
 
         return action
 
@@ -957,6 +973,97 @@ class SharedAutonomyAgent(Agent):
 
         return macro_actions, maneuvers_per_ma
 
+    def _compute_trajectory_intervention(self):
+        """Compute minimally adjusted trajectory when predicted and MCTS plans don't match.
+
+        Uses the intervention optimizer to find the smallest adjustment to the predicted
+        trajectory such that the recognition system would classify it as following the
+        MCTS plan instead of the (incorrect) predicted plan.
+
+        The result is stored in self._intervention_result and can be used for:
+        - Understanding how much the driver needs to change their path
+        - Generating smooth corrective steering/acceleration commands
+        - Visualizing the suggested adjustment
+        """
+        self._intervention_result = None
+
+        # Need both predicted and MCTS trajectories
+        if self._mcts_trajectory is None:
+            logger.debug("No MCTS trajectory available for intervention computation")
+            return
+
+        # Get predicted trajectory
+        if self._prediction_level == "macro":
+            ego_probs = self._goal_probabilities.get(self.agent_id)
+        else:
+            ego_probs = self._maneuver_probabilities.get(self.agent_id)
+
+        if ego_probs is None:
+            logger.debug("No ego predictions available for intervention computation")
+            return
+
+        # Get most likely goal and its trajectory
+        predicted_goal, _ = self._get_most_likely_goal(ego_probs)
+        if predicted_goal is None:
+            return
+
+        # Get predicted trajectory (optimum trajectory for predicted goal)
+        # This is the trajectory the driver appears to be following
+        predicted_trajectory = ego_probs.optimum_trajectory.get((predicted_goal, None))
+        if predicted_trajectory is None:
+            # Try to get from all_trajectories
+            all_trajs = ego_probs.all_trajectories.get((predicted_goal, None), [])
+            if all_trajs:
+                predicted_trajectory = all_trajs[0]
+            else:
+                logger.debug("No predicted trajectory available for intervention")
+                return
+
+        # Get optimal trajectory (benchmark from initial position)
+        optimal_trajectory = ego_probs.optimum_trajectory.get((predicted_goal, None))
+        if optimal_trajectory is None and self.goal is not None:
+            # Fall back to MCTS trajectory as optimal
+            optimal_trajectory = self._mcts_trajectory
+
+        if optimal_trajectory is None:
+            logger.debug("No optimal trajectory available for intervention")
+            return
+
+        # Get observed trajectory
+        if self.agent_id not in self._observations:
+            logger.debug("No observed trajectory for intervention computation")
+            return
+
+        observed_trajectory = self._observations[self.agent_id][0]
+
+        # Compute intervention
+        try:
+            self._intervention_result = compute_intervention(
+                observed_trajectory=observed_trajectory,
+                predicted_trajectory=predicted_trajectory,
+                mcts_trajectory=self._mcts_trajectory,
+                optimal_trajectory=optimal_trajectory,
+                goal=self.goal or predicted_goal,
+                cost=self._cost,
+                use_gradient=True  # Use faster gradient-based optimizer
+            )
+
+            if self._intervention_result.success:
+                logger.debug(
+                    f"Intervention computed: "
+                    f"pos_adj={self._intervention_result.position_adjustment:.2f}m, "
+                    f"vel_adj={self._intervention_result.velocity_adjustment:.2f}m/s, "
+                    f"cost: {self._intervention_result.original_cost_diff:.3f} -> "
+                    f"{self._intervention_result.adjusted_cost_diff:.3f} "
+                    f"(MCTS: {self._intervention_result.mcts_cost_diff:.3f})"
+                )
+            else:
+                logger.debug(f"Intervention computation failed: {self._intervention_result.message}")
+
+        except Exception as e:
+            logger.warning(f"Intervention optimization failed: {e}")
+            self._intervention_result = None
+
     def _analyze_safety(self):
         """Compare predicted ego plan vs MCTS optimal plan to assess safety.
 
@@ -967,6 +1074,8 @@ class SharedAutonomyAgent(Agent):
 
         When prediction_level is "maneuver", the predicted plan is directly a maneuver sequence.
         Safety-critical maneuvers like GiveWay and Stop are checked specifically.
+
+        Also computes trajectory intervention when plans don't match.
         """
         # Get predicted ego plan based on prediction level
         if self._prediction_level == "macro":
@@ -1086,6 +1195,10 @@ class SharedAutonomyAgent(Agent):
             )
         else:
             self._current_message = None
+
+        # Compute trajectory intervention when plans don't match
+        if intervention_type != InterventionType.NONE:
+            self._compute_trajectory_intervention()
 
     def _extract_maneuvers_from_plan(self, plan: List[MacroAction]) -> List[str]:
         """Extract all maneuver type names from a plan of macro-actions."""
@@ -1457,6 +1570,7 @@ class SharedAutonomyAgent(Agent):
         self._safety_analysis = None
         self._current_message = None
         self._intervention_active = False
+        self._intervention_result = None
         self._k = 0
 
         # Reset the human agent
@@ -1544,6 +1658,101 @@ class SharedAutonomyAgent(Agent):
     def intervention_active(self) -> bool:
         """Whether an intervention is currently being applied."""
         return self._intervention_active
+
+    @property
+    def intervention_result(self) -> Optional[InterventionResult]:
+        """Result of the trajectory intervention optimization.
+
+        When predicted and MCTS plans don't match, this contains:
+        - success: Whether optimization succeeded
+        - trajectory: The minimally adjusted trajectory
+        - position_adjustment: L2 norm of position changes (meters)
+        - velocity_adjustment: L2 norm of velocity changes (m/s)
+        - original_cost_diff: Cost difference before adjustment
+        - adjusted_cost_diff: Cost difference after adjustment
+        - mcts_cost_diff: Cost difference for MCTS trajectory
+
+        The adjusted trajectory represents the minimal change needed to the
+        driver's predicted path such that the recognition system would
+        classify them as following the MCTS plan instead.
+        """
+        return self._intervention_result
+
+    @property
+    def adjusted_trajectory(self) -> Optional[VelocityTrajectory]:
+        """The minimally adjusted trajectory from intervention optimization.
+
+        This is the trajectory the driver should follow to achieve the MCTS plan
+        with minimal deviation from their current predicted path.
+
+        Returns None if no intervention is needed or optimization failed.
+        """
+        if self._intervention_result is not None and self._intervention_result.success:
+            return self._intervention_result.trajectory
+        return None
+
+    def plot_intervention(self, show: bool = True, comparison: bool = False):
+        """Plot the current intervention result.
+
+        Visualizes the predicted trajectory, MCTS trajectory, adjusted trajectory,
+        and observed history along with velocity profiles.
+
+        Args:
+            show: Whether to call plt.show() (blocking)
+            comparison: If True, use side-by-side comparison view
+
+        Returns:
+            matplotlib Figure, or None if no intervention available
+        """
+        if self._intervention_result is None:
+            logger.debug("No intervention result to plot")
+            return None
+
+        # Get observed trajectory
+        observed = None
+        if self.agent_id in self._observations:
+            observed = self._observations[self.agent_id][0]
+
+        # Get optimal trajectory
+        optimal = None
+        if self._prediction_level == "macro":
+            ego_probs = self._goal_probabilities.get(self.agent_id)
+        else:
+            ego_probs = self._maneuver_probabilities.get(self.agent_id)
+
+        if ego_probs is not None:
+            goal, _ = self._get_most_likely_goal(ego_probs)
+            if goal is not None:
+                optimal = ego_probs.optimum_trajectory.get((goal, None))
+
+        # Get ego position
+        ego_pos = None
+        if observed is not None and len(observed.path) > 0:
+            ego_pos = observed.path[-1]
+
+        if comparison:
+            return plot_intervention_comparison(
+                result=self._intervention_result,
+                scenario_map=self._scenario_map,
+                ego_pos=ego_pos,
+                goal=self.goal,
+                observed_trajectory=observed,
+                title=f"Agent {self.agent_id} Intervention",
+                show=show
+            )
+        else:
+            return plot_intervention_result(
+                result=self._intervention_result,
+                scenario_map=self._scenario_map,
+                ego_pos=ego_pos,
+                goal=self.goal,
+                observed_trajectory=observed,
+                optimal_trajectory=optimal,
+                show_adjustment_vectors=True,
+                show_velocity_profile=True,
+                title=f"Agent {self.agent_id} Intervention",
+                show=show
+            )
 
     @property
     def current_macro(self):

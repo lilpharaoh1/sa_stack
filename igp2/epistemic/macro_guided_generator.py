@@ -26,7 +26,7 @@ from igp2.core.trajectory import VelocityTrajectory
 from igp2.core.agentstate import AgentState
 from igp2.core.goal import Goal, StoppingGoal
 from igp2.core.util import Circle
-from igp2.planlibrary.maneuver import Maneuver, ManeuverConfig, GiveWay
+from igp2.planlibrary.maneuver import Maneuver, ManeuverConfig, GiveWay, FollowLane
 from igp2.planlibrary.macro_action import (
     MacroAction, MacroActionConfig, MacroActionFactory,
     Continue, Exit, ChangeLaneLeft, ChangeLaneRight
@@ -286,6 +286,10 @@ class MacroGuidedSequenceGenerator:
         extended to absorb the removed maneuver's path segment, preventing
         spatial gaps in the combined trajectory.
 
+        Special handling for GiveWay at the start of new_steps:
+        - If base_entry has previous steps, extend the last one
+        - If no previous steps exist, create a FollowLane to bridge the gap
+
         Args:
             base_entry: The entry before adding new_steps
             new_steps: The new maneuver steps to potentially modify
@@ -307,20 +311,28 @@ class MacroGuidedSequenceGenerator:
             # Build variation without this optional type, extending the
             # preceding maneuver's trajectory to cover the gap left by removal.
             filtered_steps = []
+            # Track if we need to extend base_entry's last step (when removing first step)
+            extend_base_entry_last = False
+            removed_first_traj = None
 
-            for step in new_steps:
+            for i, step in enumerate(new_steps):
                 if isinstance(step.maneuver, opt_type):
                     # Extend the preceding step's trajectory to cover this gap
                     removed_traj = step.maneuver.trajectory
                     if filtered_steps and removed_traj is not None and len(removed_traj.path) > 1:
+                        # There's a preceding step in filtered_steps - extend it
                         prev_step = filtered_steps[-1]
                         prev_traj = prev_step.maneuver.trajectory
 
                         if prev_traj is not None:
                             extended_path = np.concatenate(
                                 [prev_traj.path, removed_traj.path[1:]])
-                            extended_vel = np.concatenate(
-                                [prev_traj.velocity, removed_traj.velocity[1:]])
+                            # IMPORTANT: Regenerate velocities using FollowLane-style
+                            # curvature-based calculation, NOT the removed GiveWay's
+                            # low velocity profile. This allows recognition to
+                            # distinguish "with GiveWay" (low speed) from "without
+                            # GiveWay" (high speed) variations.
+                            extended_vel = Maneuver.get_curvature_velocity(extended_path)
                             extended_traj = VelocityTrajectory(
                                 extended_path, extended_vel)
 
@@ -334,7 +346,12 @@ class MacroGuidedSequenceGenerator:
                                 step_index=prev_step.step_index,
                                 total_steps=prev_step.total_steps,
                             )
-                    # else: removed maneuver is first step with no predecessor — drop it
+                    elif i == 0 and removed_traj is not None and len(removed_traj.path) > 1:
+                        # Removed maneuver is first step - need to handle the gap
+                        # Mark that we need to extend base_entry's last step or create bridge
+                        extend_base_entry_last = True
+                        removed_first_traj = removed_traj
+                    # else: no trajectory to extend, just skip
                 else:
                     filtered_steps.append(ManeuverStep(
                         maneuver=step.maneuver,
@@ -343,31 +360,144 @@ class MacroGuidedSequenceGenerator:
                         total_steps=step.total_steps,
                     ))
 
-            if filtered_steps:  # Only if there are remaining steps
-                # Re-index the steps
-                for i, step in enumerate(filtered_steps):
-                    step.step_index = i
-                    step.total_steps = len(filtered_steps)
+            if not filtered_steps:
+                # All steps were removed - skip this variation
+                continue
 
-                all_steps = base_entry.maneuver_steps + filtered_steps
+            # Handle the case where we removed the first maneuver (e.g., GiveWay at start)
+            base_steps = list(base_entry.maneuver_steps)  # Copy to avoid mutation
+            if extend_base_entry_last and removed_first_traj is not None:
+                if base_steps:
+                    # Extend the last step of base_entry
+                    prev_step = base_steps[-1]
+                    prev_traj = prev_step.maneuver.trajectory
 
-                # Build trajectory to get new frame
-                trajectory = self._build_trajectory(all_steps)
-                if trajectory is not None:
-                    # Get final state from trajectory
-                    new_frame = base_entry.frame.copy()
-                    new_frame[agent_id] = trajectory.final_agent_state
+                    if prev_traj is not None:
+                        extended_path = np.concatenate(
+                            [prev_traj.path, removed_first_traj.path[1:]])
+                        # Regenerate velocities using FollowLane-style calculation
+                        extended_vel = Maneuver.get_curvature_velocity(extended_path)
+                        extended_traj = VelocityTrajectory(
+                            extended_path, extended_vel)
 
-                    opt_type_name = opt_type.__name__
-                    var_entry = QueueEntry(
-                        maneuver_steps=all_steps,
-                        frame=new_frame,
-                        depth=base_entry.depth + 1,
-                        completed_macro_actions=base_entry.completed_macro_actions + [f"{ma_type}_no{opt_type_name}"]
+                        extended_maneuver = copy(prev_step.maneuver)
+                        extended_maneuver.trajectory = extended_traj
+
+                        base_steps[-1] = ManeuverStep(
+                            maneuver=extended_maneuver,
+                            macro_action_type=prev_step.macro_action_type,
+                            step_index=prev_step.step_index,
+                            total_steps=prev_step.total_steps,
+                        )
+                        logger.debug(f"Extended base entry's last maneuver to cover removed {opt_type.__name__}")
+                else:
+                    # No base steps - create a FollowLane to bridge the gap
+                    bridge_maneuver = self._create_bridge_maneuver(
+                        agent_id, base_entry.frame, removed_first_traj
                     )
-                    variations.append(var_entry)
+                    if bridge_maneuver is not None:
+                        bridge_step = ManeuverStep(
+                            maneuver=bridge_maneuver,
+                            macro_action_type="Bridge",
+                            step_index=0,
+                            total_steps=1,
+                        )
+                        base_steps = [bridge_step]
+                        logger.debug(f"Created FollowLane bridge maneuver to cover removed {opt_type.__name__} at start")
+                    else:
+                        # Can't create bridge - extend first filtered step's trajectory backward
+                        # by prepending the removed trajectory
+                        first_step = filtered_steps[0]
+                        first_traj = first_step.maneuver.trajectory
+                        if first_traj is not None:
+                            # Prepend removed trajectory to first maneuver
+                            extended_path = np.concatenate(
+                                [removed_first_traj.path[:-1], first_traj.path])
+                            # Regenerate velocities using FollowLane-style calculation
+                            extended_vel = Maneuver.get_curvature_velocity(extended_path)
+                            extended_traj = VelocityTrajectory(extended_path, extended_vel)
+
+                            extended_maneuver = copy(first_step.maneuver)
+                            extended_maneuver.trajectory = extended_traj
+
+                            filtered_steps[0] = ManeuverStep(
+                                maneuver=extended_maneuver,
+                                macro_action_type=first_step.macro_action_type,
+                                step_index=first_step.step_index,
+                                total_steps=first_step.total_steps,
+                            )
+                            logger.debug(f"Prepended removed {opt_type.__name__} trajectory to first maneuver")
+
+            # Re-index the steps
+            for i, step in enumerate(filtered_steps):
+                step.step_index = i
+                step.total_steps = len(filtered_steps)
+
+            all_steps = base_steps + filtered_steps
+
+            # Build trajectory to get new frame
+            trajectory = self._build_trajectory(all_steps)
+            if trajectory is not None:
+                # Get final state from trajectory
+                new_frame = base_entry.frame.copy()
+                new_frame[agent_id] = trajectory.final_agent_state
+
+                opt_type_name = opt_type.__name__
+                var_entry = QueueEntry(
+                    maneuver_steps=all_steps,
+                    frame=new_frame,
+                    depth=base_entry.depth + 1,
+                    completed_macro_actions=base_entry.completed_macro_actions + [f"{ma_type}_no{opt_type_name}"]
+                )
+                variations.append(var_entry)
 
         return variations
+
+    def _create_bridge_maneuver(self, agent_id: int, frame: Dict[int, AgentState],
+                                 target_traj: VelocityTrajectory) -> Optional[Maneuver]:
+        """Create a FollowLane maneuver to bridge from current position to target trajectory start.
+
+        This is used when a GiveWay at the start of a sequence is removed and there's
+        no previous maneuver to extend. We create a FollowLane that goes from the
+        agent's current position to where the next maneuver (e.g., Turn) begins.
+
+        Args:
+            agent_id: Agent ID
+            frame: Current frame
+            target_traj: The trajectory we need to connect to (removed maneuver's trajectory)
+
+        Returns:
+            A FollowLane maneuver, or None if creation fails
+        """
+        from igp2.planlibrary.maneuver import FollowLane, ManeuverConfig
+
+        try:
+            state = frame[agent_id]
+
+            # Check if FollowLane is applicable
+            if not FollowLane.applicable(state, self._scenario_map):
+                return None
+
+            # Create a FollowLane that terminates at the start of target_traj
+            # (which is where the removed GiveWay ended / Turn begins)
+            termination_point = target_traj.path[0]
+
+            config = ManeuverConfig({
+                "type": "follow-lane",
+                "termination_point": termination_point
+            })
+
+            maneuver = FollowLane(config, agent_id, frame, self._scenario_map)
+
+            # Check if the trajectory is valid
+            if maneuver.trajectory is None or len(maneuver.trajectory.path) < 2:
+                return None
+
+            return maneuver
+
+        except Exception as e:
+            logger.debug(f"Failed to create bridge maneuver: {e}")
+            return None
 
     def _get_applicable_macro_actions(self, state: AgentState) -> List[type]:
         """Get applicable macro-action types for the current state."""
