@@ -127,33 +127,6 @@
           "heading": 0.0
         }
       }
-    },
-    {
-      "id": 3,
-      "type": "TrafficAgent",
-      "spawn": {
-        "box": {
-          "center": [334.8, -35.0],
-          "length": 3.5,
-          "width": 10.0,
-          "heading": 0.0
-        },
-        "velocity": [
-          5.0,
-          10.0
-        ]
-      },
-      "goal": {
-        "box": {
-          "center": [
-            334.8,
-            -310.0
-          ],
-          "length": 5,
-          "width": 7,
-          "heading": 0.0
-        }
-      }
     }
   ],
   "failure_zones": [
