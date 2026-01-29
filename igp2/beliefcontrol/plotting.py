@@ -1,0 +1,342 @@
+"""Plotting utilities for BeliefAgent visualisation.
+
+Provides persistent, blitting-based matplotlib figures that draw the
+static map once and efficiently update dynamic elements each frame.
+
+* :class:`BeliefPlotter` — visualises the sample-based policy
+  (candidate clouds + selected trajectory).
+* :class:`OptimisationPlotter` — visualises the constraint-optimisation
+  policy (optimised trajectory + vehicle footprints along it).
+"""
+
+import logging
+from typing import List, Optional
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Polygon as MplPolygon
+
+from igp2.core.agentstate import AgentState, AgentMetadata
+from igp2.core.goal import Goal
+from igp2.core.trajectory import StateTrajectory
+from igp2.core.util import calculate_multiple_bboxes
+from igp2.opendrive.map import Map
+from igp2.opendrive.plot_map import plot_map
+
+logger = logging.getLogger(__name__)
+
+
+class BeliefPlotter:
+    """Manages a single persistent matplotlib figure for BeliefAgent.
+
+    The static map, reference path, and goal are drawn once and cached
+    as a bitmap.  Each call to :meth:`update` restores the cached
+    background and redraws only the dynamic artists.
+
+    Args:
+        scenario_map: The road layout to draw.
+        reference_waypoints: Concatenated A* reference path (N, 2).
+        goal: Agent goal (for the goal marker).
+    """
+
+    def __init__(self,
+                 scenario_map: Map,
+                 reference_waypoints: np.ndarray,
+                 goal: Optional[Goal] = None):
+        self._scenario_map = scenario_map
+        self._reference_waypoints = reference_waypoints
+        self._goal = goal
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax: Optional[plt.Axes] = None
+        self._background = None  # cached static bitmap
+
+    def _init(self):
+        """Create figure, draw static content, cache background."""
+        plt.ion()
+        self._fig, self._ax = plt.subplots(1, 1, figsize=(12, 8))
+        plot_map(self._scenario_map, ax=self._ax, markings=True)
+
+        if len(self._reference_waypoints) > 0:
+            self._ax.plot(
+                self._reference_waypoints[:, 0],
+                self._reference_waypoints[:, 1],
+                'g-', linewidth=2, label='Reference path', zorder=3,
+            )
+
+        if self._goal is not None:
+            self._ax.plot(*self._goal.center, 'g*', markersize=12, zorder=6)
+
+        self._ax.set_aspect('equal')
+        self._ax.legend(loc='upper right', fontsize=8)
+        self._fig.tight_layout()
+
+        self._fig.canvas.draw()
+        self._background = self._fig.canvas.copy_from_bbox(self._ax.bbox)
+
+    def update(self,
+               state: AgentState,
+               candidates: List[np.ndarray],
+               best_idx: int,
+               trajectory_cl: StateTrajectory,
+               agent_id: int,
+               step: int):
+        """Redraw dynamic content on the persistent figure.
+
+        Args:
+            state: Current ego state (for position and view centre).
+            candidates: List of sampled trajectory arrays, each (H+1, 2).
+            best_idx: Index of the selected best candidate.
+            trajectory_cl: Closed-loop history trajectory of the agent.
+            agent_id: Agent ID (for the title).
+            step: Current simulation step (for the title).
+        """
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        ax = self._ax
+
+        # Re-centre view
+        margin = 40.0
+        ax.set_xlim(state.position[0] - margin, state.position[0] + margin)
+        ax.set_ylim(state.position[1] - margin, state.position[1] + margin)
+
+        # Restore static background
+        self._fig.canvas.restore_region(self._background)
+
+        # --- dynamic artists ---
+        dynamic = []
+
+        # Candidate trajectories
+        for i, traj in enumerate(candidates):
+            if i == best_idx:
+                continue
+            line, = ax.plot(traj[:, 0], traj[:, 1],
+                            color='orange', alpha=0.15, linewidth=0.5, zorder=2)
+            ax.draw_artist(line)
+            dynamic.append(line)
+
+        # Best trajectory
+        if candidates:
+            best = candidates[best_idx]
+            line, = ax.plot(best[:, 0], best[:, 1],
+                            'r-', linewidth=2, label='Selected trajectory', zorder=5)
+            ax.draw_artist(line)
+            dynamic.append(line)
+
+        # Agent history
+        if len(trajectory_cl) > 1:
+            hist = trajectory_cl.path
+            line, = ax.plot(hist[:, 0], hist[:, 1],
+                            'b-', linewidth=2, label='History', zorder=4)
+            ax.draw_artist(line)
+            dynamic.append(line)
+
+        # Current position
+        dot, = ax.plot(state.position[0], state.position[1],
+                       'ko', markersize=6, zorder=6)
+        ax.draw_artist(dot)
+        dynamic.append(dot)
+
+        ax.set_title(f"BeliefAgent {agent_id}  step={step}")
+
+        # Blit and flush
+        self._fig.canvas.blit(ax.bbox)
+        self._fig.canvas.flush_events()
+
+        # Clean up dynamic artists
+        for artist in dynamic:
+            artist.remove()
+
+
+class OptimisationPlotter:
+    """Persistent matplotlib figure for the constraint-optimisation policy.
+
+    Draws the static map, reference path and goal once, then efficiently
+    redraws per-frame:
+
+    * The optimised trajectory as a line.
+    * Vehicle footprint rectangles at evenly-spaced steps along the
+      trajectory, coloured to indicate whether each footprint is inside
+      the drivable area (green) or outside (red).
+    * The agent's closed-loop history.
+    * The current vehicle position and footprint.
+
+    Args:
+        scenario_map: The road layout to draw.
+        reference_waypoints: Concatenated A* reference path (N, 2).
+        metadata: Agent physical metadata (for vehicle dimensions).
+        goal: Agent goal (for the goal marker).
+        footprint_interval: Draw a vehicle footprint every N steps along
+            the optimised trajectory.  Defaults to 5.
+    """
+
+    def __init__(self,
+                 scenario_map: Map,
+                 reference_waypoints: np.ndarray,
+                 metadata: AgentMetadata,
+                 goal: Optional[Goal] = None,
+                 footprint_interval: int = 5):
+        self._scenario_map = scenario_map
+        self._reference_waypoints = reference_waypoints
+        self._metadata = metadata
+        self._goal = goal
+        self._footprint_interval = max(1, footprint_interval)
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax: Optional[plt.Axes] = None
+        self._background = None
+
+    # ------------------------------------------------------------------
+    # Lazy initialisation
+    # ------------------------------------------------------------------
+
+    def _init(self):
+        """Create figure, draw static content, cache background."""
+        plt.ion()
+        self._fig, self._ax = plt.subplots(1, 1, figsize=(12, 8))
+        plot_map(self._scenario_map, ax=self._ax, markings=True)
+
+        if len(self._reference_waypoints) > 0:
+            self._ax.plot(
+                self._reference_waypoints[:, 0],
+                self._reference_waypoints[:, 1],
+                'g-', linewidth=2, label='Reference path', zorder=3,
+            )
+
+        if self._goal is not None:
+            self._ax.plot(*self._goal.center, 'g*', markersize=12, zorder=6)
+
+        self._ax.set_aspect('equal')
+        self._ax.legend(loc='upper right', fontsize=8)
+        self._fig.tight_layout()
+
+        self._fig.canvas.draw()
+        self._background = self._fig.canvas.copy_from_bbox(self._ax.bbox)
+
+    # ------------------------------------------------------------------
+    # Public
+    # ------------------------------------------------------------------
+
+    def update(self,
+               state: AgentState,
+               optimised_trajectory: np.ndarray,
+               full_rollout: Optional[np.ndarray],
+               trajectory_cl: StateTrajectory,
+               agent_id: int,
+               step: int):
+        """Redraw dynamic content for one simulation step.
+
+        Args:
+            state: Current ego state (for view centre and current footprint).
+            optimised_trajectory: (H+1, 2) position-only trajectory from
+                the optimiser.
+            full_rollout: (H+1, 4) full state rollout [x, y, heading, speed]
+                from the optimiser.  If provided, vehicle footprints are
+                drawn along the trajectory.  May be None.
+            trajectory_cl: Closed-loop history trajectory of the agent.
+            agent_id: Agent ID (for the title).
+            step: Current simulation step (for the title).
+        """
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        ax = self._ax
+
+        # Re-centre view
+        margin = 40.0
+        ax.set_xlim(state.position[0] - margin, state.position[0] + margin)
+        ax.set_ylim(state.position[1] - margin, state.position[1] + margin)
+
+        # Restore static background
+        self._fig.canvas.restore_region(self._background)
+
+        dynamic = []
+
+        # --- Optimised trajectory line ---
+        if optimised_trajectory is not None and len(optimised_trajectory) > 1:
+            line, = ax.plot(
+                optimised_trajectory[:, 0], optimised_trajectory[:, 1],
+                'r-', linewidth=2, label='Optimised trajectory', zorder=5,
+            )
+            ax.draw_artist(line)
+            dynamic.append(line)
+
+        # --- Vehicle footprints along trajectory ---
+        if full_rollout is not None and len(full_rollout) > 1:
+            indices = list(range(0, len(full_rollout),
+                                 self._footprint_interval))
+            # Always include the last step
+            if indices[-1] != len(full_rollout) - 1:
+                indices.append(len(full_rollout) - 1)
+
+            for idx in indices:
+                x_k, y_k, heading_k = (full_rollout[idx, 0],
+                                        full_rollout[idx, 1],
+                                        full_rollout[idx, 2])
+                corners = calculate_multiple_bboxes(
+                    [x_k], [y_k],
+                    self._metadata.length, self._metadata.width, heading_k,
+                )[0]  # (4, 2)
+
+                # Check drivability via map — if any corner has no
+                # drivable lane nearby, colour the footprint red.
+                in_drivable = all(
+                    len(self._scenario_map.lanes_at(
+                        c, drivable_only=True, max_distance=1.0)) > 0
+                    for c in corners
+                )
+                colour = (0.2, 0.8, 0.2, 0.25) if in_drivable \
+                    else (0.9, 0.2, 0.2, 0.35)
+
+                patch = MplPolygon(
+                    corners, closed=True,
+                    facecolor=colour,
+                    edgecolor=colour[:3] + (0.8,),
+                    linewidth=0.8, zorder=4,
+                )
+                ax.add_patch(patch)
+                ax.draw_artist(patch)
+                dynamic.append(patch)
+
+        # --- Agent history ---
+        if trajectory_cl is not None and len(trajectory_cl) > 1:
+            hist = trajectory_cl.path
+            line, = ax.plot(
+                hist[:, 0], hist[:, 1],
+                'b-', linewidth=2, label='History', zorder=4,
+            )
+            ax.draw_artist(line)
+            dynamic.append(line)
+
+        # --- Current position + footprint ---
+        dot, = ax.plot(
+            state.position[0], state.position[1],
+            'ko', markersize=6, zorder=7,
+        )
+        ax.draw_artist(dot)
+        dynamic.append(dot)
+
+        cur_corners = calculate_multiple_bboxes(
+            [state.position[0]], [state.position[1]],
+            self._metadata.length, self._metadata.width, state.heading,
+        )[0]
+        cur_patch = MplPolygon(
+            cur_corners, closed=True,
+            facecolor=(0.1, 0.1, 0.1, 0.3),
+            edgecolor='black', linewidth=1.5, zorder=7,
+        )
+        ax.add_patch(cur_patch)
+        ax.draw_artist(cur_patch)
+        dynamic.append(cur_patch)
+
+        ax.set_title(
+            f"TwoStageOPT  Agent {agent_id}  step={step}")
+
+        # Blit and flush
+        self._fig.canvas.blit(ax.bbox)
+        self._fig.canvas.flush_events()
+
+        # Clean up dynamic artists
+        for artist in dynamic:
+            artist.remove()

@@ -182,8 +182,7 @@ class CarlaSim:
         self.__timestep += 1
         
         observation = self.__get_current_observation()
-        prediction = self.__make_predictions(observation)
-        actions = self.__take_actions(observation, prediction)
+        actions = self.__take_actions(observation)
         self.__traffic_manager.update(self, observation)
         self.__update_spectator()
 
@@ -465,7 +464,7 @@ class CarlaSim:
 
             self.__spectator.set_transform(carla.Transform(camera_location, camera_rotation))
 
-    def __take_actions(self, observation: Observation, prediction=None):
+    def __take_actions(self, observation: Observation):
         commands = []
         controls = {}
         for agent_id, agent in self.agents.items():
@@ -473,7 +472,7 @@ class CarlaSim:
                 continue
 
             try:
-                control = agent.next_control(observation, prediction)
+                control = agent.next_control(observation)
             except RuntimeError as e:
                 print(f"Couldn't generate control command for Agent {agent_id}: {e}")
                 control = None
@@ -489,10 +488,6 @@ class CarlaSim:
 
         self.__client.apply_batch_sync(commands)
         return controls
-
-    def __make_predictions(self, observation: Observation):
-        """ Make predictions for agent trajectories. Override in subclass for custom prediction. """
-        return None
 
     def __get_current_observation(self) -> Observation:
         actor_list = self.__world.get_actors()
