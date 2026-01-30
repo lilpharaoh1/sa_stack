@@ -17,6 +17,7 @@ from igp2.carlasim.traffic_manager import TrafficManager
 from igp2.carlasim.carla_agent_wrapper import CarlaAgentWrapper
 from igp2.core.vehicle import Observation
 from igp2.core.agentstate import AgentState, AgentMetadata
+from igp2.core.vehicle import Action
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ class CarlaSim:
         self.__wait_for_server()
 
         self.__agents = {}
+        self.__kinematic_states = {}      # agent_id -> AgentState (internally maintained state)
         self.__static_objects = []  # List of {'actor': carla.Actor, 'igp2_id': int, 'length': float, 'width': float}
         self.__next_static_id = -1  # Negative IDs to avoid conflict with agent IDs
 
@@ -130,6 +132,45 @@ class CarlaSim:
         self.__traffic_manager = TrafficManager(self.__scenario_map)
 
         self.__world.tick()
+
+    @staticmethod
+    def _bicycle_step(state: AgentState, action: Action, dt: float, wheelbase: float) -> AgentState:
+        """Step the kinematic bicycle model matching TwoStageOPT's NLP dynamics.
+
+        Equations (world coordinates):
+            x_{k+1}     = x_k + v_k * cos(theta_k + delta_k) * dt
+            y_{k+1}     = y_k + v_k * sin(theta_k + delta_k) * dt
+            theta_{k+1} = theta_k + (2*v_k/L) * sin(delta_k) * dt
+            v_{k+1}     = v_k + a_k * dt
+        """
+        x, y = state.position
+        theta = state.heading
+        v = state.speed
+        a = action.acceleration
+        delta = action.steer_angle
+
+        x_new = x + v * np.cos(theta + delta) * dt
+        y_new = y + v * np.sin(theta + delta) * dt
+        theta_new = theta + (2.0 * v / wheelbase) * np.sin(delta) * dt
+        v_new = max(0.0, v + a * dt)
+
+        # Normalise heading to [-pi, pi]
+        theta_new = (theta_new + np.pi) % (2 * np.pi) - np.pi
+
+        velocity = np.array([v_new * np.cos(theta_new),
+                             v_new * np.sin(theta_new)])
+        acceleration = np.array([a * np.cos(theta_new),
+                                 a * np.sin(theta_new)])
+
+        return AgentState(
+            time=state.time + 1,
+            position=np.array([x_new, y_new]),
+            velocity=velocity,
+            acceleration=acceleration,
+            heading=theta_new,
+            metadata=state.metadata,
+        )
+
 
     def __del__(self):
         try:
@@ -219,6 +260,18 @@ class CarlaSim:
 
         carla_agent = CarlaAgentWrapper(agent, actor)
         self.agents[carla_agent.agent_id] = carla_agent
+
+        # Disable CARLA physics; all agents use kinematic bicycle model + teleport
+        actor.set_simulate_physics(False)
+        self.__kinematic_states[carla_agent.agent_id] = AgentState(
+            time=self.__timestep,
+            position=state.position.copy(),
+            velocity=state.velocity.copy(),
+            acceleration=state.acceleration.copy(),
+            heading=state.heading,
+            metadata=state.metadata,
+        )
+    
         self.__world.tick()
         logger.info(f"Added agent {carla_agent.agent_id} (actor {carla_agent.actor_id}).")
 
@@ -512,11 +565,29 @@ class CarlaSim:
                 # self.remove_agent(agent.agent_id)
                 self.__traffic_manager.remove_agent(agent, self)
                 continue
-            controls[agent_id] = control
-            command = carla.command.ApplyVehicleControl(agent.actor, control)
-            commands.append(command)
 
-        self.__client.apply_batch_sync(commands)
+
+            # Step bicycle model and teleport CARLA actor
+            action = agent.last_action
+            cur_state = self.__kinematic_states[agent_id]
+            wheelbase = agent.agent.metadata.wheelbase
+            dt = 1.0 / self.__fps
+            new_state = self._bicycle_step(cur_state, action, dt, wheelbase)
+            self.__kinematic_states[agent_id] = new_state
+
+            cur_z = agent.actor.get_transform().location.z
+            new_transform = Transform(
+                Location(x=new_state.position[0], y=-new_state.position[1], z=cur_z),
+                Rotation(yaw=np.rad2deg(-new_state.heading))
+            )
+            agent.actor.set_transform(new_transform)
+
+        #     controls[agent_id] = control
+        #     command = carla.command.ApplyVehicleControl(agent.actor, control)
+        #     commands.append(command)
+
+        # self.__client.apply_batch_sync(commands)
+
         return controls
 
     def __get_current_observation(self) -> Observation:
@@ -565,6 +636,10 @@ class CarlaSim:
                 metadata=metadata,
             )
             frame[entry['igp2_id']] = state
+
+        # Override with internally maintained bicycle model state
+        for agent_id, kin_state in self.__kinematic_states.items():
+            frame[agent_id] = kin_state
 
         return Observation(frame, self.scenario_map)
 

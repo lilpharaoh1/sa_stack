@@ -1230,10 +1230,12 @@ class TwoStageOPT:
                 options={'time_limit': 2.0},
             )
         except Exception as e:
+            print("MILP solver exception: %s", e)
             logger.debug("MILP solver exception: %s", e)
             return None
 
         if not result.success:
+            print("MILP did not converge: %s", result.message)
             logger.debug("MILP did not converge: %s", result.message)
             return None
 
@@ -1418,7 +1420,7 @@ class TwoStageOPT:
             opti.set_initial(U, warm_controls.T)
 
             # --- Solver options ---
-            p_opts = {'expand': True}
+            p_opts = {'expand': True, 'print_time': False}
             s_opts = {
                 'max_iter': 200,
                 'warm_start_init_point': 'yes',
@@ -1436,5 +1438,6 @@ class TwoStageOPT:
             return nlp_states, nlp_controls, True
 
         except Exception as e:
+            print("NLP solver failed: %s", e)
             logger.debug("NLP solver failed: %s", e)
             return warm_states, warm_controls, False

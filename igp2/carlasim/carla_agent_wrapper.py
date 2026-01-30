@@ -30,6 +30,7 @@ class CarlaAgentWrapper:
                                             dt=1.0 / self.__agent.fps)
         self.__waypoints = []  # List of CARLA waypoints to follow
         self.__current_ma = None
+        self.__last_action = None  # Raw Action from most recent next_control() call
 
     def __repr__(self):
         return f"Actor {self.actor_id}; Agent {self.agent_id}"
@@ -37,6 +38,7 @@ class CarlaAgentWrapper:
     def next_control(self, observation: Observation, prediction=None) -> Optional[carla.VehicleControl]:
         limited_observation = self.__apply_view_radius(observation)
         action = self.__agent.next_action(limited_observation, prediction)
+        self.__last_action = action
         self.agent.vehicle.execute_action(action, observation.frame[self.agent_id])
         if action is None or self.__agent.done(observation) or action.target_speed is None:
             logger.debug(f"observation.frame[self.agent.agent_id].position, self.agent.goal.center = {observation.frame[self.agent.agent_id].position, self.agent.goal.center}")
@@ -133,6 +135,11 @@ class CarlaAgentWrapper:
     def name(self):
         """ The role name of the wrapped Actor. """
         return self.__name
+
+    @property
+    def last_action(self):
+        """The raw Action from the most recent next_control() call."""
+        return self.__last_action
 
     @property
     def waypoints(self):
