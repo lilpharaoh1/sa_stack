@@ -351,12 +351,16 @@ class _FrenetFrame:
 
     def road_boundaries(self, s_values: np.ndarray,
                         scenario_map: Map,
-                        search_radius: float = 5.0):
+                        search_radius: float = 15.0):
         """Query drivable-lane boundaries at sampled arc-length positions.
 
         For each *s* value, casts a perpendicular ray through the
         corresponding path point and intersects it with drivable lane
         boundaries to find left and right offsets.
+
+        The lane search includes all drivable lanes on the ego's road
+        **and** on roads connected to it (predecessor/successor, including
+        through junctions), so the corridor spans the full drivable width.
 
         Args:
             s_values: (K,) array of longitudinal positions along the path.
@@ -368,9 +372,17 @@ class _FrenetFrame:
             ``d_right`` is negative, defining the corridor
             ``d_right <= d <= d_left`` at each step.
         """
+        from igp2.opendrive.elements.road_lanes import LaneTypes
+        from igp2.opendrive.elements.junction import Junction
+
         k = len(s_values)
         d_left = np.full(k, search_radius)
         d_right = np.full(k, -search_radius)
+
+        # --- Collect all relevant drivable lanes once ---
+        all_lanes = self._collect_drivable_lanes(s_values, scenario_map)
+        if not all_lanes:
+            return d_left, d_right
 
         for i, s in enumerate(s_values):
             seg_idx, rx, ry, _ = self._interpolate(s)
@@ -382,18 +394,12 @@ class _FrenetFrame:
             p_right = np.array([rx - search_radius * n[0],
                                 ry - search_radius * n[1]])
             ray = LineString([p_right, p_left])
-
-            # Find drivable lanes near this point
             ref_pt = np.array([rx, ry])
-            lanes = scenario_map.lanes_at(ref_pt, drivable_only=True,
-                                          max_distance=search_radius)
-            if not lanes:
-                continue
 
             # Intersect ray with each lane boundary, track extremes
             best_left = 0.0
             best_right = 0.0
-            for lane in lanes:
+            for lane in all_lanes:
                 if lane.boundary is None:
                     continue
                 ring = lane.boundary.exterior
@@ -430,6 +436,78 @@ class _FrenetFrame:
                 d_right[i] = best_right
 
         return d_left, d_right
+
+    def _collect_drivable_lanes(self, s_values: np.ndarray,
+                                scenario_map: Map) -> list:
+        """Collect all drivable lanes on the ego's road and connected roads.
+
+        Samples a few points along the reference path, finds the roads at
+        those points, then gathers every drivable lane on those roads and
+        their predecessor/successor roads (including through junctions).
+        """
+        from igp2.opendrive.elements.road_lanes import LaneTypes
+        from igp2.opendrive.elements.junction import Junction
+
+        # Sample a few path positions to find all roads the path crosses
+        n_samples = min(10, len(s_values))
+        sample_indices = np.linspace(0, len(s_values) - 1, n_samples, dtype=int)
+        road_set = set()  # road IDs already visited
+        roads = []        # unique Road objects
+
+        for idx in sample_indices:
+            s = s_values[idx]
+            _, rx, ry, _ = self._interpolate(s)
+            pt = np.array([rx, ry])
+            found = scenario_map.roads_at(pt, drivable=True)
+            for road in found:
+                if road.id not in road_set:
+                    road_set.add(road.id)
+                    roads.append(road)
+
+        # Expand to predecessor/successor/neighbour roads (one level)
+        extra_roads = []
+        for road in roads:
+            # Predecessor and successor
+            for link in (road.link.predecessor, road.link.successor):
+                if link is None:
+                    continue
+                elem = link.element
+                if elem is None:
+                    continue
+                if isinstance(elem, Junction):
+                    for jr in elem.get_all_roads():
+                        if jr.id not in road_set:
+                            road_set.add(jr.id)
+                            extra_roads.append(jr)
+                else:
+                    # elem is a Road
+                    if elem.id not in road_set:
+                        road_set.add(elem.id)
+                        extra_roads.append(elem)
+            # Neighbours (adjacent roads, e.g. opposite direction)
+            for neighbor in road.link.neighbors:
+                elem = neighbor.element
+                if elem is not None and elem.id not in road_set:
+                    road_set.add(elem.id)
+                    extra_roads.append(elem)
+        roads.extend(extra_roads)
+
+        # Collect all drivable lanes from these roads
+        lane_set = set()
+        all_lanes = []
+        for road in roads:
+            for lane_section in road.lanes.lane_sections:
+                for lane in lane_section.all_lanes:
+                    lid = id(lane)
+                    if (lid not in lane_set
+                            and lane.type == LaneTypes.DRIVING
+                            and lane.id != 0
+                            and lane.boundary is not None
+                            and not lane.boundary.is_empty):
+                        lane_set.add(lid)
+                        all_lanes.append(lane)
+
+        return all_lanes
 
     # ------------------------------------------------------------------
     # Properties
@@ -594,7 +672,7 @@ class TwoStageOPT:
     DEFAULT_HORIZON = 40
     DEFAULT_DT = 0.1
     DEFAULT_RHO = 1.5
-    DEFAULT_BIG_M = 1000.0
+    DEFAULT_BIG_M = 10000.0
     N_OBS_MAX = 10  # pre-allocated obstacle slots in NLP
 
     def __init__(self,
@@ -616,11 +694,11 @@ class TwoStageOPT:
                  milp_jerk_x_max: float = 0.5,
                  milp_jerk_y_max: float = 0.1,
                  milp_v_min: float = 0.0,
-                 milp_v_max: float = 3.0,
+                 milp_v_max: float = 10.0,
                  # MILP cost weights (L1 objective)
                  milp_w_x: float = 0.9,
                  milp_w_v: float = 0.5,
-                 milp_w_y: float = 0.05,
+                 milp_w_y: float = 0.5,
                  milp_w_a: float = 0.4,
                  # NLP constraints
                  nlp_a_min: float = -3.0,
@@ -633,7 +711,7 @@ class TwoStageOPT:
                  # NLP cost weights
                  nlp_w_x: float = 0.1,
                  nlp_w_v: float = 2.5,
-                 nlp_w_y: float = 0.05,
+                 nlp_w_y: float = 0.5,
                  nlp_w_a: float = 1.0,
                  nlp_w_delta: float = 2.0,
                  # Legacy params (ignored for back-compat)
@@ -833,6 +911,18 @@ class TwoStageOPT:
         self._last_rollout = self._frenet_trajectory_to_world(final_states)
         trajectory = self._last_rollout[:, :2]
 
+        # # --- Debug plot ---
+        # milp_world = None
+        # if milp_ok:
+        #     # Convert MILP states to world for plotting
+        #     milp_nlp_states = np.column_stack([
+        #         milp_states[:, 0], milp_states[:, 1],
+        #         np.arctan2(milp_states[:, 3], milp_states[:, 2]),
+        #         np.sqrt(milp_states[:, 2]**2 + milp_states[:, 3]**2)])
+        #     milp_world = self._frenet_trajectory_to_world(milp_nlp_states)
+        # self._debug_plot(state, s_values, road_left, road_right,
+        #                  obstacles, self._last_rollout, milp_world)
+
         # Extract first control action
         accel = float(final_controls[0, 0])
         steer = float(final_controls[0, 1])
@@ -882,6 +972,82 @@ class TwoStageOPT:
     def ego_width(self) -> float:
         """Ego vehicle width (m)."""
         return self._ego_width
+
+    def _debug_plot(self, ego_state, s_values, road_left, road_right,
+                    obstacles, nlp_world, milp_world):
+        """Save a debug plot of road space, obstacles, and trajectories."""
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+        import os
+
+        fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+
+        # --- Reference path ---
+        wp = self._frenet.waypoints
+        ax.plot(wp[:, 0], wp[:, 1], 'k--', lw=1, label='Reference path', zorder=1)
+
+        # --- Road boundaries in world coords ---
+        left_xs, left_ys = [], []
+        right_xs, right_ys = [], []
+        for i, s in enumerate(s_values):
+            wl = self._frenet.frenet_to_world(s, road_left[i])
+            wr = self._frenet.frenet_to_world(s, road_right[i])
+            left_xs.append(wl['x']); left_ys.append(wl['y'])
+            right_xs.append(wr['x']); right_ys.append(wr['y'])
+        ax.fill(left_xs + right_xs[::-1], left_ys + right_ys[::-1],
+                alpha=0.15, color='green', label='Drivable area', zorder=0)
+        ax.plot(left_xs, left_ys, 'g-', lw=1.5, label='Road left')
+        ax.plot(right_xs, right_ys, 'g-', lw=1.5, label='Road right')
+
+        # --- Obstacles ---
+        for i, obs in enumerate(obstacles):
+            obs_s = float(obs['s'][0])
+            obs_d = float(obs['d'][0])
+            w = self._frenet.frenet_to_world(obs_s, obs_d)
+            ox, oy = w['x'], w['y']
+            oL = obs['length']
+            oW = obs['width']
+            heading = obs.get('heading', w.get('heading', 0.0))
+            # Draw rotated rectangle
+            cos_h = np.cos(heading)
+            sin_h = np.sin(heading)
+            corners = np.array([[-oL/2, -oW/2], [oL/2, -oW/2],
+                                [oL/2, oW/2], [-oL/2, oW/2], [-oL/2, -oW/2]])
+            rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
+            corners_w = (rot @ corners.T).T + np.array([ox, oy])
+            ax.fill(corners_w[:-1, 0], corners_w[:-1, 1], alpha=0.4,
+                    color='red', zorder=3)
+            ax.plot(corners_w[:, 0], corners_w[:, 1], 'r-', lw=1.5, zorder=3)
+            ax.text(ox, oy, f'O{i}', ha='center', va='center', fontsize=7,
+                    color='white', fontweight='bold', zorder=4)
+
+        # --- NLP trajectory ---
+        if nlp_world is not None:
+            ax.plot(nlp_world[:, 0], nlp_world[:, 1], 'b-o', ms=3, lw=2,
+                    label='NLP trajectory', zorder=5)
+
+        # --- MILP trajectory ---
+        if milp_world is not None:
+            ax.plot(milp_world[:, 0], milp_world[:, 1], 'm-s', ms=2, lw=1.5,
+                    label='MILP trajectory', zorder=5)
+
+        # --- Ego position ---
+        ex, ey = ego_state.position[0], ego_state.position[1]
+        ax.plot(ex, ey, 'b*', ms=15, label='Ego', zorder=6)
+
+        ax.set_aspect('equal')
+        ax.legend(fontsize=8, loc='best')
+        ax.set_title('TwoStageOPT Debug: Road Space & Trajectories')
+        ax.set_xlabel('x (m)')
+        ax.set_ylabel('y (m)')
+        ax.grid(True, alpha=0.3)
+
+        out_path = '/tmp/twostage_debug.png'
+        fig.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  DEBUG plot saved to {out_path}")
 
     def reset(self):
         """Reset all MPC state."""
@@ -1041,12 +1207,14 @@ class TwoStageOPT:
     # Stage 1: MILP (scipy.optimize.milp)
     # ------------------------------------------------------------------
 
-    def _solve_milp(self, frenet_state, road_left, road_right, obstacles):
-        """Solve MILP in Frenet frame with point-mass model.
+    MILP_RECEDING_K = 5   # sub-problem horizon for receding-horizon MILP
 
-        Decision variables: states [s, d, vs, vd] at each step,
-        controls [as, ad] at each step, L1 slack for tracking,
-        and binary variables for Big-M collision avoidance.
+    def _solve_milp(self, frenet_state, road_left, road_right, obstacles):
+        """Solve MILP via receding horizon: chain K-step sub-problems.
+
+        Instead of one large H-step MILP, solves ceil(H/K) smaller
+        sub-problems.  Each sub-problem's final state becomes the next
+        one's initial state.
 
         Args:
             frenet_state: [s, d, phi, v] current state in Frenet.
@@ -1056,25 +1224,89 @@ class TwoStageOPT:
 
         Returns:
             (H+1, 4) array of MILP states [s, d, vs, vd] in Frenet,
-            or None if MILP failed.
+            or None if any sub-problem failed.
         """
         H = self._horizon
+        K = self.MILP_RECEDING_K
+        N_obs = min(len(obstacles), self.N_OBS_MAX)
+
+        # Convert frenet_state to MILP state vector [s, d, vs, vd]
+        s0, d0, phi0, v0 = frenet_state
+        vs0 = v0 * np.cos(phi0)
+        vd0 = v0 * np.sin(phi0)
+        z_cur = np.array([s0, d0, vs0, vd0])
+
+        all_states = [z_cur.copy()]
+
+        for chunk_start in range(0, H, K):
+            chunk_H = min(K, H - chunk_start)
+
+            # Slice road boundaries for this chunk
+            chunk_road_left = road_left[chunk_start:chunk_start + chunk_H + 1]
+            chunk_road_right = road_right[chunk_start:chunk_start + chunk_H + 1]
+
+            # Slice obstacle predictions for this chunk
+            chunk_obstacles = []
+            for obs in obstacles[:N_obs]:
+                s_arr = np.asarray(obs['s'])
+                d_arr = np.asarray(obs['d'])
+                ce = chunk_start + chunk_H + 1
+                if ce <= len(s_arr):
+                    s_slice = s_arr[chunk_start:ce]
+                    d_slice = d_arr[chunk_start:ce]
+                else:
+                    s_slice = np.concatenate([
+                        s_arr[chunk_start:],
+                        np.full(ce - len(s_arr), s_arr[-1])])
+                    d_slice = np.concatenate([
+                        d_arr[chunk_start:],
+                        np.full(ce - len(d_arr), d_arr[-1])])
+                chunk_obstacles.append({
+                    'length': obs['length'], 'width': obs['width'],
+                    'heading': obs.get('heading', 0.0),
+                    's': s_slice, 'd': d_slice,
+                })
+
+            chunk_states = self._solve_milp_chunk(
+                z_cur, chunk_road_left, chunk_road_right,
+                chunk_obstacles, chunk_H,
+                global_s0=s0, global_step_offset=chunk_start)
+
+            if chunk_states is None:
+                logger.debug("MILP receding horizon: chunk at step %d failed",
+                             chunk_start)
+                return None
+
+            for k in range(1, chunk_H + 1):
+                all_states.append(chunk_states[k])
+            z_cur = chunk_states[-1].copy()
+
+        return np.array(all_states)   # (H+1, 4)
+
+    def _solve_milp_chunk(self, z_init, road_left, road_right, obstacles,
+                          H, global_s0=0.0, global_step_offset=0):
+        """Solve a single MILP sub-problem over *H* steps.
+
+        Args:
+            z_init: [s0, d0, vs0, vd0] initial MILP state.
+            road_left: (H+1,) left boundary offsets.
+            road_right: (H+1,) right boundary offsets.
+            obstacles: Pre-sliced obstacle dicts for this chunk.
+            H: Horizon for this chunk.
+            global_s0: The s-position at the very first chunk (for L1 ref).
+            global_step_offset: Global step index of this chunk's start.
+
+        Returns:
+            (H+1, 4) array of states [s, d, vs, vd], or None.
+        """
         dt = self._dt
         rho = self._milp_rho
         M = self._big_m
 
-        # Initial Frenet velocity components
-        s0, d0, phi0, v0 = frenet_state
-        vs0 = v0 * np.cos(phi0)
-        vd0 = v0 * np.sin(phi0)
-
-        N_obs = min(len(obstacles), self.N_OBS_MAX)
+        s0, d0, vs0, vd0 = z_init
+        N_obs = len(obstacles)
 
         # --- Decision variable layout ---
-        # States:    4*(H+1)  [s, d, vs, vd] at each step
-        # Controls:  2*H      [as, ad] at each step
-        # L1 slack:  2*(H+1)  [es, ed] for tracking error
-        # Binaries:  4*N_obs*H for Big-M collision avoidance
         n_state = 4 * (H + 1)
         n_ctrl = 2 * H
         n_slack = 2 * (H + 1)
@@ -1086,36 +1318,31 @@ class TwoStageOPT:
         e_off = n_state + n_ctrl
         b_off = n_state + n_ctrl + n_slack
 
-        # Goal reference: s_goal at each step, d_goal = 0
         s_goal = self._frenet.total_length
         v_goal = self._target_speed
 
-        # --- Objective: minimise sum of L1 slack ---
+        # --- Objective ---
         c_vec = np.zeros(n_vars)
         c_vec[e_off:e_off + n_slack] = 1.0
 
-        # --- Count constraint rows ---
+        # --- Constraint rows ---
         n_init = 4
         n_dyn = 4 * H
-        n_kin = 2 * (H + 1)
-        n_road = 2 * (H + 1)
+        n_kin = 2 * H
+        n_road = 2 * H
         n_l1 = 4 * (H + 1)
-        n_coll = 5 * N_obs * H  # 4 side + 1 sum per obs per step
+        n_coll = 5 * N_obs * H
         n_rows = n_init + n_dyn + n_kin + n_road + n_l1 + n_coll
 
         A = lil_matrix((n_rows, n_vars))
         lb = np.zeros(n_rows)
         ub = np.zeros(n_rows)
-
         row = 0
 
         # --- Initial state ---
-        z_init = np.array([s0, d0, vs0, vd0])
         for i in range(4):
             A[row, s_off + i] = 1.0
-            lb[row] = z_init[i]
-            ub[row] = z_init[i]
-            row += 1
+            lb[row] = z_init[i]; ub[row] = z_init[i]; row += 1
 
         # --- ZOH dynamics ---
         for k in range(H):
@@ -1123,86 +1350,55 @@ class TwoStageOPT:
             sk1 = s_off + 4 * (k + 1)
             ck = c_off + 2 * k
 
-            # s_{k+1} = s_k + vs_k * dt
-            A[row, sk1 + 0] = 1.0
-            A[row, sk + 0] = -1.0
-            A[row, sk + 2] = -dt
+            A[row, sk1 + 0] = 1.0; A[row, sk + 0] = -1.0; A[row, sk + 2] = -dt
             lb[row] = 0.0; ub[row] = 0.0; row += 1
 
-            # d_{k+1} = d_k + vd_k * dt
-            A[row, sk1 + 1] = 1.0
-            A[row, sk + 1] = -1.0
-            A[row, sk + 3] = -dt
+            A[row, sk1 + 1] = 1.0; A[row, sk + 1] = -1.0; A[row, sk + 3] = -dt
             lb[row] = 0.0; ub[row] = 0.0; row += 1
 
-            # vs_{k+1} = vs_k + as_k * dt
-            A[row, sk1 + 2] = 1.0
-            A[row, sk + 2] = -1.0
-            A[row, ck + 0] = -dt
+            A[row, sk1 + 2] = 1.0; A[row, sk + 2] = -1.0; A[row, ck + 0] = -dt
             lb[row] = 0.0; ub[row] = 0.0; row += 1
 
-            # vd_{k+1} = vd_k + ad_k * dt
-            A[row, sk1 + 3] = 1.0
-            A[row, sk + 3] = -1.0
-            A[row, ck + 1] = -dt
+            A[row, sk1 + 3] = 1.0; A[row, sk + 3] = -1.0; A[row, ck + 1] = -dt
             lb[row] = 0.0; ub[row] = 0.0; row += 1
 
-        # --- Kinematic feasibility: vs >= rho * |vd| ---
-        for k in range(H + 1):
+        # --- Kinematic feasibility (skip k=0, pinned) ---
+        for k in range(1, H + 1):
             sk = s_off + 4 * k
-            # vs - rho * vd >= 0
-            A[row, sk + 2] = 1.0
-            A[row, sk + 3] = -rho
+            A[row, sk + 2] = 1.0; A[row, sk + 3] = -rho
             lb[row] = 0.0; ub[row] = np.inf; row += 1
-            # vs + rho * vd >= 0
-            A[row, sk + 2] = 1.0
-            A[row, sk + 3] = rho
+            A[row, sk + 2] = 1.0; A[row, sk + 3] = rho
             lb[row] = 0.0; ub[row] = np.inf; row += 1
 
-        # --- Road boundaries: d_right <= d <= d_left ---
-        for k in range(H + 1):
+        # --- Road boundaries (skip k=0, pinned) ---
+        for k in range(1, H + 1):
             sk = s_off + 4 * k
-            # d_k >= d_right[k]
             A[row, sk + 1] = 1.0
             lb[row] = road_right[k]; ub[row] = np.inf; row += 1
-            # d_k <= d_left[k]  =>  -d_k >= -d_left[k]
             A[row, sk + 1] = -1.0
             lb[row] = -road_left[k]; ub[row] = np.inf; row += 1
 
-        # --- L1 slack: e >= |state_ref - state| (for s and d tracking) ---
+        # --- L1 slack (reference uses global step index) ---
         for k in range(H + 1):
             sk = s_off + 4 * k
             ek = e_off + 2 * k
-            # Reference s at step k: linearly interpolate toward s_goal
-            ref_s = s0 + v_goal * k * dt
-            ref_s = min(ref_s, s_goal)
-            ref_d = 0.0  # stay centred
+            gk = global_step_offset + k
+            ref_s = min(global_s0 + v_goal * gk * dt, s_goal)
+            ref_d = 0.0
 
-            # es >= s - ref_s  =>  es - s >= -ref_s
-            A[row, ek + 0] = 1.0
-            A[row, sk + 0] = -1.0
+            A[row, ek + 0] = 1.0; A[row, sk + 0] = -1.0
             lb[row] = -ref_s; ub[row] = np.inf; row += 1
-
-            # es >= -(s - ref_s)  =>  es + s >= ref_s
-            A[row, ek + 0] = 1.0
-            A[row, sk + 0] = 1.0
+            A[row, ek + 0] = 1.0; A[row, sk + 0] = 1.0
             lb[row] = ref_s; ub[row] = np.inf; row += 1
-
-            # ed >= d - ref_d  =>  ed - d >= -ref_d
-            A[row, ek + 1] = 1.0
-            A[row, sk + 1] = -1.0
+            A[row, ek + 1] = 1.0; A[row, sk + 1] = -1.0
             lb[row] = -ref_d; ub[row] = np.inf; row += 1
-
-            # ed >= -(d - ref_d)  =>  ed + d >= ref_d
-            A[row, ek + 1] = 1.0
-            A[row, sk + 1] = 1.0
+            A[row, ek + 1] = 1.0; A[row, sk + 1] = 1.0
             lb[row] = ref_d; ub[row] = np.inf; row += 1
 
         # --- Collision avoidance (Big-M) ---
         for obs_idx in range(N_obs):
             obs = obstacles[obs_idx]
 
-            # Project obstacle body-frame dimensions into Frenet (s, d)
             obs_half_L = obs['length'] / 2.0
             obs_half_W = obs['width'] / 2.0
             obs_s0 = float(obs['s'][0])
@@ -1215,96 +1411,71 @@ class TwoStageOPT:
             half_d = self._ego_width / 2.0 + half_d_obs + self._collision_margin
 
             for k in range(H):
-                sk = s_off + 4 * (k + 1)  # ego state at k+1 (skip initial)
+                sk = s_off + 4 * (k + 1)
                 b_base = b_off + 4 * (obs_idx * H + k)
 
-                s_obs = obs['s'][k + 1] if k + 1 < len(obs['s']) else obs['s'][-1]
-                d_obs = obs['d'][k + 1] if k + 1 < len(obs['d']) else obs['d'][-1]
+                s_obs = float(obs['s'][k + 1]) if k + 1 < len(obs['s']) else float(obs['s'][-1])
+                d_obs = float(obs['d'][k + 1]) if k + 1 < len(obs['d']) else float(obs['d'][-1])
 
-                # s_ego - s_obs >= half_s - M * b1
-                # => s_ego + M*b1 >= half_s + s_obs
-                A[row, sk + 0] = 1.0
-                A[row, b_base + 0] = M
+                A[row, sk + 0] = 1.0; A[row, b_base + 0] = M
                 lb[row] = half_s + s_obs; ub[row] = np.inf; row += 1
 
-                # s_obs - s_ego >= half_s - M * b2
-                # => -s_ego + M*b2 >= half_s - s_obs
-                A[row, sk + 0] = -1.0
-                A[row, b_base + 1] = M
+                A[row, sk + 0] = -1.0; A[row, b_base + 1] = M
                 lb[row] = half_s - s_obs; ub[row] = np.inf; row += 1
 
-                # d_ego - d_obs >= half_d - M * b3
-                A[row, sk + 1] = 1.0
-                A[row, b_base + 2] = M
+                A[row, sk + 1] = 1.0; A[row, b_base + 2] = M
                 lb[row] = half_d + d_obs; ub[row] = np.inf; row += 1
 
-                # d_obs - d_ego >= half_d - M * b4
-                A[row, sk + 1] = -1.0
-                A[row, b_base + 3] = M
+                A[row, sk + 1] = -1.0; A[row, b_base + 3] = M
                 lb[row] = half_d - d_obs; ub[row] = np.inf; row += 1
 
-                # sum(b_i) <= 3  =>  at least one constraint active
                 for j in range(4):
                     A[row, b_base + j] = 1.0
                 lb[row] = -np.inf; ub[row] = 3.0; row += 1
 
-        # Trim unused rows
-        A = A[:row]
-        lb = lb[:row]
-        ub = ub[:row]
+        A = A[:row]; lb = lb[:row]; ub = ub[:row]
 
         # --- Variable bounds ---
         var_lb = np.full(n_vars, -np.inf)
         var_ub = np.full(n_vars, np.inf)
 
-        # State bounds: milp_v_min <= vs <= milp_v_max
-        for k in range(H + 1):
+        for k in range(1, H + 1):
             var_lb[s_off + 4 * k + 2] = self._milp_v_min
             var_ub[s_off + 4 * k + 2] = self._milp_v_max
 
-        # Control bounds (separate s and d)
-        var_lb[c_off:c_off + n_ctrl:2] = self._milp_a_x_min    # as lower
-        var_ub[c_off:c_off + n_ctrl:2] = self._milp_a_x_max    # as upper
-        var_lb[c_off + 1:c_off + n_ctrl:2] = self._milp_a_y_min  # ad lower
-        var_ub[c_off + 1:c_off + n_ctrl:2] = self._milp_a_y_max  # ad upper
+        var_lb[c_off:c_off + n_ctrl:2] = self._milp_a_x_min
+        var_ub[c_off:c_off + n_ctrl:2] = self._milp_a_x_max
+        var_lb[c_off + 1:c_off + n_ctrl:2] = self._milp_a_y_min
+        var_ub[c_off + 1:c_off + n_ctrl:2] = self._milp_a_y_max
 
-        # Slack bounds: >= 0
         var_lb[e_off:e_off + n_slack] = 0.0
+        var_lb[b_off:] = 0.0; var_ub[b_off:] = 1.0
 
-        # Binary bounds: [0, 1]
-        var_lb[b_off:] = 0.0
-        var_ub[b_off:] = 1.0
-
-        # --- Integrality ---
         integrality = np.zeros(n_vars)
-        integrality[b_off:] = 1  # binary variables
+        integrality[b_off:] = 1
 
         # --- Solve ---
-        constraints = LinearConstraint(csc_matrix(A), lb, ub)
-
         try:
             result = milp(
                 c=c_vec,
-                constraints=constraints,
+                constraints=LinearConstraint(csc_matrix(A), lb, ub),
                 integrality=integrality,
                 bounds=Bounds(var_lb, var_ub),
-                options={'time_limit': 2.0},
+                options={'time_limit': 1.0},
             )
         except Exception as e:
-            logger.debug("MILP solver exception: %s", e)
+            print("MILP chunk exception: %s", e)
+            logger.debug("MILP chunk exception: %s", e)
             return None
 
         if not result.success:
-            logger.debug("MILP did not converge: %s", result.message)
+            print("MILP chunk (offset=%d, H=%d) infeasible: %s",
+                         global_step_offset, H, result.message)
+            logger.debug("MILP chunk (offset=%d, H=%d) infeasible: %s",
+                         global_step_offset, H, result.message)
             return None
 
-        # Extract states: (H+1, 4) [s, d, vs, vd]
-        milp_states = result.x[s_off:s_off + n_state].reshape(H + 1, 4)
-        return milp_states
-
-    # ------------------------------------------------------------------
-    # MILP -> NLP warm-start conversion
-    # ------------------------------------------------------------------
+        return result.x[s_off:s_off + n_state].reshape(H + 1, 4)
 
     def _milp_to_nlp_warmstart(self, milp_states, frenet_state):
         """Convert MILP [s, d, vs, vd] to NLP [s, d, phi, v] + controls.
@@ -1420,8 +1591,8 @@ class TwoStageOPT:
                 opti.subject_to(
                     S[3, k + 1] == S[3, k] + U[0, k] * dt)
 
-            # --- Road boundary constraints ---
-            for k in range(H + 1):
+            # --- Road boundary constraints (skip k=0, pinned to reality) ---
+            for k in range(1, H + 1):
                 opti.subject_to(S[1, k] >= road_right[k])
                 opti.subject_to(S[1, k] <= road_left[k])
 
@@ -1430,8 +1601,8 @@ class TwoStageOPT:
                 opti.subject_to(opti.bounded(self._nlp_a_min, U[0, k], self._nlp_a_max))
                 opti.subject_to(opti.bounded(-self._nlp_delta_max, U[1, k], self._nlp_delta_max))
 
-            # --- Speed bounds ---
-            for k in range(H + 1):
+            # --- Speed bounds (skip k=0, pinned to reality) ---
+            for k in range(1, H + 1):
                 opti.subject_to(opti.bounded(self._nlp_v_min, S[3, k], self._nlp_v_max))
 
             # --- Jerk constraints ---
@@ -1479,7 +1650,7 @@ class TwoStageOPT:
             opti.set_initial(U, warm_controls.T)
 
             # --- Solver options ---
-            p_opts = {'expand': True}
+            p_opts = {'expand': True, 'print_time': False}
             s_opts = {
                 'max_iter': 200,
                 'warm_start_init_point': 'yes',
@@ -1497,5 +1668,6 @@ class TwoStageOPT:
             return nlp_states, nlp_controls, True
 
         except Exception as e:
+            print("NLP solver failed: %s", e)
             logger.debug("NLP solver failed: %s", e)
             return warm_states, warm_controls, False
