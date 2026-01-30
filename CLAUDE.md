@@ -82,6 +82,9 @@ IGP2/
 - `scripts/debug/debug_carla.py` - CARLA debugging
 - `scripts/run.py` - Main simulation runner
 
+### On epistemic-planning branch:
+- `scripts/debug/belief_agent_demo.py` - BeliefAgent CARLA demo with static obstacle avoidance
+
 ### On soa-tests branch:
 - `scripts/debug/soa_examples.py` - SOA experiment runner with keyboard control
 
@@ -130,6 +133,10 @@ Scenarios are defined in JSON files under `scenarios/configs/`. Example structur
   ],
   "failure_zones": [
     { "box": {...}, "frames": { "start": 0, "end": 275 } }
+  ],
+  "static_objects": [
+    { "position": [60.0, -2.5], "heading": 0.0, "blueprint": "vehicle.audi.a2" },
+    { "position": [75.0, -2.5], "blueprint": "static.prop.streetbarrier", "length": 2.0, "width": 0.5 }
   ]
 }
 ```
@@ -141,6 +148,7 @@ Scenarios are defined in JSON files under `scenarios/configs/`. Example structur
 | `MCTSAgent` | Plans using MCTS with goal recognition | Ego vehicle, complex decision making |
 | `TrafficAgent` | Follows A* computed macro actions | Background traffic, simple navigation |
 | `KeyboardAgent` | Manual WASD/arrow control | Testing, experiments (soa-tests only) |
+| `BeliefAgent` | Belief-conditioned planning (TwoStageOPT) | Epistemic planning with static obstacle avoidance |
 | `SharedAutonomyAgent` | MCTS + epistemic maneuver prediction | SOA experiments (soa-tests only) |
 
 ## Key Classes
@@ -152,6 +160,62 @@ Scenarios are defined in JSON files under `scenarios/configs/`. Example structur
 - `GoalRecognition` (`igp2/recognition/goalrecognition.py`) - Infer agent goals
 - `ManeuverRecognition` (`igp2/epistemic/maneuver_recognition.py`) - Maneuver-level goal recognition
 - `SharedAutonomyAgent` (`igp2/agents/shared_autonomy_agent.py`) - SOA agent with epistemic prediction
+
+## Static Objects (Collision Avoidance)
+
+Static objects (parked vehicles, barriers, props) can be added to CARLA scenarios and are automatically included in the observation frame for collision avoidance.
+
+### How It Works
+
+1. **Spawning**: `CarlaSim.add_static_object()` or `spawn_static_objects_from_config()` spawns actors in CARLA. Vehicle blueprints have physics disabled to keep them stationary.
+2. **Observation**: `CarlaSim.__get_current_observation()` adds static objects to the frame with:
+   - **Stable negative IDs** (`-1`, `-2`, ...) to avoid conflicts with agent IDs
+   - **Zero velocity/acceleration** so constant-velocity prediction keeps them stationary
+   - **Correct dimensions** via `AgentMetadata(length, width, agent_type="static")`
+3. **Planning**: `TwoStageOPT` (used by `BeliefAgent`, `MCTSAgent`) reads obstacles from `observation.frame` — static objects are included automatically. MILP/NLP collision constraints use the metadata `length`/`width` for avoidance zones.
+
+Static vehicles (`vehicle.*`) in the CARLA `*vehicle*` filter are **skipped** in the normal vehicle loop and only added via the static objects path, preventing duplicate frame entries.
+
+### Config Format
+
+Add `static_objects` at the top level of a scenario JSON config:
+
+```json
+"static_objects": [
+  {
+    "position": [60.0, -2.5],
+    "heading": 0.0,
+    "blueprint": "vehicle.audi.a2"
+  },
+  {
+    "position": [75.0, -2.5],
+    "heading": 0.0,
+    "blueprint": "static.prop.streetbarrier",
+    "length": 2.0,
+    "width": 0.5
+  }
+]
+```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `position` | Yes | — | `[x, y]` in IGP2 coordinates |
+| `heading` | No | `0.0` | Heading in radians |
+| `blueprint` | No | `static.prop.trafficcone01` | CARLA blueprint name |
+| `z_offset` | No | `0.1` | Spawn height offset |
+| `length` | No | from bounding box | Override object length (metres) |
+| `width` | No | from bounding box | Override object width (metres) |
+
+### Loading in Scripts
+
+```python
+# In your script, after adding agents:
+static_objs = config.get("static_objects", [])
+if static_objs:
+    carla_sim.spawn_static_objects_from_config(static_objs)
+```
+
+See `scripts/debug/belief_agent_demo.py` and `scripts/debug/soa_examples.py` for examples.
 
 ## Epistemic Module (soa-tests branch)
 

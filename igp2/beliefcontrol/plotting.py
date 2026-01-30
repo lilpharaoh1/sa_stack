@@ -14,7 +14,7 @@ from typing import List, Optional
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon as MplPolygon
+from matplotlib.patches import Polygon as MplPolygon, Ellipse as MplEllipse
 
 from igp2.core.agentstate import AgentState, AgentMetadata
 from igp2.core.goal import Goal
@@ -224,7 +224,14 @@ class OptimisationPlotter:
                full_rollout: Optional[np.ndarray],
                trajectory_cl: StateTrajectory,
                agent_id: int,
-               step: int):
+               step: int,
+               *,
+               other_agents=None,
+               obstacles=None,
+               frenet=None,
+               ego_length: float = 4.5,
+               ego_width: float = 1.8,
+               collision_margin: float = 0.5):
         """Redraw dynamic content for one simulation step.
 
         Args:
@@ -237,6 +244,12 @@ class OptimisationPlotter:
             trajectory_cl: Closed-loop history trajectory of the agent.
             agent_id: Agent ID (for the title).
             step: Current simulation step (for the title).
+            other_agents: Dict {agent_id: AgentState} of other vehicles.
+            obstacles: List of obstacle dicts from _predict_obstacles.
+            frenet: _FrenetFrame instance for coordinate conversion.
+            ego_length: Ego vehicle length (m).
+            ego_width: Ego vehicle width (m).
+            collision_margin: Extra safety margin around obstacles (m).
         """
         if self._fig is None or not plt.fignum_exists(self._fig.number):
             self._init()
@@ -294,6 +307,87 @@ class OptimisationPlotter:
                     facecolor=colour,
                     edgecolor=colour[:3] + (0.8,),
                     linewidth=0.8, zorder=4,
+                )
+                ax.add_patch(patch)
+                ax.draw_artist(patch)
+                dynamic.append(patch)
+
+        # --- NLP collision avoidance ellipses ---
+        if obstacles and frenet:
+            for obs in obstacles:
+                # Project obstacle body-frame dimensions into Frenet (s, d)
+                obs_half_L = obs['length'] / 2.0
+                obs_half_W = obs['width'] / 2.0
+                obs_s0 = float(obs['s'][0])
+                _, _, _, road_angle_obs = frenet._interpolate(obs_s0)
+                dh = obs.get('heading', road_angle_obs) - road_angle_obs
+                rx = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + collision_margin
+                ry = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + collision_margin
+
+                s_arr = obs['s']
+                d_arr = obs['d']
+                n_steps = len(s_arr)
+                ellipse_indices = list(range(0, n_steps,
+                                             self._footprint_interval))
+                if ellipse_indices[-1] != n_steps - 1:
+                    ellipse_indices.append(n_steps - 1)
+
+                for idx in ellipse_indices:
+                    # Convert obstacle Frenet position to world
+                    w = frenet.frenet_to_world(float(s_arr[idx]),
+                                               float(d_arr[idx]))
+                    # Get road tangent angle at this s position
+                    _, _, _, road_angle = frenet._interpolate(
+                        float(s_arr[idx]))
+
+                    ellipse = MplEllipse(
+                        xy=(w['x'], w['y']),
+                        width=2 * rx, height=2 * ry,
+                        angle=np.degrees(road_angle),
+                        facecolor=(1.0, 0.6, 0.0, 0.12),
+                        edgecolor=(0.8, 0.4, 0.0, 0.5),
+                        linestyle='--', linewidth=0.8,
+                        zorder=3,
+                    )
+                    ax.add_patch(ellipse)
+                    ax.draw_artist(ellipse)
+                    dynamic.append(ellipse)
+
+        # --- Predicted obstacle trajectories ---
+        if obstacles and frenet:
+            for obs in obstacles:
+                world_pts = frenet.frenet_to_world_batch(obs['s'], obs['d'])
+                line, = ax.plot(
+                    world_pts[:, 0], world_pts[:, 1],
+                    color=(0.8, 0.4, 0.0), linestyle='--',
+                    linewidth=1.0, alpha=0.7, zorder=5,
+                )
+                ax.draw_artist(line)
+                dynamic.append(line)
+
+        # --- True obstacle positions ---
+        if other_agents:
+            for aid, agent_state in other_agents.items():
+                obs_meta = getattr(agent_state, 'metadata', None)
+                obs_length = obs_meta.length if obs_meta else 4.5
+                obs_width = obs_meta.width if obs_meta else 1.8
+                is_static = (obs_meta is not None
+                             and getattr(obs_meta, 'agent_type', '') == 'static')
+
+                corners = calculate_multiple_bboxes(
+                    [agent_state.position[0]], [agent_state.position[1]],
+                    obs_length, obs_width, agent_state.heading,
+                )[0]
+
+                colour = (0.6, 0.6, 0.6, 0.4) if is_static \
+                    else (0.0, 0.8, 0.8, 0.35)
+                edge = (0.4, 0.4, 0.4, 0.8) if is_static \
+                    else (0.0, 0.6, 0.6, 0.8)
+
+                patch = MplPolygon(
+                    corners, closed=True,
+                    facecolor=colour, edgecolor=edge,
+                    linewidth=1.0, zorder=6,
                 )
                 ax.add_patch(patch)
                 ax.draw_artist(patch)

@@ -16,7 +16,7 @@ from igp2.agents.agent import Agent
 from igp2.carlasim.traffic_manager import TrafficManager
 from igp2.carlasim.carla_agent_wrapper import CarlaAgentWrapper
 from igp2.core.vehicle import Observation
-from igp2.core.agentstate import AgentState
+from igp2.core.agentstate import AgentState, AgentMetadata
 
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,8 @@ class CarlaSim:
         self.__wait_for_server()
 
         self.__agents = {}
-        self.__static_objects = []  # Track spawned static objects
+        self.__static_objects = []  # List of {'actor': carla.Actor, 'igp2_id': int, 'length': float, 'width': float}
+        self.__next_static_id = -1  # Negative IDs to avoid conflict with agent IDs
 
         self.__world = self.__client.get_world()
         self.__map = self.__world.get_map()
@@ -237,7 +238,9 @@ class CarlaSim:
                           position: tuple,
                           heading: float = 0.0,
                           blueprint_name: str = None,
-                          z_offset: float = 0.1) -> carla.Actor:
+                          z_offset: float = 0.1,
+                          length: float = None,
+                          width: float = None) -> carla.Actor:
         """Add a static object to the scene.
 
         Spawns a static object (prop or parked vehicle) at the given position.
@@ -252,6 +255,8 @@ class CarlaSim:
                 - Vehicles (will be made static): 'vehicle.audi.a2', 'vehicle.tesla.model3', etc.
                 If None, defaults to 'static.prop.trafficcone01'.
             z_offset: Height offset for spawning (default 0.1 to avoid ground clipping).
+            length: Object length in metres. If None, derived from CARLA bounding box.
+            width: Object width in metres. If None, derived from CARLA bounding box.
 
         Returns:
             The spawned CARLA actor.
@@ -288,8 +293,24 @@ class CarlaSim:
         if blueprint_name.startswith('vehicle.'):
             actor.set_simulate_physics(False)
 
-        self.__static_objects.append(actor)
-        logger.info(f"Added static object '{blueprint_name}' at position {position} (actor {actor.id}).")
+        # Derive dimensions from CARLA bounding box if not provided
+        bb = actor.bounding_box
+        if length is None:
+            length = bb.extent.x * 2
+        if width is None:
+            width = bb.extent.y * 2
+
+        igp2_id = self.__next_static_id
+        self.__next_static_id -= 1
+
+        self.__static_objects.append({
+            'actor': actor,
+            'igp2_id': igp2_id,
+            'length': length,
+            'width': width,
+        })
+        logger.info(f"Added static object '{blueprint_name}' at position {position} "
+                    f"(actor {actor.id}, igp2_id={igp2_id}, {length:.2f}x{width:.2f}m).")
 
         return actor
 
@@ -316,12 +337,16 @@ class CarlaSim:
             heading = obj.get('heading', 0.0)
             blueprint = obj.get('blueprint', None)
             z_offset = obj.get('z_offset', 0.1)
+            length = obj.get('length', None)
+            width = obj.get('width', None)
 
             actor = self.add_static_object(
                 position=position,
                 heading=heading,
                 blueprint_name=blueprint,
-                z_offset=z_offset
+                z_offset=z_offset,
+                length=length,
+                width=width,
             )
             spawned.append(actor)
 
@@ -333,24 +358,29 @@ class CarlaSim:
         Args:
             actor: The CARLA actor to remove.
         """
-        if actor in self.__static_objects:
-            actor.destroy()
-            self.__static_objects.remove(actor)
-            logger.info(f"Removed static object (actor {actor.id}).")
+        for entry in self.__static_objects:
+            if entry['actor'] is actor:
+                actor.destroy()
+                self.__static_objects.remove(entry)
+                logger.info(f"Removed static object (actor {actor.id}, igp2_id={entry['igp2_id']}).")
+                return
 
     def clear_static_objects(self):
         """Remove all static objects from the simulation."""
-        for actor in self.__static_objects:
+        for entry in self.__static_objects:
             try:
-                actor.destroy()
+                entry['actor'].destroy()
             except Exception as e:
                 logger.warning(f"Failed to destroy static object: {e}")
         self.__static_objects.clear()
         logger.info("Cleared all static objects.")
 
     @property
-    def static_objects(self) -> List[carla.Actor]:
-        """List of all spawned static objects."""
+    def static_objects(self) -> List[dict]:
+        """List of all spawned static object entries.
+
+        Each entry is a dict with keys: 'actor', 'igp2_id', 'length', 'width'.
+        """
         return self.__static_objects
 
     def __is_spawn_on_dead_end(self, position: np.ndarray, heading: float) -> bool:
@@ -493,8 +523,14 @@ class CarlaSim:
         actor_list = self.__world.get_actors()
         vehicle_list = actor_list.filter("*vehicle*")
         agent_id_lookup = dict([(a.actor_id, a.agent_id) for a in self.agents.values() if a is not None])
+
+        # Build set of static object CARLA actor IDs to skip in the vehicle loop
+        static_actor_ids = {entry['actor'].id for entry in self.__static_objects}
+
         frame = {}
         for idx, vehicle in enumerate(vehicle_list):
+            if vehicle.id in static_actor_ids:
+                continue  # Will be added below with stable negative ID
             transform = vehicle.get_transform()
             heading = np.deg2rad(-transform.rotation.yaw)
             velocity = vehicle.get_velocity()
@@ -509,6 +545,27 @@ class CarlaSim:
             else:
                 agent_id = vehicle.id
             frame[agent_id] = state
+
+        # Add static objects with stable negative IDs and zero velocity
+        for entry in self.__static_objects:
+            actor = entry['actor']
+            transform = actor.get_transform()
+            heading = np.deg2rad(-transform.rotation.yaw)
+            metadata = AgentMetadata(
+                length=entry['length'],
+                width=entry['width'],
+                agent_type="static",
+            )
+            state = AgentState(
+                time=self.__timestep,
+                position=np.array([transform.location.x, -transform.location.y]),
+                velocity=np.array([0.0, 0.0]),
+                acceleration=np.array([0.0, 0.0]),
+                heading=heading,
+                metadata=metadata,
+            )
+            frame[entry['igp2_id']] = state
+
         return Observation(frame, self.scenario_map)
 
     def __wait_for_server(self):

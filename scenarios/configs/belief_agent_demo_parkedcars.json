@@ -1,0 +1,45 @@
+{
+  "scenario": {
+    "map_path": "scenarios/maps/Town01.xodr",
+    "max_speed": 10.0,
+    "fps": 20,
+    "seed": 21,
+    "max_steps": 1000
+  },
+  "agents": [
+    {
+      "id": 0,
+      "type": "BeliefAgent",
+      "spawn": {
+        "box": {
+          "center": [
+            92.4,
+            -40.1
+          ],
+          "length": 10,
+          "width": 3.5,
+          "heading": 0.0
+        },
+        "velocity": [
+          5.0,
+          10.0
+        ]
+      },
+      "goal": {
+        "box": {
+          "center": [
+            20.0,
+            1.5
+          ],
+          "length": 5,
+          "width": 7,
+          "heading": 0.0
+        }
+      }
+    }
+  ],
+    "static_objects": [
+      {"position": [93.4, -25.0], "heading": 1.57, "blueprint": "vehicle.audi.a2"},
+      {"position": [93.4, -18.0], "heading": 1.57, "blueprint": "vehicle.audi.a2"}
+    ]
+}

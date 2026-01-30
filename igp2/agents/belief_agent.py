@@ -77,7 +77,7 @@ class BeliefAgent(Agent):
                  scenario_map: Map = None,
                  beliefs: Dict[str, Any] = None,
                  policy_type: str = "two_stage_opt",
-                 plot_interval: int = 10,
+                 plot_interval: int = 1,
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
@@ -246,9 +246,24 @@ class BeliefAgent(Agent):
         if isinstance(self._plotter, OptimisationPlotter):
             full_rollout = getattr(self._policy_obj, 'last_rollout', None)
             trajectory = candidates[best_idx] if candidates else None
+
+            # Retrieve obstacle data for visualisation
+            other_agents = getattr(self._policy_obj, 'last_other_agents', None)
+            obstacles = getattr(self._policy_obj, 'last_obstacles', None)
+            frenet = getattr(self._policy_obj, 'frenet_frame', None)
+            collision_margin = getattr(self._policy_obj, 'collision_margin', 0.5)
+            ego_length = getattr(self._policy_obj, 'ego_length', 4.5)
+            ego_width = getattr(self._policy_obj, 'ego_width', 1.8)
+
             self._plotter.update(
                 ego_state, trajectory, full_rollout,
                 self._trajectory_cl, self.agent_id, self._step_count,
+                other_agents=other_agents,
+                obstacles=obstacles,
+                frenet=frenet,
+                ego_length=ego_length,
+                ego_width=ego_width,
+                collision_margin=collision_margin,
             )
         else:
             self._plotter.update(

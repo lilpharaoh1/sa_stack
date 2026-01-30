@@ -566,7 +566,7 @@ class TwoStageOPT:
 
     # Paper default parameters
     DEFAULT_HORIZON = 40
-    DEFAULT_DT = 0.2
+    DEFAULT_DT = 0.1
     DEFAULT_DELTA_MAX = 0.45
     DEFAULT_A_MIN = -3.0
     DEFAULT_A_MAX = 3.0
@@ -643,6 +643,10 @@ class TwoStageOPT:
         self._last_rollout: Optional[np.ndarray] = None       # (H+1, 4) world
         self._ref_start_idx: int = 0
 
+        # Obstacle data (stored for plotter access)
+        self._last_obstacles: Optional[List] = None
+        self._last_other_agents: Optional[Dict] = None
+
         # Build CasADi NLP structure once
         self._nlp_solver = None
         self._nlp_built = False
@@ -688,6 +692,8 @@ class TwoStageOPT:
 
         # Predict obstacles in Frenet frame
         obstacles = self._predict_obstacles(other_agents, self._frenet)
+        self._last_obstacles = obstacles
+        self._last_other_agents = other_agents
 
         # Goal in Frenet: s_goal = total path length, d_goal = 0
         s_goal = self._frenet.total_length
@@ -786,6 +792,36 @@ class TwoStageOPT:
         """
         return self._last_rollout
 
+    @property
+    def last_obstacles(self) -> Optional[List]:
+        """Predicted obstacles from the most recent MPC step."""
+        return self._last_obstacles
+
+    @property
+    def last_other_agents(self) -> Optional[Dict]:
+        """Other-agent states passed to the most recent MPC step."""
+        return self._last_other_agents
+
+    @property
+    def frenet_frame(self) -> Optional['_FrenetFrame']:
+        """The Frenet coordinate frame built from the reference path."""
+        return self._frenet
+
+    @property
+    def collision_margin(self) -> float:
+        """Extra safety margin around obstacles (m)."""
+        return self._collision_margin
+
+    @property
+    def ego_length(self) -> float:
+        """Ego vehicle length (m)."""
+        return self._ego_length
+
+    @property
+    def ego_width(self) -> float:
+        """Ego vehicle width (m)."""
+        return self._ego_width
+
     def reset(self):
         """Reset all MPC state."""
         self._prev_milp_states = None
@@ -795,6 +831,8 @@ class TwoStageOPT:
         self._ref_start_idx = 0
         self._nlp_built = False
         self._nlp_solver = None
+        self._last_obstacles = None
+        self._last_other_agents = None
 
     # ------------------------------------------------------------------
     # Frenet state conversion
@@ -898,6 +936,7 @@ class TwoStageOPT:
                 'd': d_arr,
                 'length': obs_length,
                 'width': obs_width,
+                'heading': float(agent_state.heading),
             })
 
         return obstacles
@@ -1102,9 +1141,18 @@ class TwoStageOPT:
         # --- Collision avoidance (Big-M) ---
         for obs_idx in range(N_obs):
             obs = obstacles[obs_idx]
-            # Rectangle half-sizes (ego + obstacle dimensions + margin)
-            half_s = (self._ego_length + obs['length']) / 2.0 + self._collision_margin
-            half_d = (self._ego_width + obs['width']) / 2.0 + self._collision_margin
+
+            # Project obstacle body-frame dimensions into Frenet (s, d)
+            obs_half_L = obs['length'] / 2.0
+            obs_half_W = obs['width'] / 2.0
+            obs_s0 = float(obs['s'][0])
+            _, _, _, road_angle = self._frenet._interpolate(obs_s0)
+            dh = obs.get('heading', road_angle) - road_angle
+            half_s_obs = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh))
+            half_d_obs = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh))
+
+            half_s = self._ego_length / 2.0 + half_s_obs + self._collision_margin
+            half_d = self._ego_width / 2.0 + half_d_obs + self._collision_margin
 
             for k in range(H):
                 sk = s_off + 4 * (k + 1)  # ego state at k+1 (skip initial)
@@ -1332,19 +1380,38 @@ class TwoStageOPT:
                                              U[0, k + 1] - U[0, k],
                                              jerk_limit))
 
-            # --- Elliptical collision avoidance ---
+            # --- Elliptical collision avoidance (corner-based) ---
+            # Check all four corners of the rotated ego vehicle against
+            # an exclusion ellipse around each obstacle.
+            half_L = self._ego_length / 2.0
+            half_W = self._ego_width / 2.0
+
             for obs_idx in range(N_obs):
                 obs = obstacles[obs_idx]
-                rx = (self._ego_length + obs['length']) / 2.0 + self._collision_margin
-                ry = (self._ego_width + obs['width']) / 2.0 + self._collision_margin
+
+                # Project obstacle body-frame dimensions into Frenet (s, d)
+                obs_half_L = obs['length'] / 2.0
+                obs_half_W = obs['width'] / 2.0
+                obs_s0 = float(obs['s'][0])
+                _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
+                dh = obs.get('heading', road_angle_obs) - road_angle_obs
+                rx = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + self._collision_margin
+                ry = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + self._collision_margin
 
                 for k in range(1, H + 1):
                     s_obs = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
                     d_obs = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
 
-                    opti.subject_to(
-                        ((S[0, k] - s_obs) / rx)**2 +
-                        ((S[1, k] - d_obs) / ry)**2 >= 1.0)
+                    cos_phi = ca.cos(S[2, k])
+                    sin_phi = ca.sin(S[2, k])
+
+                    for sl, sw in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                        c_s = S[0, k] + sl * half_L * cos_phi - sw * half_W * sin_phi
+                        c_d = S[1, k] + sl * half_L * sin_phi + sw * half_W * cos_phi
+
+                        opti.subject_to(
+                            ((c_s - s_obs) / rx)**2 +
+                            ((c_d - d_obs) / ry)**2 >= 1.0)
 
             # --- Initial guess ---
             opti.set_initial(S, warm_states.T)

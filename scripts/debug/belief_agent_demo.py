@@ -149,6 +149,11 @@ def main():
         agents[aid] = create_agent(agent_config, frame, fps, scenario_map)
         carla_sim.add_agent(agents[aid], "ego" if aid == ego_id else None)
 
+    # Add static objects from config
+    static_objs = config.get("static_objects", [])
+    if static_objs:
+        carla_sim.spawn_static_objects_from_config(static_objs)
+
     # Set up camera to follow the ego vehicle
     ego_wrapper = carla_sim.get_ego()
     if ego_wrapper is not None:
