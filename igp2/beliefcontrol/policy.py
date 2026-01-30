@@ -536,9 +536,9 @@ class TwoStageOPT:
     regions, road boundaries, jerk constraints, and the paper's cost
     function.
 
-    The planning timestep ``dt`` (default 0.2 s) is independent of the
+    The planning timestep ``dt`` (default 0.1 s) is independent of the
     simulation framerate.  Each MPC call plans at ``dt`` resolution over
-    ``horizon`` steps (default 40 = 8 s), but only the first action is
+    ``horizon`` steps (default 40 = 4 s), but only the first action is
     applied for one simulation step (receding-horizon MPC).
 
     Args:
@@ -547,31 +547,52 @@ class TwoStageOPT:
         reference_waypoints: Concatenated A* reference path (N, 2).
         scenario_map: Road layout for boundary queries. May be None.
         horizon: Number of planning steps (default 40).
-        dt: Planning timestep in seconds (default 0.2).
+        dt: Planning timestep in seconds (default 0.1).
         target_speed: Desired cruising speed (m/s).
-        delta_max: Maximum steering angle (rad).
-        a_min: Minimum acceleration (m/s^2, negative for braking).
-        a_max: Maximum acceleration (m/s^2).
-        jerk_max: Maximum jerk (m/s^3).
-        v_max: Maximum speed (m/s).
         milp_rho: Kinematic feasibility ratio for MILP.
         big_m: Big-M constant for collision avoidance.
-        w_x: Cost weight for longitudinal tracking.
-        w_v: Cost weight for speed tracking.
-        w_y: Cost weight for lateral deviation.
-        w_a: Cost weight for acceleration.
-        w_delta: Cost weight for steering.
         collision_margin: Extra safety margin around obstacles (m).
+
+    MILP constraints (point-mass Frenet model).
+    x = longitudinal (along path, Frenet s), y = lateral (Frenet d):
+
+        milp_a_x_min: Min longitudinal acceleration.
+        milp_a_x_max: Max longitudinal acceleration.
+        milp_a_y_min: Min lateral acceleration.
+        milp_a_y_max: Max lateral acceleration.
+        milp_jerk_x_max: Longitudinal jerk limit (None = no constraint).
+        milp_jerk_y_max: Lateral jerk limit (None = no constraint).
+        milp_v_min: Min longitudinal velocity.
+        milp_v_max: Max longitudinal velocity.
+
+    MILP cost weights (L1 objective):
+
+        milp_w_x: Weight on longitudinal position tracking.
+        milp_w_v: Weight on speed tracking.
+        milp_w_y: Weight on lateral deviation.
+        milp_w_a: Weight on acceleration.
+
+    NLP constraints (bicycle model):
+
+        nlp_a_min: Min acceleration.
+        nlp_a_max: Max acceleration.
+        nlp_delta_max: Max steering angle.
+        nlp_steer_rate_max: Max steering rate (None = no constraint).
+        nlp_jerk_max: Max jerk.
+        nlp_v_min: Min speed.
+        nlp_v_max: Max speed.
+
+    NLP cost weights (quadratic objective):
+
+        nlp_w_x: Weight on longitudinal tracking error.
+        nlp_w_v: Weight on speed tracking error.
+        nlp_w_y: Weight on lateral deviation.
+        nlp_w_a: Weight on acceleration.
+        nlp_w_delta: Weight on steering.
     """
 
-    # Paper default parameters
     DEFAULT_HORIZON = 40
     DEFAULT_DT = 0.1
-    DEFAULT_DELTA_MAX = 0.45
-    DEFAULT_A_MIN = -3.0
-    DEFAULT_A_MAX = 3.0
-    DEFAULT_JERK_MAX = 0.5
-    DEFAULT_V_MAX = 10.0
     DEFAULT_RHO = 1.5
     DEFAULT_BIG_M = 1000.0
     N_OBS_MAX = 10  # pre-allocated obstacle slots in NLP
@@ -584,21 +605,42 @@ class TwoStageOPT:
                  horizon: int = None,
                  dt: float = None,
                  target_speed: float = 5.0,
-                 delta_max: float = None,
-                 a_min: float = None,
-                 a_max: float = None,
-                 jerk_max: float = None,
-                 v_max: float = None,
-                 milp_rho: float = None,
+                 milp_rho: float = 1.5,
                  big_m: float = None,
-                 w_x: float = 1.0,
-                 w_v: float = 0.5,
-                 w_y: float = 2.0,
-                 w_a: float = 0.1,
-                 w_delta: float = 0.1,
-                 collision_margin: float = 0.5,
+                 collision_margin: float = 0.9,
+                 # MILP constraints
+                 milp_a_x_min: float = -3.0,
+                 milp_a_x_max: float = 3.0,
+                 milp_a_y_min: float = -0.5,
+                 milp_a_y_max: float = 0.5,
+                 milp_jerk_x_max: float = 0.5,
+                 milp_jerk_y_max: float = 0.1,
+                 milp_v_min: float = 0.0,
+                 milp_v_max: float = 3.0,
+                 # MILP cost weights (L1 objective)
+                 milp_w_x: float = 0.9,
+                 milp_w_v: float = 0.5,
+                 milp_w_y: float = 0.05,
+                 milp_w_a: float = 0.4,
+                 # NLP constraints
+                 nlp_a_min: float = -3.0,
+                 nlp_a_max: float = 3.0,
+                 nlp_delta_max: float = 0.45,
+                 nlp_steer_rate_max: float = 0.18,
+                 nlp_jerk_max: float = 0.5,
+                 nlp_v_min: float = 0.0,
+                 nlp_v_max: float = 10,
+                 # NLP cost weights
+                 nlp_w_x: float = 0.1,
+                 nlp_w_v: float = 2.5,
+                 nlp_w_y: float = 0.05,
+                 nlp_w_a: float = 1.0,
+                 nlp_w_delta: float = 2.0,
                  # Legacy params (ignored for back-compat)
                  max_steer=None, w_ref=None, w_speed=None, w_smooth=None,
+                 w_x=None, w_v=None, w_y=None, w_a=None, w_delta=None,
+                 a_min=None, a_max=None, delta_max=None, jerk_max=None,
+                 v_max=None,
                  **kwargs):
         self._fps = fps
         self._dt_sim = 1.0 / fps
@@ -609,21 +651,40 @@ class TwoStageOPT:
         self._horizon = horizon if horizon is not None else self.DEFAULT_HORIZON
         self._target_speed = target_speed
 
-        # Dynamics limits
-        self._delta_max = delta_max if delta_max is not None else self.DEFAULT_DELTA_MAX
-        self._a_min = a_min if a_min is not None else self.DEFAULT_A_MIN
-        self._a_max = a_max if a_max is not None else self.DEFAULT_A_MAX
-        self._jerk_max = jerk_max if jerk_max is not None else self.DEFAULT_JERK_MAX
-        self._v_max = v_max if v_max is not None else self.DEFAULT_V_MAX
+        # MILP constraints
+        self._milp_a_x_min = milp_a_x_min
+        self._milp_a_x_max = milp_a_x_max
+        self._milp_a_y_min = milp_a_y_min
+        self._milp_a_y_max = milp_a_y_max
+        self._milp_jerk_x_max = milp_jerk_x_max
+        self._milp_jerk_y_max = milp_jerk_y_max
+        self._milp_v_min = milp_v_min
+        self._milp_v_max = milp_v_max
+
+        # MILP cost weights (L1)
+        self._milp_w_x = milp_w_x
+        self._milp_w_v = milp_w_v
+        self._milp_w_y = milp_w_y
+        self._milp_w_a = milp_w_a
+
+        # NLP constraints
+        self._nlp_a_min = nlp_a_min
+        self._nlp_a_max = nlp_a_max
+        self._nlp_delta_max = nlp_delta_max
+        self._nlp_steer_rate_max = nlp_steer_rate_max
+        self._nlp_jerk_max = nlp_jerk_max
+        self._nlp_v_min = nlp_v_min
+        self._nlp_v_max = nlp_v_max
+
+        # NLP cost weights
+        self._nlp_w_x = nlp_w_x
+        self._nlp_w_v = nlp_w_v
+        self._nlp_w_y = nlp_w_y
+        self._nlp_w_a = nlp_w_a
+        self._nlp_w_delta = nlp_w_delta
+
         self._milp_rho = milp_rho if milp_rho is not None else self.DEFAULT_RHO
         self._big_m = big_m if big_m is not None else self.DEFAULT_BIG_M
-
-        # Cost weights (paper's cost function)
-        self._w_x = w_x
-        self._w_v = w_v
-        self._w_y = w_y
-        self._w_a = w_a
-        self._w_delta = w_delta
 
         # Collision
         self._collision_margin = collision_margin
@@ -1001,7 +1062,6 @@ class TwoStageOPT:
         dt = self._dt
         rho = self._milp_rho
         M = self._big_m
-        max_accel = min(self._a_max, -self._a_min)
 
         # Initial Frenet velocity components
         s0, d0, phi0, v0 = frenet_state
@@ -1197,15 +1257,16 @@ class TwoStageOPT:
         var_lb = np.full(n_vars, -np.inf)
         var_ub = np.full(n_vars, np.inf)
 
-        # State bounds: vs >= 0 (forward motion)
+        # State bounds: milp_v_min <= vs <= milp_v_max
         for k in range(H + 1):
-            var_lb[s_off + 4 * k + 2] = 0.0  # vs >= 0
+            var_lb[s_off + 4 * k + 2] = self._milp_v_min
+            var_ub[s_off + 4 * k + 2] = self._milp_v_max
 
-        # Control bounds
-        var_lb[c_off:c_off + n_ctrl:2] = -max_accel  # as
-        var_ub[c_off:c_off + n_ctrl:2] = max_accel
-        var_lb[c_off + 1:c_off + n_ctrl:2] = -max_accel  # ad
-        var_ub[c_off + 1:c_off + n_ctrl:2] = max_accel
+        # Control bounds (separate s and d)
+        var_lb[c_off:c_off + n_ctrl:2] = self._milp_a_x_min    # as lower
+        var_ub[c_off:c_off + n_ctrl:2] = self._milp_a_x_max    # as upper
+        var_lb[c_off + 1:c_off + n_ctrl:2] = self._milp_a_y_min  # ad lower
+        var_ub[c_off + 1:c_off + n_ctrl:2] = self._milp_a_y_max  # ad upper
 
         # Slack bounds: >= 0
         var_lb[e_off:e_off + n_slack] = 0.0
@@ -1275,14 +1336,14 @@ class TwoStageOPT:
         for k in range(H):
             # Acceleration
             a_k = np.clip((speeds[k + 1] - speeds[k]) / dt,
-                          self._a_min, self._a_max)
+                          self._nlp_a_min, self._nlp_a_max)
 
             # Steering from heading change
             d_phi = (phis[k + 1] - phis[k] + np.pi) % (2 * np.pi) - np.pi
             spd = max(speeds[k], 0.5)
             sin_arg = np.clip(d_phi * L / (2.0 * spd * dt), -1.0, 1.0)
             delta_k = np.clip(np.arcsin(sin_arg),
-                              -self._delta_max, self._delta_max)
+                              -self._nlp_delta_max, self._nlp_delta_max)
 
             nlp_controls[k] = [a_k, delta_k]
 
@@ -1334,12 +1395,12 @@ class TwoStageOPT:
             # --- Cost function ---
             cost = 0.0
             for k in range(H + 1):
-                cost += self._w_x * (S[0, k] - s_goal)**2
-                cost += self._w_v * (S[3, k] - v_goal)**2
-                cost += self._w_y * S[1, k]**2
+                cost += self._nlp_w_x * (S[0, k] - s_goal)**2
+                cost += self._nlp_w_v * (S[3, k] - v_goal)**2
+                cost += self._nlp_w_y * S[1, k]**2
             for k in range(H):
-                cost += self._w_a * U[0, k]**2
-                cost += self._w_delta * U[1, k]**2
+                cost += self._nlp_w_a * U[0, k]**2
+                cost += self._nlp_w_delta * U[1, k]**2
             opti.minimize(cost)
 
             # --- Initial state constraint ---
@@ -1366,15 +1427,15 @@ class TwoStageOPT:
 
             # --- Control bounds ---
             for k in range(H):
-                opti.subject_to(opti.bounded(self._a_min, U[0, k], self._a_max))
-                opti.subject_to(opti.bounded(-self._delta_max, U[1, k], self._delta_max))
+                opti.subject_to(opti.bounded(self._nlp_a_min, U[0, k], self._nlp_a_max))
+                opti.subject_to(opti.bounded(-self._nlp_delta_max, U[1, k], self._nlp_delta_max))
 
             # --- Speed bounds ---
             for k in range(H + 1):
-                opti.subject_to(opti.bounded(0.0, S[3, k], self._v_max))
+                opti.subject_to(opti.bounded(self._nlp_v_min, S[3, k], self._nlp_v_max))
 
             # --- Jerk constraints ---
-            jerk_limit = self._jerk_max * dt
+            jerk_limit = self._nlp_jerk_max * dt
             for k in range(H - 1):
                 opti.subject_to(opti.bounded(-jerk_limit,
                                              U[0, k + 1] - U[0, k],
