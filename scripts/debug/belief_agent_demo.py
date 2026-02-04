@@ -77,6 +77,67 @@ def generate_random_frame(ego: int,
     return ret
 
 
+def extract_agent_trajectories(agents: Dict, ego_id: int, frame: Dict,
+                               horizon: int = 40, dt: float = 0.2) -> Dict[int, np.ndarray]:
+    """Extract planned trajectories from TrafficAgents for collision avoidance.
+
+    Extracts the planned waypoints from each TrafficAgent's current macro action
+    and returns them as (T, 2) arrays of world positions.
+
+    Args:
+        agents: Dict mapping agent_id -> Agent instance.
+        ego_id: ID of the ego agent (excluded from output).
+        frame: Current observation frame with agent states.
+        horizon: Number of planning steps (T).
+        dt: Planning timestep in seconds.
+
+    Returns:
+        Dict mapping agent_id -> (T+1, 2) array of planned positions.
+    """
+    trajectories = {}
+
+    for aid, agent in agents.items():
+        if aid == ego_id:
+            continue
+
+        # Only TrafficAgents have macro_actions with planned trajectories
+        if not hasattr(agent, 'macro_actions') or not agent.macro_actions:
+            continue
+
+        # Collect all waypoints from current and future macro actions
+        all_waypoints = []
+        for macro in agent.macro_actions:
+            for maneuver in macro._maneuvers:
+                if hasattr(maneuver, 'trajectory') and maneuver.trajectory is not None:
+                    all_waypoints.append(maneuver.trajectory.path)
+
+        if not all_waypoints:
+            continue
+
+        # Concatenate all waypoints
+        combined = np.vstack(all_waypoints)
+
+        # Get current position from frame
+        if aid in frame:
+            current_pos = np.array(frame[aid].position)
+        else:
+            # Fallback: use first waypoint
+            current_pos = combined[0]
+
+        # Find closest waypoint index
+        dists = np.linalg.norm(combined - current_pos, axis=1)
+        closest_idx = int(np.argmin(dists))
+
+        # Extract trajectory from closest point onwards
+        future_traj = combined[closest_idx:]
+
+        # Resample to match planning timesteps if needed
+        # For now, just use the waypoints directly (assuming similar spacing)
+        trajectories[aid] = future_traj
+
+    return trajectories
+
+
 def create_agent(agent_config, frame, fps, scenario_map):
     """Create an agent from its config dict."""
     base = {
@@ -167,10 +228,33 @@ def main():
     logger.info("Starting CARLA simulation (%d steps, ego=%d as BeliefAgent)",
                 args.steps, ego_id)
 
+    # Get planning parameters from ego agent's policy
+    ego_agent = agents.get(ego_id)
+    planning_horizon = 40  # default
+    planning_dt = 0.2      # default
+    if ego_agent is not None and hasattr(ego_agent, '_policy_obj'):
+        policy = ego_agent._policy_obj
+        if hasattr(policy, '_horizon'):
+            planning_horizon = policy._horizon
+        if hasattr(policy, '_dt'):
+            planning_dt = policy._dt
+
+    # Get initial observation to have a starting frame
+    current_frame = frame  # Use initial frame for first step
+
     for t in range(args.steps):
+        # Extract planned trajectories from other agents and pass to ego
+        if ego_agent is not None and hasattr(ego_agent, 'set_agent_trajectories'):
+            trajectories = extract_agent_trajectories(
+                agents, ego_id, current_frame, planning_horizon, planning_dt)
+            ego_agent.set_agent_trajectories(trajectories)
+
         obs, acts = carla_sim.step()
 
-        ego_agent = agents.get(ego_id)
+        # Update frame for next iteration
+        if obs is not None:
+            current_frame = obs.frame
+
         if ego_agent is not None and hasattr(ego_agent, "beliefs") and ego_agent.beliefs:
             if t % 20 == 0:
                 logger.info("t=%d  beliefs=%s", t, ego_agent.beliefs)

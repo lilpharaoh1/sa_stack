@@ -287,15 +287,25 @@ class OptimisationPlotter:
         #     ax.draw_artist(line)
         #     dynamic.append(line)
 
+        # --- Compute unified timestep indices for all footprints ---
+        # Use ego rollout length as the reference horizon
+        horizon_len = len(full_rollout) if full_rollout is not None else 0
+        if horizon_len == 0 and obstacles:
+            # Fallback: use obstacle trajectory length
+            horizon_len = len(obstacles[0].get('s', []))
+
+        footprint_indices = []
+        if horizon_len > 1:
+            footprint_indices = list(range(0, horizon_len, self._footprint_interval))
+            # Always include the last step
+            if footprint_indices[-1] != horizon_len - 1:
+                footprint_indices.append(horizon_len - 1)
+
         # --- Vehicle footprints along trajectory ---
         if full_rollout is not None and len(full_rollout) > 1:
-            indices = list(range(0, len(full_rollout),
-                                 self._footprint_interval))
-            # Always include the last step
-            if indices[-1] != len(full_rollout) - 1:
-                indices.append(len(full_rollout) - 1)
-
-            for idx in indices:
+            for idx in footprint_indices:
+                if idx >= len(full_rollout):
+                    continue
                 x_k, y_k, heading_k = (full_rollout[idx, 0],
                                         full_rollout[idx, 1],
                                         full_rollout[idx, 2])
@@ -325,72 +335,41 @@ class OptimisationPlotter:
                 dynamic.append(patch)
 
         # --- MILP collision avoidance rectangles (Paper's formulation) ---
-        # Ego is a point mass. Rectangles are enlarged by ego dimensions (Minkowski sum).
-        # The ego CENTER must stay outside these rectangles.
-        if obstacles and frenet:
-            for obs in obstacles:
-                # Project obstacle body-frame dimensions into Frenet (s, d)
-                obs_half_L = obs['length'] / 2.0
-                obs_half_W = obs['width'] / 2.0
-                obs_s0 = float(obs['s'][0])
-                _, _, _, road_angle_obs = frenet._interpolate(obs_s0)
-                dh = obs.get('heading', road_angle_obs) - road_angle_obs
-
-                # Obstacle semi-axes including margin (paper: "a, b include uncertainty")
-                obs_a = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + collision_margin
-                obs_b = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + collision_margin
-
-                # Enlarged rectangle (Minkowski sum with ego) - Paper Step 1
-                half_s_rect = obs_a + ego_length / 2.0
-                half_d_rect = obs_b + ego_width / 2.0
-
-                s_arr = obs['s']
-                d_arr = obs['d']
-                n_steps = len(s_arr)
-                rect_indices = list(range(0, n_steps, self._footprint_interval))
-                if rect_indices[-1] != n_steps - 1:
-                    rect_indices.append(n_steps - 1)
-
-                for idx in rect_indices:
-                    # Convert obstacle Frenet position to world
-                    w = frenet.frenet_to_world(float(s_arr[idx]),
-                                               float(d_arr[idx]))
-                    # Get road tangent angle at this s position
-                    _, _, _, road_angle = frenet._interpolate(float(s_arr[idx]))
-
-                    # Compute rectangle corners in world frame
-                    # Rectangle is aligned with road: s-direction is tangent, d-direction is normal
-                    cos_r = np.cos(road_angle)
-                    sin_r = np.sin(road_angle)
-                    cx, cy = w['x'], w['y']
-
-                    # Four corners in local frame (s, d) then rotated to world
-                    corners_local = [
-                        (-half_s_rect, -half_d_rect),
-                        (+half_s_rect, -half_d_rect),
-                        (+half_s_rect, +half_d_rect),
-                        (-half_s_rect, +half_d_rect),
-                    ]
-                    corners_world = []
-                    for ds, dd in corners_local:
-                        # Rotate (ds, dd) by road_angle and translate to (cx, cy)
-                        wx = cx + ds * cos_r - dd * sin_r
-                        wy = cy + ds * sin_r + dd * cos_r
-                        corners_world.append([wx, wy])
-
-                    rect = MplPolygon(
-                        corners_world, closed=True,
-                        facecolor=(0.8, 0.2, 0.2, 0.08),
-                        edgecolor=(0.8, 0.2, 0.2, 0.6),
-                        linestyle='-', linewidth=1.0,
-                        zorder=2,
-                    )
-                    ax.add_patch(rect)
-                    ax.draw_artist(rect)
-                    dynamic.append(rect)
+        # Disabled - uncomment to visualize Minkowski-sum rectangles
+        # if obstacles and frenet:
+        #     for obs in obstacles:
+        #         obs_half_L = obs['length'] / 2.0
+        #         obs_half_W = obs['width'] / 2.0
+        #         obs_s0 = float(obs['s'][0])
+        #         _, _, _, road_angle_obs = frenet._interpolate(obs_s0)
+        #         dh = obs.get('heading', road_angle_obs) - road_angle_obs
+        #         obs_a = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + collision_margin
+        #         obs_b = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + collision_margin
+        #         half_s_rect = obs_a + ego_length / 2.0
+        #         half_d_rect = obs_b + ego_width / 2.0
+        #         s_arr, d_arr = obs['s'], obs['d']
+        #         n_steps = len(s_arr)
+        #         rect_indices = list(range(0, n_steps, self._footprint_interval))
+        #         if rect_indices[-1] != n_steps - 1:
+        #             rect_indices.append(n_steps - 1)
+        #         for idx in rect_indices:
+        #             w = frenet.frenet_to_world(float(s_arr[idx]), float(d_arr[idx]))
+        #             _, _, _, road_angle = frenet._interpolate(float(s_arr[idx]))
+        #             cos_r, sin_r = np.cos(road_angle), np.sin(road_angle)
+        #             cx, cy = w['x'], w['y']
+        #             corners_local = [(-half_s_rect, -half_d_rect), (+half_s_rect, -half_d_rect),
+        #                              (+half_s_rect, +half_d_rect), (-half_s_rect, +half_d_rect)]
+        #             corners_world = [[cx + ds*cos_r - dd*sin_r, cy + ds*sin_r + dd*cos_r]
+        #                              for ds, dd in corners_local]
+        #             rect = MplPolygon(corners_world, closed=True, facecolor=(0.8, 0.2, 0.2, 0.08),
+        #                               edgecolor=(0.8, 0.2, 0.2, 0.6), linestyle='-', linewidth=1.0, zorder=2)
+        #             ax.add_patch(rect)
+        #             ax.draw_artist(rect)
+        #             dynamic.append(rect)
 
         # --- NLP collision avoidance ellipses ---
-        if obstacles and frenet:
+        # Uses the same footprint_indices as ego vehicle for alignment
+        if obstacles and frenet and footprint_indices:
             for obs in obstacles:
                 # Project obstacle body-frame dimensions into Frenet (s, d)
                 obs_half_L = obs['length'] / 2.0
@@ -401,28 +380,51 @@ class OptimisationPlotter:
                 rx = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + collision_margin
                 ry = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + collision_margin
 
+                # Use world positions if available
+                world_pts = obs.get('world_positions', None)
                 s_arr = obs['s']
-                d_arr = obs['d']
-                n_steps = len(s_arr)
-                ellipse_indices = list(range(0, n_steps,
-                                             self._footprint_interval))
-                if ellipse_indices[-1] != n_steps - 1:
-                    ellipse_indices.append(n_steps - 1)
+                n_obs_steps = len(s_arr)
 
-                for idx in ellipse_indices:
-                    # Convert obstacle Frenet position to world
-                    w = frenet.frenet_to_world(float(s_arr[idx]),
-                                               float(d_arr[idx]))
-                    # Get road tangent angle at this s position
-                    _, _, _, road_angle = frenet._interpolate(
-                        float(s_arr[idx]))
+                # Color based on whether using planned or predicted trajectory
+                uses_planned = obs.get('uses_planned_trajectory', False)
+                if uses_planned:
+                    facecolor = (0.0, 0.7, 0.0, 0.12)
+                    edgecolor = (0.0, 0.5, 0.0, 0.5)
+                else:
+                    facecolor = (1.0, 0.6, 0.0, 0.12)
+                    edgecolor = (0.8, 0.4, 0.0, 0.5)
+
+                # Get headings array if available
+                obs_headings = obs.get('headings', None)
+
+                # Use unified footprint_indices for alignment with ego
+                for idx in footprint_indices:
+                    # Skip if index exceeds obstacle trajectory length
+                    if idx >= n_obs_steps:
+                        continue
+
+                    # Use stored world position if available
+                    if world_pts is not None and idx < len(world_pts):
+                        cx, cy = world_pts[idx]
+                    else:
+                        # Fallback: convert from Frenet
+                        w = frenet.frenet_to_world(float(s_arr[idx]),
+                                                   float(obs['d'][idx]))
+                        cx, cy = w['x'], w['y']
+
+                    # Use computed heading if available, otherwise fall back to road tangent
+                    if obs_headings is not None and idx < len(obs_headings):
+                        ellipse_angle = obs_headings[idx]
+                    else:
+                        # Fallback: road tangent angle at this s position
+                        _, _, _, ellipse_angle = frenet._interpolate(float(s_arr[idx]))
 
                     ellipse = MplEllipse(
-                        xy=(w['x'], w['y']),
+                        xy=(cx, cy),
                         width=2 * rx, height=2 * ry,
-                        angle=np.degrees(road_angle),
-                        facecolor=(1.0, 0.6, 0.0, 0.12),
-                        edgecolor=(0.8, 0.4, 0.0, 0.5),
+                        angle=np.degrees(ellipse_angle),
+                        facecolor=facecolor,
+                        edgecolor=edgecolor,
                         linestyle='--', linewidth=0.8,
                         zorder=3,
                     )
@@ -430,14 +432,39 @@ class OptimisationPlotter:
                     ax.draw_artist(ellipse)
                     dynamic.append(ellipse)
 
-        # --- Predicted obstacle trajectories ---
-        if obstacles and frenet:
+        # --- Predicted/Planned obstacle trajectories ---
+        # Truncate to horizon_len for alignment with ego trajectory
+        if obstacles:
             for obs in obstacles:
-                world_pts = frenet.frenet_to_world_batch(obs['s'], obs['d'])
+                # Use stored world positions if available, otherwise convert from Frenet
+                if 'world_positions' in obs:
+                    world_pts = obs['world_positions']
+                elif frenet is not None:
+                    world_pts = frenet.frenet_to_world_batch(obs['s'], obs['d'])
+                else:
+                    continue
+
+                # Truncate to match ego horizon for visual alignment
+                if horizon_len > 0 and len(world_pts) > horizon_len:
+                    world_pts = world_pts[:horizon_len]
+
+                # Use different color for planned vs predicted trajectories
+                uses_planned = obs.get('uses_planned_trajectory', False)
+                if uses_planned:
+                    # Green for actual planned trajectories
+                    color = (0.0, 0.7, 0.0)
+                    linestyle = '-'
+                    linewidth = 1.5
+                else:
+                    # Orange dashed for constant-velocity predictions
+                    color = (0.8, 0.4, 0.0)
+                    linestyle = '--'
+                    linewidth = 1.0
+
                 line, = ax.plot(
                     world_pts[:, 0], world_pts[:, 1],
-                    color=(0.8, 0.4, 0.0), linestyle='--',
-                    linewidth=1.0, alpha=0.7, zorder=5,
+                    color=color, linestyle=linestyle,
+                    linewidth=linewidth, alpha=0.7, zorder=5,
                 )
                 ax.draw_artist(line)
                 dynamic.append(line)

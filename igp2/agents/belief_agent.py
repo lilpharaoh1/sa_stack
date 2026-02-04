@@ -86,6 +86,7 @@ class BeliefAgent(Agent):
         self._policy_type = policy_type
         self._plot_interval = plot_interval
         self._step_count = 0
+        self._agent_trajectories: Dict[int, np.ndarray] = {}  # Planned trajectories of other agents
 
         # Compute reference path to goal via A* open-loop maneuvers.
         self._reference_path: List[Tuple[Lane, np.ndarray]] = []
@@ -197,6 +198,18 @@ class BeliefAgent(Agent):
         """
         pass
 
+    def set_agent_trajectories(self, trajectories: Dict[int, np.ndarray]):
+        """Set planned trajectories of other agents for collision avoidance.
+
+        When provided, the policy will use these trajectories instead of
+        constant-velocity prediction for other agents.
+
+        Args:
+            trajectories: Dict mapping agent_id -> (T, 2) array of planned
+                world positions. T should ideally match the planning horizon.
+        """
+        self._agent_trajectories = trajectories
+
     def policy(self, observation: Observation) -> Action:
         """Delegate to the configured control policy to produce an action.
 
@@ -229,7 +242,9 @@ class BeliefAgent(Agent):
         # Run the policy
         if isinstance(self._policy_obj, TwoStageOPT):
             action, candidates, best_idx = self._policy_obj.select_action(
-                ego_state, other_agents=other_agents if other_agents else None)
+                ego_state,
+                other_agents=other_agents if other_agents else None,
+                agent_trajectories=self._agent_trajectories if self._agent_trajectories else None)
         else:
             action, candidates, best_idx = self._policy_obj.select_action(ego_state)
 

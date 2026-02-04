@@ -655,13 +655,18 @@ class TwoStageOPT:
     # ------------------------------------------------------------------
 
     def select_action(self, state: AgentState,
-                      other_agents: Optional[Dict] = None) -> tuple:
+                      other_agents: Optional[Dict] = None,
+                      agent_trajectories: Optional[Dict[int, np.ndarray]] = None) -> tuple:
         """MPC step: solve MILP + NLP in Frenet frame, return first action.
 
         Args:
             state: Current ego agent state.
             other_agents: Dict mapping agent_id -> AgentState for other
                 vehicles (used for collision avoidance). May be None.
+            agent_trajectories: Optional dict mapping agent_id -> (T, 2) array
+                of planned world positions over the planning horizon. When
+                provided, these trajectories are used instead of constant-velocity
+                prediction for collision avoidance. May be None.
 
         Returns:
             (action, [trajectory_positions], 0)
@@ -690,7 +695,7 @@ class TwoStageOPT:
         road_left, road_right = self._sample_road_boundaries(s_values)
 
         # Predict obstacles in Frenet frame
-        obstacles = self._predict_obstacles(other_agents, self._frenet)
+        obstacles = self._predict_obstacles(other_agents, self._frenet, agent_trajectories)
         self._last_obstacles = obstacles
         self._last_other_agents = other_agents
 
@@ -883,37 +888,98 @@ class TwoStageOPT:
     # Obstacle prediction
     # ------------------------------------------------------------------
 
-    def _predict_obstacles(self, other_agents, frenet):
+    def _predict_obstacles(self, other_agents, frenet, agent_trajectories=None,
+                           trajectory_dt=None):
         """Predict obstacle positions over the planning horizon.
 
-        Constant-velocity propagation in world frame, then Frenet transform.
+        Uses provided trajectories if available, otherwise falls back to
+        constant-velocity propagation.
+
+        IMPORTANT: The planning timestep (self._dt) may differ from the
+        simulation timestep. Provided trajectories are assumed to be at
+        the simulation timestep (trajectory_dt or 1/fps). This method
+        resamples them to match the planning timestep.
 
         Args:
             other_agents: Dict {agent_id: AgentState} or None.
             frenet: _FrenetFrame instance.
+            agent_trajectories: Optional dict {agent_id: (T, 2) array} of
+                planned world positions at SIMULATION timestep. When provided,
+                these are resampled to planning timestep.
+            trajectory_dt: Timestep of provided trajectories (default: 1/fps).
 
         Returns:
             List of dicts, each with keys:
-                's': (H+1,) arc-length positions
-                'd': (H+1,) lateral positions
+                's': (H+1,) arc-length positions at planning timestep
+                'd': (H+1,) lateral positions at planning timestep
+                'world_positions': (H+1, 2) world coordinates for plotting
                 'length': vehicle length
                 'width': vehicle width
+                'heading': vehicle heading
+                'agent_id': agent ID
+                'uses_planned_trajectory': bool indicating if actual trajectory was used
         """
         if other_agents is None or frenet is None:
             return []
 
         H = self._horizon
-        dt = self._dt
+        dt_plan = self._dt  # Planning timestep (e.g., 0.2s)
+        dt_traj = trajectory_dt if trajectory_dt is not None else self._dt_sim  # Trajectory timestep (e.g., 0.05s)
+
+        # Ratio for resampling: how many trajectory steps per planning step
+        resample_ratio = dt_plan / dt_traj if dt_traj > 0 else 1.0
+
         obstacles = []
 
         for aid, agent_state in other_agents.items():
             pos = np.array(agent_state.position, dtype=float)
             vel = np.array(agent_state.velocity, dtype=float)
 
-            # Constant-velocity world positions
-            world_positions = np.empty((H + 1, 2))
-            for k in range(H + 1):
-                world_positions[k] = pos + vel * k * dt # EMRAN TODO: Replace with actual trajectories
+            uses_planned = False
+
+            # Use provided trajectory if available, otherwise constant-velocity
+            if agent_trajectories is not None and aid in agent_trajectories:
+                provided_traj = np.asarray(agent_trajectories[aid], dtype=float)
+                n_provided = len(provided_traj)
+
+                # Resample trajectory from simulation timestep to planning timestep
+                # Planning step k corresponds to time t = k * dt_plan
+                # which is trajectory index i = k * dt_plan / dt_traj = k * resample_ratio
+                world_positions = np.empty((H + 1, 2))
+                for k in range(H + 1):
+                    traj_idx_float = k * resample_ratio
+                    traj_idx = int(traj_idx_float)
+
+                    if traj_idx + 1 < n_provided:
+                        # Linear interpolation between trajectory points
+                        alpha = traj_idx_float - traj_idx
+                        world_positions[k] = (1 - alpha) * provided_traj[traj_idx] + alpha * provided_traj[traj_idx + 1]
+                    elif traj_idx < n_provided:
+                        # Use last available point
+                        world_positions[k] = provided_traj[traj_idx]
+                    else:
+                        # Extrapolate from last position using velocity
+                        time_beyond = (k * dt_plan) - ((n_provided - 1) * dt_traj)
+                        world_positions[k] = provided_traj[-1] + vel * time_beyond
+
+                uses_planned = True
+            else:
+                # Fallback: constant-velocity prediction
+                world_positions = np.empty((H + 1, 2))
+                for k in range(H + 1):
+                    world_positions[k] = pos + vel * k * dt_plan
+
+            # Compute heading at each trajectory point from direction of motion
+            headings = np.empty(H + 1)
+            headings[0] = float(agent_state.heading)  # Use actual heading for first point
+            for k in range(1, H + 1):
+                dx = world_positions[k, 0] - world_positions[k - 1, 0]
+                dy = world_positions[k, 1] - world_positions[k - 1, 1]
+                if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                    headings[k] = np.arctan2(dy, dx)
+                else:
+                    # No movement - use previous heading
+                    headings[k] = headings[k - 1]
 
             # Transform to Frenet
             s_arr, d_arr = frenet.world_to_frenet_batch(world_positions)
@@ -925,9 +991,13 @@ class TwoStageOPT:
             obstacles.append({
                 's': s_arr,
                 'd': d_arr,
+                'world_positions': world_positions,  # At planning timestep for plotting
+                'headings': headings,  # Heading at each timestep
                 'length': obs_length,
                 'width': obs_width,
-                'heading': float(agent_state.heading),
+                'heading': float(agent_state.heading),  # Initial heading (kept for compatibility)
+                'agent_id': aid,
+                'uses_planned_trajectory': uses_planned,
             })
 
         return obstacles
