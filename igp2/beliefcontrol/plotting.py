@@ -278,14 +278,14 @@ class OptimisationPlotter:
             ax.draw_artist(line)
             dynamic.append(line)
 
-        # --- Optimised trajectory line (NLP) ---
-        if optimised_trajectory is not None and len(optimised_trajectory) > 1:
-            line, = ax.plot(
-                optimised_trajectory[:, 0], optimised_trajectory[:, 1],
-                'r-', linewidth=2, label='NLP trajectory', zorder=5,
-            )
-            ax.draw_artist(line)
-            dynamic.append(line)
+        # # --- Optimised trajectory line (NLP) ---
+        # if optimised_trajectory is not None and len(optimised_trajectory) > 1:
+        #     line, = ax.plot(
+        #         optimised_trajectory[:, 0], optimised_trajectory[:, 1],
+        #         'r-', linewidth=2, label='NLP trajectory', zorder=5,
+        #     )
+        #     ax.draw_artist(line)
+        #     dynamic.append(line)
 
         # --- Vehicle footprints along trajectory ---
         if full_rollout is not None and len(full_rollout) > 1:

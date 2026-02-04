@@ -17,8 +17,7 @@ import logging
 from typing import List, Optional, Dict, Tuple
 
 import numpy as np
-from scipy.optimize import milp, LinearConstraint, Bounds
-from scipy.sparse import lil_matrix, csc_matrix
+import cvxpy as cp
 from shapely.geometry import LineString
 import casadi as ca
 
@@ -565,7 +564,7 @@ class TwoStageOPT:
 
     # Paper default parameters
     DEFAULT_HORIZON = 40
-    DEFAULT_DT = 0.1
+    DEFAULT_DT = 0.2
     DEFAULT_DELTA_MAX = 0.45
     DEFAULT_A_MIN = -3.0
     DEFAULT_A_MAX = 3.0
@@ -582,7 +581,7 @@ class TwoStageOPT:
                  scenario_map: Optional[Map] = None,
                  horizon: int = None,
                  dt: float = None,
-                 target_speed: float = 5.0,
+                 target_speed: float = 6.5,
                  delta_max: float = None,
                  a_min: float = None,
                  a_max: float = None,
@@ -946,11 +945,11 @@ class TwoStageOPT:
         self._ref_start_idx += int(np.argmin(dists))
 
     # ------------------------------------------------------------------
-    # Stage 1: MILP (scipy.optimize.milp)
+    # Stage 1: MILP (cvxpy)
     # ------------------------------------------------------------------
 
     def _solve_milp(self, frenet_state, road_left, road_right, obstacles):
-        """Solve MILP in Frenet frame with point-mass model.
+        """Solve MILP in Frenet frame with point-mass model using cvxpy.
 
         Based on "A Two-Stage Optimization-based Motion Planner for Safe Urban
         Driving" (Eiras et al.).
@@ -962,10 +961,6 @@ class TwoStageOPT:
         - Uses μ-based SINGLE-SIDED collision avoidance (pass-left only):
             μ_i_k = max(s_min - s_k, 0) + max(s_k - s_max, 0) + max(d_min - d_k, 0)
             Constraint: d_k >= d_max - M * μ_i_k
-
-        Decision variables: states [s, d, vs, vd] at each step,
-        controls [as, ad] at each step, L1 slack for tracking,
-        and μ slack variables for collision avoidance.
 
         Args:
             frenet_state: [s, d, phi, v] current state in Frenet.
@@ -990,158 +985,82 @@ class TwoStageOPT:
 
         N_obs = min(len(obstacles), self.N_OBS_MAX)
 
-        # --- Decision variable layout ---
-        # States:    4*(H+1)  [s, d, vs, vd] at each step
-        # Controls:  2*H      [as, ad] at each step
-        # L1 slack:  2*(H+1)  [es, ed] for tracking error
-        # μ slack:   4*N_obs*H  [μ_behind, μ_ahead, μ_right, μ_total] per obs per step
-        #            (continuous variables for paper's μ formulation)
-        n_state = 4 * (H + 1)
-        n_ctrl = 2 * H
-        n_slack = 2 * (H + 1)
-        n_mu = 4 * N_obs * H  # μ_behind, μ_ahead, μ_right, μ_total for each obs/step
-        n_vars = n_state + n_ctrl + n_slack + n_mu
-
-        s_off = 0
-        c_off = n_state
-        e_off = n_state + n_ctrl
-        mu_off = n_state + n_ctrl + n_slack
-
-        # Goal reference: s_goal at each step, d_goal = 0
+        # Goal reference
         s_goal = self._frenet.total_length
         v_goal = self._target_speed
 
-        # --- Objective: minimise sum of L1 slack + μ penalty ---
-        # The μ penalty ensures μ is minimized to exactly max(expr, 0)
-        # CRITICAL: The penalty must be large enough that inflating μ to relax
-        # the collision constraint is more expensive than the tracking benefit.
-        # To relax d >= d_max to d >= 0, need μ = d_max/M ≈ 1/M.
-        # Cost of μ inflation = w_μ * (1/M). Benefit = w_track * d_max ≈ 1.
-        # Need w_μ * (1/M) > 1, so w_μ > M. Use w_μ = 2*M to be safe.
-        c_vec = np.zeros(n_vars)
-        c_vec[e_off:e_off + n_slack] = 1.0
-        # Large penalty on μ_total to prevent exploitation
-        mu_penalty = 2.0 * M  # Must be > M to prevent constraint relaxation exploit
-        for obs_idx in range(N_obs):
-            for k in range(H):
-                mu_total_idx = mu_off + 4 * (obs_idx * H + k) + 3
-                c_vec[mu_total_idx] = mu_penalty
+        # --- Decision variables ---
+        # States: s, d, vs, vd at each timestep
+        s = cp.Variable(H + 1)    # longitudinal position
+        d = cp.Variable(H + 1)    # lateral position
+        vs = cp.Variable(H + 1)   # longitudinal velocity
+        vd = cp.Variable(H + 1)   # lateral velocity
 
-        # --- Count constraint rows ---
-        n_init = 4
-        n_dyn = 4 * H
-        n_kin = 2 * (H + 1)
-        n_road = 2 * (H + 1)
-        n_l1 = 4 * (H + 1)
-        # For collision: 3 constraints for μ components + 1 sum constraint + 1 pass-left constraint = 5 per obs per step
-        n_coll = 5 * N_obs * H
-        n_rows = n_init + n_dyn + n_kin + n_road + n_l1 + n_coll
+        # Controls: as, ad at each timestep
+        a_s = cp.Variable(H)      # longitudinal acceleration
+        a_d = cp.Variable(H)      # lateral acceleration
 
-        A = lil_matrix((n_rows, n_vars))
-        lb = np.zeros(n_rows)
-        ub = np.zeros(n_rows)
+        # L1 slack variables for tracking
+        e_s = cp.Variable(H + 1, nonneg=True)  # slack for |s - ref_s|
+        e_d = cp.Variable(H + 1, nonneg=True)  # slack for |d - ref_d|
+        e_v = cp.Variable(H + 1, nonneg=True)  # slack for |v - v_goal|
 
-        row = 0
+        constraints = []
 
-        # --- Initial state ---
-        z_init = np.array([s0, d0, vs0, vd0])
-        for i in range(4):
-            A[row, s_off + i] = 1.0
-            lb[row] = z_init[i]
-            ub[row] = z_init[i]
-            row += 1
+        # --- Initial state constraints ---
+        constraints.append(s[0] == s0)
+        constraints.append(d[0] == d0)
+        constraints.append(vs[0] == vs0)
+        constraints.append(vd[0] == vd0)
 
         # --- ZOH dynamics ---
         for k in range(H):
-            sk = s_off + 4 * k
-            sk1 = s_off + 4 * (k + 1)
-            ck = c_off + 2 * k
-
-            # s_{k+1} = s_k + vs_k * dt
-            A[row, sk1 + 0] = 1.0
-            A[row, sk + 0] = -1.0
-            A[row, sk + 2] = -dt
-            lb[row] = 0.0; ub[row] = 0.0; row += 1
-
-            # d_{k+1} = d_k + vd_k * dt
-            A[row, sk1 + 1] = 1.0
-            A[row, sk + 1] = -1.0
-            A[row, sk + 3] = -dt
-            lb[row] = 0.0; ub[row] = 0.0; row += 1
-
-            # vs_{k+1} = vs_k + as_k * dt
-            A[row, sk1 + 2] = 1.0
-            A[row, sk + 2] = -1.0
-            A[row, ck + 0] = -dt
-            lb[row] = 0.0; ub[row] = 0.0; row += 1
-
-            # vd_{k+1} = vd_k + ad_k * dt
-            A[row, sk1 + 3] = 1.0
-            A[row, sk + 3] = -1.0
-            A[row, ck + 1] = -dt
-            lb[row] = 0.0; ub[row] = 0.0; row += 1
+            constraints.append(s[k + 1] == s[k] + vs[k] * dt)
+            constraints.append(d[k + 1] == d[k] + vd[k] * dt)
+            constraints.append(vs[k + 1] == vs[k] + a_s[k] * dt)
+            constraints.append(vd[k + 1] == vd[k] + a_d[k] * dt)
 
         # --- Kinematic feasibility: vs >= rho * |vd| ---
         for k in range(H + 1):
-            sk = s_off + 4 * k
-            # vs - rho * vd >= 0
-            A[row, sk + 2] = 1.0
-            A[row, sk + 3] = -rho
-            lb[row] = 0.0; ub[row] = np.inf; row += 1
-            # vs + rho * vd >= 0
-            A[row, sk + 2] = 1.0
-            A[row, sk + 3] = rho
-            lb[row] = 0.0; ub[row] = np.inf; row += 1
+            constraints.append(vs[k] >= rho * vd[k])
+            constraints.append(vs[k] >= -rho * vd[k])
+
+        # --- State bounds ---
+        for k in range(H + 1):
+            constraints.append(vs[k] >= 0)  # forward motion only
+
+        # --- Control bounds ---
+        for k in range(H):
+            constraints.append(a_s[k] >= -max_accel)
+            constraints.append(a_s[k] <= max_accel)
+            constraints.append(a_d[k] >= -max_accel)
+            constraints.append(a_d[k] <= max_accel)
 
         # --- Road boundaries: d_right <= d <= d_left ---
         for k in range(H + 1):
-            sk = s_off + 4 * k
-            # d_k >= d_right[k]
-            A[row, sk + 1] = 1.0
-            lb[row] = road_right[k]; ub[row] = np.inf; row += 1
-            # d_k <= d_left[k]  =>  -d_k >= -d_left[k]
-            A[row, sk + 1] = -1.0
-            lb[row] = -road_left[k]; ub[row] = np.inf; row += 1
+            constraints.append(d[k] >= road_right[k])
+            constraints.append(d[k] <= road_left[k])
 
-        # --- L1 slack: e >= |state_ref - state| (for s and d tracking) ---
+        # --- L1 slack constraints for tracking ---
         for k in range(H + 1):
-            sk = s_off + 4 * k
-            ek = e_off + 2 * k
-            # Reference s at step k: linearly interpolate toward s_goal
-            ref_s = s0 + v_goal * k * dt
-            ref_s = min(ref_s, s_goal)
-            ref_d = 0.0  # stay centred
+            # Reference trajectory: advance at v_goal, capped at s_goal
+            ref_s = min(s0 + v_goal * k * dt, s_goal)
+            ref_d = 0.0
 
-            # es >= s - ref_s  =>  es - s >= -ref_s
-            A[row, ek + 0] = 1.0
-            A[row, sk + 0] = -1.0
-            lb[row] = -ref_s; ub[row] = np.inf; row += 1
+            # e_s >= |s - ref_s|
+            constraints.append(e_s[k] >= s[k] - ref_s)
+            constraints.append(e_s[k] >= ref_s - s[k])
 
-            # es >= -(s - ref_s)  =>  es + s >= ref_s
-            A[row, ek + 0] = 1.0
-            A[row, sk + 0] = 1.0
-            lb[row] = ref_s; ub[row] = np.inf; row += 1
+            # e_d >= |d - ref_d|
+            constraints.append(e_d[k] >= d[k] - ref_d)
+            constraints.append(e_d[k] >= ref_d - d[k])
+            
+            # e_v >= |vs - v_goal| (track longitudinal velocity, not magnitude)
+            constraints.append(e_v[k] >= vs[k] - v_goal)
+            constraints.append(e_v[k] >= v_goal - vs[k])
 
-            # ed >= d - ref_d  =>  ed - d >= -ref_d
-            A[row, ek + 1] = 1.0
-            A[row, sk + 1] = -1.0
-            lb[row] = -ref_d; ub[row] = np.inf; row += 1
-
-            # ed >= -(d - ref_d)  =>  ed + d >= ref_d
-            A[row, ek + 1] = 1.0
-            A[row, sk + 1] = 1.0
-            lb[row] = ref_d; ub[row] = np.inf; row += 1
-
+        mu_vars = []
         # --- Collision avoidance (Paper's μ-based formulation) ---
-        # μ_i_k = max(s_min - s_k, 0) + max(s_k - s_max, 0) + max(d_min - d_k, 0)
-        # Constraint: d_k >= d_max - M * μ_i_k (SINGLE-SIDED: pass-left only)
-        #
-        # Implementation with auxiliary variables:
-        # - μ_behind >= 0, μ_behind >= s_min - s  (captures max(s_min - s, 0))
-        # - μ_ahead >= 0, μ_ahead >= s - s_max    (captures max(s - s_max, 0))
-        # - μ_right >= 0, μ_right >= d_min - d    (captures max(d_min - d, 0))
-        # - μ_total = μ_behind + μ_ahead + μ_right
-        # - d >= d_max - M * μ_total
         for obs_idx in range(N_obs):
             obs = obstacles[obs_idx]
 
@@ -1153,106 +1072,83 @@ class TwoStageOPT:
             dh = obs.get('heading', road_angle) - road_angle
 
             # Obstacle semi-axes in Frenet frame (including collision margin)
-            # Paper: "a, b are ellipse semi-axes (including uncertainty)"
             obs_a = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + self._collision_margin
             obs_b = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + self._collision_margin
 
-            # Enlarge obstacle by ego dimensions (Minkowski sum) - Paper Step 1
+            # Enlarge obstacle by ego dimensions (Minkowski sum)
             half_s = obs_a + self._ego_length / 2.0
             half_d = obs_b + self._ego_width / 2.0
 
-            for k in range(H):
-                sk = s_off + 4 * (k + 1)  # ego state at k+1 (skip initial)
-                mu_base = mu_off + 4 * (obs_idx * H + k)
-                # mu_base+0 = μ_behind, mu_base+1 = μ_ahead, mu_base+2 = μ_right, mu_base+3 = μ_total
+            for k in range(1, H + 1):  # Skip initial state
+                s_obs = float(obs['s'][k] if k < len(obs['s']) else obs['s'][-1])
+                d_obs = float(obs['d'][k] if k < len(obs['d']) else obs['d'][-1])
 
-                s_obs = float(obs['s'][k + 1] if k + 1 < len(obs['s']) else obs['s'][-1])
-                d_obs = float(obs['d'][k + 1] if k + 1 < len(obs['d']) else obs['d'][-1])
-
-                # Obstacle bounds
+                # Obstacle bounds (enlarged rectangle)
                 s_min = s_obs - half_s
                 s_max = s_obs + half_s
                 d_min = d_obs - half_d
                 d_max = d_obs + half_d
 
-                # μ_behind >= s_min - s_k  =>  μ_behind + s_k >= s_min
-                A[row, mu_base + 0] = 1.0
-                A[row, sk + 0] = 1.0
-                lb[row] = s_min; ub[row] = np.inf; row += 1
+                # Auxiliary variables for max(., 0) terms
+                mu1 = cp.Variable(nonneg=True)  # max(s_min - s, 0)
+                mu2 = cp.Variable(nonneg=True)  # max(s - s_max, 0)
+                mu3 = cp.Variable(nonneg=True)  # max(d_min - d, 0)
 
-                # μ_ahead >= s_k - s_max  =>  μ_ahead - s_k >= -s_max
-                A[row, mu_base + 1] = 1.0
-                A[row, sk + 0] = -1.0
-                lb[row] = -s_max; ub[row] = np.inf; row += 1
+                # Constraints to enforce mu >= max(expr, 0)
+                # Since mu >= 0 (nonneg), we only need mu >= expr
+                constraints.append(mu1 >= s_min - s[k])
+                constraints.append(mu2 >= s[k] - s_max)
+                constraints.append(mu3 >= d_min - d[k])
 
-                # μ_right >= d_min - d_k  =>  μ_right + d_k >= d_min
-                A[row, mu_base + 2] = 1.0
-                A[row, sk + 1] = 1.0
-                lb[row] = d_min; ub[row] = np.inf; row += 1
+                # Total mu
+                mu = mu1 + mu2 + mu3
 
-                # μ_total = μ_behind + μ_ahead + μ_right
-                # μ_total - μ_behind - μ_ahead - μ_right = 0
-                A[row, mu_base + 3] = 1.0
-                A[row, mu_base + 0] = -1.0
-                A[row, mu_base + 1] = -1.0
-                A[row, mu_base + 2] = -1.0
-                lb[row] = 0.0; ub[row] = 0.0; row += 1
+                # Adding for minimisation
+                mu_vars.append((obs_idx, k, mu1, mu2, mu3, d_max, mu))
 
-                # Paper's constraint: d_k >= d_max - M * μ_total
-                # d_k + M * μ_total >= d_max
-                A[row, sk + 1] = 1.0
-                A[row, mu_base + 3] = M
-                lb[row] = d_max; ub[row] = np.inf; row += 1
+                # Main collision avoidance constraint (pass-left only)
+                constraints.append(d[k] >= d_max - M * mu)
 
-        # Trim unused rows
-        A = A[:row]
-        lb = lb[:row]
-        ub = ub[:row]
-
-        # --- Variable bounds ---
-        var_lb = np.full(n_vars, -np.inf)
-        var_ub = np.full(n_vars, np.inf)
-
-        # State bounds: vs >= 0 (forward motion)
-        for k in range(H + 1):
-            var_lb[s_off + 4 * k + 2] = 0.0  # vs >= 0
-
-        # Control bounds
-        var_lb[c_off:c_off + n_ctrl:2] = -max_accel  # as
-        var_ub[c_off:c_off + n_ctrl:2] = max_accel
-        var_lb[c_off + 1:c_off + n_ctrl:2] = -max_accel  # ad
-        var_ub[c_off + 1:c_off + n_ctrl:2] = max_accel
-
-        # Slack bounds: >= 0
-        var_lb[e_off:e_off + n_slack] = 0.0
-
-        # μ variable bounds: >= 0 (all components are non-negative)
-        var_lb[mu_off:mu_off + n_mu] = 0.0
-
-        # --- Integrality: ALL CONTINUOUS (no binary variables in μ formulation) ---
-        integrality = np.zeros(n_vars)
+        # --- Objective: minimise L1 tracking error + small μ penalty ---
+        # Small penalty to prefer mu = max(...) over mu > max(...), but not so large
+        # that it prevents passing obstacles (mu can be large during approach)
+        mu_penalty = 2*M
+        mu_cost = sum(mu for _, _, _, _, _, _, mu in mu_vars) if mu_vars else 0
+        objective = cp.Minimize(0.9*cp.sum(e_s) + 0.05*cp.sum(e_d) + 0.5*cp.sum(e_v) + mu_penalty * mu_cost) 
 
         # --- Solve ---
-        constraints = LinearConstraint(csc_matrix(A), lb, ub)
+        problem = cp.Problem(objective, constraints)
 
         try:
-            result = milp(
-                c=c_vec,
-                constraints=constraints,
-                integrality=integrality,
-                bounds=Bounds(var_lb, var_ub),
-                options={'time_limit': 10.0},
-            )
+            problem.solve(solver=cp.ECOS, verbose=False)
         except Exception as e:
+            print("MILP solver exception: %s", e)
             logger.debug("MILP solver exception: %s", e)
             return None
 
-        if not result.success:
-            logger.debug("MILP did not converge: %s", result.message)
+        if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
+            print("MILP did not converge: %s", problem.status)
+            logger.debug("MILP did not converge: %s", problem.status)
             return None
 
         # Extract states: (H+1, 4) [s, d, vs, vd]
-        milp_states = result.x[s_off:s_off + n_state].reshape(H + 1, 4)
+        milp_states = np.column_stack([
+            s.value,
+            d.value,
+            vs.value,
+            vd.value
+        ])
+
+        # Debug output
+        print(f"MILP: s0={s0:.2f}, s_goal={s_goal:.2f}, vs0={vs0:.2f}, v_goal={v_goal:.2f}")
+        print(f"MILP: s[H]={s.value[-1]:.2f}, vs[H]={vs.value[-1]:.2f}")
+        print(f"MILP: delta_s={s.value[-1] - s0:.2f}, max_accel={max_accel:.2f}")
+        print(f"MILP: sum(e_s)={sum(e_s.value):.2f}, sum(e_v)={sum(e_v.value):.2f}")
+        print(f"MILP: N_obs={N_obs}, H={H}, dt={dt}")
+        print(f"MILP: vs profile: {[f'{v:.1f}' for v in vs.value[::10]]}")  # Every 10th step
+        if mu_vars:
+            print(f"MILP: mu_vars count={len(mu_vars)}, first few mu sums: {[f'{mu.value:.2f}' for _, _, _, _, _, _, mu in mu_vars[:5]]}")
+
         return milp_states
 
     # ------------------------------------------------------------------
@@ -1447,6 +1343,13 @@ class TwoStageOPT:
 
             nlp_states = sol.value(S).T   # (H+1, 4)
             nlp_controls = sol.value(U).T  # (H, 2)
+
+            # Debug output
+            s0_nlp = frenet_state[0]
+            v0_nlp = frenet_state[3]
+            print(f"NLP: s0={s0_nlp:.2f}, s_goal={s_goal:.2f}, v0={v0_nlp:.2f}, v_goal={v_goal:.2f}")
+            print(f"NLP: s[H]={nlp_states[-1, 0]:.2f}, v[H]={nlp_states[-1, 3]:.2f}")
+            print(f"NLP: delta_s={nlp_states[-1, 0] - s0_nlp:.2f}")
 
             return nlp_states, nlp_controls, True
 
