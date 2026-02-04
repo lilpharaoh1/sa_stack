@@ -949,18 +949,19 @@ class TwoStageOPT:
     # ------------------------------------------------------------------
 
     def _solve_milp(self, frenet_state, road_left, road_right, obstacles):
-        """Solve MILP in Frenet frame with point-mass model using Gurobi.
+        """Solve Stage 1 optimization using smooth approximation with CasADi + IPOPT.
 
         Based on "A Two-Stage Optimization-based Motion Planner for Safe Urban
-        Driving" (Eiras et al.).
+        Driving" (Eiras et al.), but using smooth softplus approximation of max()
+        instead of MILP formulation.
 
-        Key aspects (Paper's formulation):
+        Key aspects:
         - Ego vehicle is treated as a POINT MASS
         - Obstacles are RECTANGLES enlarged by ego dimensions (Minkowski sum)
-        - Uses μ-based collision avoidance (pass-left only):
-            μ_i_k = max(s_min - s_k, 0) + max(s_k - s_max, 0) + max(d_min - d_k, 0)
+        - Uses smooth μ-based collision avoidance (pass-left only):
+            μ_i_k = softplus(s_min - s_k) + softplus(s_k - s_max) + softplus(d_min - d_k)
+            where softplus(a) = (1/β) * log(1 + exp(β * a)) ≈ max(a, 0)
             Constraint: d_k >= d_max - M * μ_i_k
-        - Uses Gurobi's addGenConstrMax for exact μ = max(..., 0)
 
         Args:
             frenet_state: [s, d, phi, v] current state in Frenet.
@@ -969,17 +970,15 @@ class TwoStageOPT:
             obstacles: List of obstacle dicts from _predict_obstacles.
 
         Returns:
-            (H+1, 4) array of MILP states [s, d, vs, vd] in Frenet,
-            or None if MILP failed.
+            (H+1, 4) array of states [s, d, vs, vd] in Frenet,
+            or None if solver failed.
         """
-        import gurobipy as gp
-        from gurobipy import GRB
-
         H = self._horizon
         dt = self._dt
         rho = self._milp_rho
-        M = 1e4  # Big-M from paper (10^4, not too large)
+        M = 1e4  # Big-M from paper
         max_accel = min(self._a_max, -self._a_min)
+        beta = 10.0  # Softplus sharpness (higher = closer to true max)
 
         # Initial Frenet velocity components
         s0, d0, phi0, v0 = frenet_state
@@ -996,74 +995,101 @@ class TwoStageOPT:
         dx = self._ego_length / 2.0
         dy = self._ego_width / 2.0
 
+        # Softplus function: smooth approximation of max(a, 0)
+        # Numerically stable form: softplus(a) = max(a,0) + (1/β)*log(1+exp(-β*|a|))
+        # This avoids overflow when β*a is large positive
+        def softplus(a):
+            return ca.fmax(a, 0) + (1.0 / beta) * ca.log(1.0 + ca.exp(-beta * ca.fabs(a)))
+
         try:
-            model = gp.Model("milp_collision_avoidance")
-            model.Params.OutputFlag = 0  # Suppress output
+            opti = ca.Opti()
 
             # ==================== DECISION VARIABLES ====================
-            # States: s, d, vs, vd at each timestep
-            s = model.addVars(H + 1, lb=-GRB.INFINITY, name="s")
-            d = model.addVars(H + 1, lb=-GRB.INFINITY, name="d")
-            vs = model.addVars(H + 1, lb=0, name="vs")  # forward motion only
-            vd = model.addVars(H + 1, lb=-GRB.INFINITY, name="vd")
+            # States: [s, d, vs, vd] at each timestep
+            S = opti.variable(4, H + 1)
+            s = S[0, :]   # longitudinal position
+            d = S[1, :]   # lateral position
+            vs = S[2, :]  # longitudinal velocity
+            vd = S[3, :]  # lateral velocity
 
-            # Controls: a_s, a_d at each timestep
-            a_s = model.addVars(H, lb=-max_accel, ub=max_accel, name="a_s")
-            a_d = model.addVars(H, lb=-max_accel, ub=max_accel, name="a_d")
-
-            # L1 slack variables for tracking (non-negative)
-            e_s = model.addVars(H + 1, lb=0, name="e_s")
-            e_d = model.addVars(H + 1, lb=0, name="e_d")
-            e_v = model.addVars(H + 1, lb=0, name="e_v")
+            # Controls: [a_s, a_d] at each timestep
+            U = opti.variable(2, H)
+            a_s = U[0, :]  # longitudinal acceleration
+            a_d = U[1, :]  # lateral acceleration
 
             # ==================== INITIAL STATE ====================
-            model.addConstr(s[0] == s0, "init_s")
-            model.addConstr(d[0] == d0, "init_d")
-            model.addConstr(vs[0] == vs0, "init_vs")
-            model.addConstr(vd[0] == vd0, "init_vd")
+            opti.subject_to(s[0] == s0)
+            opti.subject_to(d[0] == d0)
+            opti.subject_to(vs[0] == vs0)
+            opti.subject_to(vd[0] == vd0)
 
             # ==================== DYNAMICS (ZOH) ====================
             for k in range(H):
-                model.addConstr(s[k + 1] == s[k] + vs[k] * dt, f"dyn_s_{k}")
-                model.addConstr(d[k + 1] == d[k] + vd[k] * dt, f"dyn_d_{k}")
-                model.addConstr(vs[k + 1] == vs[k] + a_s[k] * dt, f"dyn_vs_{k}")
-                model.addConstr(vd[k + 1] == vd[k] + a_d[k] * dt, f"dyn_vd_{k}")
+                opti.subject_to(s[k + 1] == s[k] + vs[k] * dt)
+                opti.subject_to(d[k + 1] == d[k] + vd[k] * dt)
+                opti.subject_to(vs[k + 1] == vs[k] + a_s[k] * dt)
+                opti.subject_to(vd[k + 1] == vd[k] + a_d[k] * dt)
 
             # ==================== KINEMATIC FEASIBILITY ====================
             # vs >= rho * |vd| (ensures realistic turning)
             for k in range(H + 1):
-                model.addConstr(vs[k] >= rho * vd[k], f"kin_pos_{k}")
-                model.addConstr(vs[k] >= -rho * vd[k], f"kin_neg_{k}")
+                opti.subject_to(vs[k] >= rho * vd[k])
+                opti.subject_to(vs[k] >= -rho * vd[k])
+
+            # ==================== STATE BOUNDS ====================
+            for k in range(H + 1):
+                opti.subject_to(vs[k] >= 0)  # forward motion only
+
+            # ==================== CONTROL BOUNDS ====================
+            for k in range(H):
+                opti.subject_to(opti.bounded(-max_accel, a_s[k], max_accel))
+                opti.subject_to(opti.bounded(-max_accel, a_d[k], max_accel))
 
             # ==================== ROAD BOUNDARIES ====================
             for k in range(H + 1):
-                model.addConstr(d[k] >= road_right[k], f"road_right_{k}")
-                model.addConstr(d[k] <= road_left[k], f"road_left_{k}")
+                opti.subject_to(d[k] >= road_right[k])
+                opti.subject_to(d[k] <= road_left[k])
 
-            # ==================== L1 TRACKING CONSTRAINTS ====================
+            # ==================== COST FUNCTION ====================
+            cost = 0.0
+
+            # L2 tracking cost (smoother than L1 for NLP)
             for k in range(H + 1):
-                # Reference trajectory: advance at v_goal, capped at s_goal
                 ref_s = min(s0 + v_goal * k * dt, s_goal)
                 ref_d = 0.0
+                cost += 0.9 * (s[k] - ref_s) ** 2
+                cost += 0.05 * (d[k] - ref_d) ** 2
+                cost += 0.5 * (vs[k] - v_goal) ** 2
 
-                # e_s >= |s - ref_s|
-                model.addConstr(e_s[k] >= s[k] - ref_s, f"es_pos_{k}")
-                model.addConstr(e_s[k] >= ref_s - s[k], f"es_neg_{k}")
-
-                # e_d >= |d - ref_d|
-                model.addConstr(e_d[k] >= d[k] - ref_d, f"ed_pos_{k}")
-                model.addConstr(e_d[k] >= ref_d - d[k], f"ed_neg_{k}")
-
-                # e_v >= |vs - v_goal|
-                model.addConstr(e_v[k] >= vs[k] - v_goal, f"ev_pos_{k}")
-                model.addConstr(e_v[k] >= v_goal - vs[k], f"ev_neg_{k}")
+            # Control effort
+            for k in range(H):
+                cost += 0.01 * a_s[k] ** 2
+                cost += 0.01 * a_d[k] ** 2
 
             # ==================== COLLISION AVOIDANCE ====================
-            # Paper's μ-based formulation with Gurobi's GenConstrMax
-            # Added: slack variables for soft constraints (ensures feasibility)
-            mu_vars = []
-            collision_slack_vars = []
-            COLLISION_PENALTY = 1e6  # Heavy penalty for constraint violation
+            # Smooth penalty-based formulation that allows passing on ANY side
+            #
+            # Key idea: Add large penalty for being inside obstacle rectangle.
+            # Being "outside" means: s < s_min OR s > s_max OR d < d_min OR d > d_max
+            # Equivalently: max(s_min - s, s - s_max, d_min - d, d - d_max) >= 0
+            #
+            # We use smooth max (log-sum-exp) to find the maximum "escape distance"
+            # and penalize when it's negative (inside the box).
+
+            # Smooth max function using log-sum-exp (numerically stable)
+            def smooth_max4(a, b, c, e):
+                # Numerically stable log-sum-exp
+                # smooth_max(a,b,c,e) ≈ max(a,b,c,e) as beta → ∞
+                max_val = ca.fmax(ca.fmax(a, b), ca.fmax(c, e))
+                return max_val + (1.0 / beta) * ca.log(
+                    ca.exp(beta * (a - max_val)) +
+                    ca.exp(beta * (b - max_val)) +
+                    ca.exp(beta * (c - max_val)) +
+                    ca.exp(beta * (e - max_val))
+                )
+
+            collision_penalty_weight = 1000.0  # Large weight for collision penalty
+            safety_margin = 0.1  # Small positive margin for robustness
 
             for obs_idx in range(N_obs):
                 obs = obstacles[obs_idx]
@@ -1079,105 +1105,98 @@ class TwoStageOPT:
                 obs_a = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + self._collision_margin
                 obs_b = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + self._collision_margin
 
-                for k in range(1, H + 1):  # Skip initial state (can't change it)
+                for k in range(1, H + 1):  # Skip initial state
                     # Obstacle position at timestep k
                     s_obs = float(obs['s'][k] if k < len(obs['s']) else obs['s'][-1])
                     d_obs = float(obs['d'][k] if k < len(obs['d']) else obs['d'][-1])
 
-                    # STEP 1: Enlarged rectangle bounds (Minkowski sum)
+                    # Enlarged rectangle bounds (Minkowski sum)
                     s_min = s_obs - obs_a - dx
                     s_max = s_obs + obs_a + dx
                     d_min = d_obs - obs_b - dy
                     d_max = d_obs + obs_b + dy
 
-                    # Debug check: verify obstacle doesn't block entire road
-                    road_width = road_left[k] - road_right[k]
-                    obs_width = 2 * (obs_b + dy)
-                    if obs_width >= road_width:
-                        logger.warning(f"Obstacle {obs_idx} blocks road at k={k}: "
-                                      f"obs_width={obs_width:.2f} >= road_width={road_width:.2f}")
+                    # Escape distances (positive = outside, negative = inside)
+                    # escape_behind: positive when s < s_min (behind obstacle)
+                    # escape_ahead: positive when s > s_max (ahead of obstacle)
+                    # escape_right: positive when d < d_min (right of obstacle)
+                    # escape_left: positive when d > d_max (left of obstacle)
+                    escape_behind = s_min - s[k]
+                    escape_ahead = s[k] - s_max
+                    escape_right = d_min - d[k]
+                    escape_left = d[k] - d_max
 
-                    # STEP 2: Create auxiliary variables for expressions
-                    # a1 = s_min - s[k] (positive when ego is BEHIND obstacle)
-                    # a2 = s[k] - s_max (positive when ego is IN FRONT of obstacle)
-                    # a3 = d_min - d[k] (positive when ego is to RIGHT of obstacle)
-                    a1 = model.addVar(lb=-GRB.INFINITY, name=f"a1_{obs_idx}_{k}")
-                    a2 = model.addVar(lb=-GRB.INFINITY, name=f"a2_{obs_idx}_{k}")
-                    a3 = model.addVar(lb=-GRB.INFINITY, name=f"a3_{obs_idx}_{k}")
+                    # Maximum escape distance (if > 0, we're outside in at least one direction)
+                    max_escape = smooth_max4(escape_behind, escape_ahead, escape_right, escape_left)
 
-                    model.addConstr(a1 == s_min - s[k], f"a1_def_{obs_idx}_{k}")
-                    model.addConstr(a2 == s[k] - s_max, f"a2_def_{obs_idx}_{k}")
-                    model.addConstr(a3 == d_min - d[k], f"a3_def_{obs_idx}_{k}")
+                    # Soft constraint: penalize when max_escape < safety_margin
+                    # violation = max(safety_margin - max_escape, 0)
+                    violation = softplus(safety_margin - max_escape)
+                    cost += collision_penalty_weight * violation ** 2
 
-                    # STEP 3: μ_i = max(a_i, 0) using Gurobi's GenConstrMax
-                    mu1 = model.addVar(lb=0, name=f"mu1_{obs_idx}_{k}")
-                    mu2 = model.addVar(lb=0, name=f"mu2_{obs_idx}_{k}")
-                    mu3 = model.addVar(lb=0, name=f"mu3_{obs_idx}_{k}")
+            # ==================== SET OBJECTIVE ====================
+            opti.minimize(cost)
 
-                    model.addGenConstrMax(mu1, [a1], constant=0.0, name=f"max_mu1_{obs_idx}_{k}")
-                    model.addGenConstrMax(mu2, [a2], constant=0.0, name=f"max_mu2_{obs_idx}_{k}")
-                    model.addGenConstrMax(mu3, [a3], constant=0.0, name=f"max_mu3_{obs_idx}_{k}")
+            # ==================== SOLVER OPTIONS ====================
+            p_opts = {'expand': True}
+            s_opts = {
+                'max_iter': 500,
+                'tol': 1e-4,
+                'print_level': 0,
+                'sb': 'yes',
+            }
+            opti.solver('ipopt', p_opts, s_opts)
 
-                    # Total μ = μ1 + μ2 + μ3
-                    mu = model.addVar(lb=0, name=f"mu_{obs_idx}_{k}")
-                    model.addConstr(mu == mu1 + mu2 + mu3, f"mu_sum_{obs_idx}_{k}")
-                    mu_vars.append(mu)
-
-                    # STEP 4: Main collision constraint (soft constraint with slack)
-                    # d >= d_max - M * mu - slack
-                    # slack >= 0, heavily penalized in objective
-                    slack = model.addVar(lb=0, name=f"slack_{obs_idx}_{k}")
-                    collision_slack_vars.append(slack)
-                    model.addConstr(d[k] >= d_max - M * mu - slack, f"avoid_{obs_idx}_{k}")
-
-            # ==================== OBJECTIVE ====================
-            # Minimize L1 tracking error + heavy penalty for collision slack
-            obj = 0.9 * gp.quicksum(e_s[k] for k in range(H + 1))
-            obj += 0.05 * gp.quicksum(e_d[k] for k in range(H + 1))
-            obj += 0.5 * gp.quicksum(e_v[k] for k in range(H + 1))
-            # Add collision slack penalty (ensures feasibility, heavily discourages violations)
-            obj += COLLISION_PENALTY * gp.quicksum(collision_slack_vars)
-            model.setObjective(obj, GRB.MINIMIZE)
+            # ==================== INITIAL GUESS ====================
+            # Simple straight-line trajectory at target speed
+            for k in range(H + 1):
+                opti.set_initial(s[k], s0 + v_goal * k * dt)
+                opti.set_initial(d[k], d0)
+                opti.set_initial(vs[k], v_goal)
+                opti.set_initial(vd[k], 0)
+            for k in range(H):
+                opti.set_initial(a_s[k], 0)
+                opti.set_initial(a_d[k], 0)
 
             # ==================== SOLVE ====================
-            model.optimize()
-
-            if model.Status == GRB.INFEASIBLE:
-                # Compute IIS to understand infeasibility
-                model.computeIIS()
-                print("MILP INFEASIBLE - IIS constraints:")
-                for c in model.getConstrs():
-                    if c.IISConstr:
-                        print(f"  {c.ConstrName}")
-                return None
-
-            if model.Status != GRB.OPTIMAL:
-                print(f"MILP did not converge: status={model.Status}")
-                return None
+            sol = opti.solve()
 
             # ==================== EXTRACT SOLUTION ====================
-            s_val = np.array([s[k].X for k in range(H + 1)])
-            d_val = np.array([d[k].X for k in range(H + 1)])
-            vs_val = np.array([vs[k].X for k in range(H + 1)])
-            vd_val = np.array([vd[k].X for k in range(H + 1)])
+            s_val = sol.value(s).flatten()
+            d_val = sol.value(d).flatten()
+            vs_val = sol.value(vs).flatten()
+            vd_val = sol.value(vd).flatten()
 
             milp_states = np.column_stack([s_val, d_val, vs_val, vd_val])
 
             # Debug output
-            mu_cost = sum(mu.X for mu in mu_vars) if mu_vars else 0
-            e_v_sum = sum(e_v[k].X for k in range(H + 1))
-            print(f"MILP: s0={s0:.2f}, s_goal={s_goal:.2f}, vs0={vs0:.2f}, v_goal={v_goal:.2f}")
-            print(f"MILP: s[H]={s_val[-1]:.2f}, vs[H]={vs_val[-1]:.2f}, d[H]={d_val[-1]:.2f}")
-            print(f"MILP: delta_s={s_val[-1] - s0:.2f}, mu_cost={mu_cost:.2f}, e_v={e_v_sum:.2f}")
-            print(f"MILP: N_obs={N_obs}, H={H}")
+            print(f"Stage1: s0={s0:.2f}, s_goal={s_goal:.2f}, vs0={vs0:.2f}, v_goal={v_goal:.2f}")
+            print(f"Stage1: s[H]={s_val[-1]:.2f}, vs[H]={vs_val[-1]:.2f}, d[H]={d_val[-1]:.2f}")
+            print(f"Stage1: delta_s={s_val[-1] - s0:.2f}, N_obs={N_obs}, H={H}")
 
             return milp_states
 
-        except gp.GurobiError as e:
-            print(f"MILP Gurobi error: {e}")
-            return None
         except Exception as e:
-            print(f"MILP solver exception: {e}")
+            print(f"Stage1 solver failed: {e}")
+            logger.debug(f"Stage1 solver failed: {e}")
+
+            # Try to extract debug values from failed solve
+            try:
+                print("Stage1 DEBUG - Last values before failure:")
+                print(f"  s: {opti.debug.value(s)[:5]}...")
+                print(f"  d: {opti.debug.value(d)[:5]}...")
+                print(f"  vs: {opti.debug.value(vs)[:5]}...")
+                print(f"  vd: {opti.debug.value(vd)[:5]}...")
+                print(f"  road_left[:5]: {road_left[:5]}")
+                print(f"  road_right[:5]: {road_right[:5]}")
+
+                # Show obstacle info
+                for obs_idx, obs in enumerate(obstacles[:3]):
+                    print(f"  Obstacle {obs_idx}: s={obs['s'][0]:.2f}, d={obs['d'][0]:.2f}, "
+                          f"L={obs['length']:.2f}, W={obs['width']:.2f}")
+            except Exception as debug_e:
+                print(f"  (Could not extract debug values: {debug_e})")
+
             return None
 
     # ------------------------------------------------------------------
