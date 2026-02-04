@@ -245,6 +245,7 @@ class BeliefAgent(Agent):
         """Dispatch to the correct plotter depending on policy type."""
         if isinstance(self._plotter, OptimisationPlotter):
             full_rollout = getattr(self._policy_obj, 'last_rollout', None)
+            milp_rollout = getattr(self._policy_obj, 'last_milp_rollout', None)
             trajectory = candidates[best_idx] if candidates else None
 
             # Retrieve obstacle data for visualisation
@@ -258,6 +259,7 @@ class BeliefAgent(Agent):
             self._plotter.update(
                 ego_state, trajectory, full_rollout,
                 self._trajectory_cl, self.agent_id, self._step_count,
+                milp_trajectory=milp_rollout,
                 other_agents=other_agents,
                 obstacles=obstacles,
                 frenet=frenet,

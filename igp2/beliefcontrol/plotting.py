@@ -226,6 +226,7 @@ class OptimisationPlotter:
                agent_id: int,
                step: int,
                *,
+               milp_trajectory: Optional[np.ndarray] = None,
                other_agents=None,
                obstacles=None,
                frenet=None,
@@ -244,6 +245,8 @@ class OptimisationPlotter:
             trajectory_cl: Closed-loop history trajectory of the agent.
             agent_id: Agent ID (for the title).
             step: Current simulation step (for the title).
+            milp_trajectory: (H+1, 2) position-only trajectory from the MILP
+                stage.  If provided, drawn as a cyan dashed line.  May be None.
             other_agents: Dict {agent_id: AgentState} of other vehicles.
             obstacles: List of obstacle dicts from _predict_obstacles.
             frenet: _FrenetFrame instance for coordinate conversion.
@@ -266,11 +269,20 @@ class OptimisationPlotter:
 
         dynamic = []
 
-        # --- Optimised trajectory line ---
+        # --- MILP trajectory line (warm-start) ---
+        if milp_trajectory is not None and len(milp_trajectory) > 1:
+            line, = ax.plot(
+                milp_trajectory[:, 0], milp_trajectory[:, 1],
+                'c--', linewidth=1.5, label='MILP trajectory', zorder=4,
+            )
+            ax.draw_artist(line)
+            dynamic.append(line)
+
+        # --- Optimised trajectory line (NLP) ---
         if optimised_trajectory is not None and len(optimised_trajectory) > 1:
             line, = ax.plot(
                 optimised_trajectory[:, 0], optimised_trajectory[:, 1],
-                'r-', linewidth=2, label='Optimised trajectory', zorder=5,
+                'r-', linewidth=2, label='NLP trajectory', zorder=5,
             )
             ax.draw_artist(line)
             dynamic.append(line)
@@ -311,6 +323,71 @@ class OptimisationPlotter:
                 ax.add_patch(patch)
                 ax.draw_artist(patch)
                 dynamic.append(patch)
+
+        # --- MILP collision avoidance rectangles (Paper's formulation) ---
+        # Ego is a point mass. Rectangles are enlarged by ego dimensions (Minkowski sum).
+        # The ego CENTER must stay outside these rectangles.
+        if obstacles and frenet:
+            for obs in obstacles:
+                # Project obstacle body-frame dimensions into Frenet (s, d)
+                obs_half_L = obs['length'] / 2.0
+                obs_half_W = obs['width'] / 2.0
+                obs_s0 = float(obs['s'][0])
+                _, _, _, road_angle_obs = frenet._interpolate(obs_s0)
+                dh = obs.get('heading', road_angle_obs) - road_angle_obs
+
+                # Obstacle semi-axes including margin (paper: "a, b include uncertainty")
+                obs_a = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + collision_margin
+                obs_b = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + collision_margin
+
+                # Enlarged rectangle (Minkowski sum with ego) - Paper Step 1
+                half_s_rect = obs_a + ego_length / 2.0
+                half_d_rect = obs_b + ego_width / 2.0
+
+                s_arr = obs['s']
+                d_arr = obs['d']
+                n_steps = len(s_arr)
+                rect_indices = list(range(0, n_steps, self._footprint_interval))
+                if rect_indices[-1] != n_steps - 1:
+                    rect_indices.append(n_steps - 1)
+
+                for idx in rect_indices:
+                    # Convert obstacle Frenet position to world
+                    w = frenet.frenet_to_world(float(s_arr[idx]),
+                                               float(d_arr[idx]))
+                    # Get road tangent angle at this s position
+                    _, _, _, road_angle = frenet._interpolate(float(s_arr[idx]))
+
+                    # Compute rectangle corners in world frame
+                    # Rectangle is aligned with road: s-direction is tangent, d-direction is normal
+                    cos_r = np.cos(road_angle)
+                    sin_r = np.sin(road_angle)
+                    cx, cy = w['x'], w['y']
+
+                    # Four corners in local frame (s, d) then rotated to world
+                    corners_local = [
+                        (-half_s_rect, -half_d_rect),
+                        (+half_s_rect, -half_d_rect),
+                        (+half_s_rect, +half_d_rect),
+                        (-half_s_rect, +half_d_rect),
+                    ]
+                    corners_world = []
+                    for ds, dd in corners_local:
+                        # Rotate (ds, dd) by road_angle and translate to (cx, cy)
+                        wx = cx + ds * cos_r - dd * sin_r
+                        wy = cy + ds * sin_r + dd * cos_r
+                        corners_world.append([wx, wy])
+
+                    rect = MplPolygon(
+                        corners_world, closed=True,
+                        facecolor=(0.8, 0.2, 0.2, 0.08),
+                        edgecolor=(0.8, 0.2, 0.2, 0.6),
+                        linestyle='-', linewidth=1.0,
+                        zorder=2,
+                    )
+                    ax.add_patch(rect)
+                    ax.draw_artist(rect)
+                    dynamic.append(rect)
 
         # --- NLP collision avoidance ellipses ---
         if obstacles and frenet:
