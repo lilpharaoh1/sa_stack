@@ -949,18 +949,18 @@ class TwoStageOPT:
     # ------------------------------------------------------------------
 
     def _solve_milp(self, frenet_state, road_left, road_right, obstacles):
-        """Solve MILP in Frenet frame with point-mass model using cvxpy.
+        """Solve MILP in Frenet frame with point-mass model using Gurobi.
 
         Based on "A Two-Stage Optimization-based Motion Planner for Safe Urban
         Driving" (Eiras et al.).
 
-        Key aspects (Paper's μ-based formulation):
+        Key aspects (Paper's formulation):
         - Ego vehicle is treated as a POINT MASS
         - Obstacles are RECTANGLES enlarged by ego dimensions (Minkowski sum)
-        - Obstacle semi-axes include collision margin (uncertainty)
-        - Uses μ-based SINGLE-SIDED collision avoidance (pass-left only):
+        - Uses μ-based collision avoidance (pass-left only):
             μ_i_k = max(s_min - s_k, 0) + max(s_k - s_max, 0) + max(d_min - d_k, 0)
             Constraint: d_k >= d_max - M * μ_i_k
+        - Uses Gurobi's addGenConstrMax for exact μ = max(..., 0)
 
         Args:
             frenet_state: [s, d, phi, v] current state in Frenet.
@@ -972,10 +972,13 @@ class TwoStageOPT:
             (H+1, 4) array of MILP states [s, d, vs, vd] in Frenet,
             or None if MILP failed.
         """
+        import gurobipy as gp
+        from gurobipy import GRB
+
         H = self._horizon
         dt = self._dt
         rho = self._milp_rho
-        M = self._big_m
+        M = 1e4  # Big-M from paper (10^4, not too large)
         max_accel = min(self._a_max, -self._a_min)
 
         # Initial Frenet velocity components
@@ -989,167 +992,193 @@ class TwoStageOPT:
         s_goal = self._frenet.total_length
         v_goal = self._target_speed
 
-        # --- Decision variables ---
-        # States: s, d, vs, vd at each timestep
-        s = cp.Variable(H + 1)    # longitudinal position
-        d = cp.Variable(H + 1)    # lateral position
-        vs = cp.Variable(H + 1)   # longitudinal velocity
-        vd = cp.Variable(H + 1)   # lateral velocity
-
-        # Controls: as, ad at each timestep
-        a_s = cp.Variable(H)      # longitudinal acceleration
-        a_d = cp.Variable(H)      # lateral acceleration
-
-        # L1 slack variables for tracking
-        e_s = cp.Variable(H + 1, nonneg=True)  # slack for |s - ref_s|
-        e_d = cp.Variable(H + 1, nonneg=True)  # slack for |d - ref_d|
-        e_v = cp.Variable(H + 1, nonneg=True)  # slack for |v - v_goal|
-
-        constraints = []
-
-        # --- Initial state constraints ---
-        constraints.append(s[0] == s0)
-        constraints.append(d[0] == d0)
-        constraints.append(vs[0] == vs0)
-        constraints.append(vd[0] == vd0)
-
-        # --- ZOH dynamics ---
-        for k in range(H):
-            constraints.append(s[k + 1] == s[k] + vs[k] * dt)
-            constraints.append(d[k + 1] == d[k] + vd[k] * dt)
-            constraints.append(vs[k + 1] == vs[k] + a_s[k] * dt)
-            constraints.append(vd[k + 1] == vd[k] + a_d[k] * dt)
-
-        # --- Kinematic feasibility: vs >= rho * |vd| ---
-        for k in range(H + 1):
-            constraints.append(vs[k] >= rho * vd[k])
-            constraints.append(vs[k] >= -rho * vd[k])
-
-        # --- State bounds ---
-        for k in range(H + 1):
-            constraints.append(vs[k] >= 0)  # forward motion only
-
-        # --- Control bounds ---
-        for k in range(H):
-            constraints.append(a_s[k] >= -max_accel)
-            constraints.append(a_s[k] <= max_accel)
-            constraints.append(a_d[k] >= -max_accel)
-            constraints.append(a_d[k] <= max_accel)
-
-        # --- Road boundaries: d_right <= d <= d_left ---
-        for k in range(H + 1):
-            constraints.append(d[k] >= road_right[k])
-            constraints.append(d[k] <= road_left[k])
-
-        # --- L1 slack constraints for tracking ---
-        for k in range(H + 1):
-            # Reference trajectory: advance at v_goal, capped at s_goal
-            ref_s = min(s0 + v_goal * k * dt, s_goal)
-            ref_d = 0.0
-
-            # e_s >= |s - ref_s|
-            constraints.append(e_s[k] >= s[k] - ref_s)
-            constraints.append(e_s[k] >= ref_s - s[k])
-
-            # e_d >= |d - ref_d|
-            constraints.append(e_d[k] >= d[k] - ref_d)
-            constraints.append(e_d[k] >= ref_d - d[k])
-            
-            # e_v >= |vs - v_goal| (track longitudinal velocity, not magnitude)
-            constraints.append(e_v[k] >= vs[k] - v_goal)
-            constraints.append(e_v[k] >= v_goal - vs[k])
-
-        mu_vars = []
-        # --- Collision avoidance (Paper's μ-based formulation) ---
-        for obs_idx in range(N_obs):
-            obs = obstacles[obs_idx]
-
-            # Project obstacle body-frame dimensions into Frenet (s, d)
-            obs_half_L = obs['length'] / 2.0
-            obs_half_W = obs['width'] / 2.0
-            obs_s0 = float(obs['s'][0])
-            _, _, _, road_angle = self._frenet._interpolate(obs_s0)
-            dh = obs.get('heading', road_angle) - road_angle
-
-            # Obstacle semi-axes in Frenet frame (including collision margin)
-            obs_a = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + self._collision_margin
-            obs_b = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + self._collision_margin
-
-            # Enlarge obstacle by ego dimensions (Minkowski sum)
-            half_s = obs_a + self._ego_length / 2.0
-            half_d = obs_b + self._ego_width / 2.0
-
-            for k in range(1, H + 1):  # Skip initial state
-                s_obs = float(obs['s'][k] if k < len(obs['s']) else obs['s'][-1])
-                d_obs = float(obs['d'][k] if k < len(obs['d']) else obs['d'][-1])
-
-                # Obstacle bounds (enlarged rectangle)
-                s_min = s_obs - half_s
-                s_max = s_obs + half_s
-                d_min = d_obs - half_d
-                d_max = d_obs + half_d
-
-                # Auxiliary variables for max(., 0) terms
-                mu1 = cp.Variable(nonneg=True)  # max(s_min - s, 0)
-                mu2 = cp.Variable(nonneg=True)  # max(s - s_max, 0)
-                mu3 = cp.Variable(nonneg=True)  # max(d_min - d, 0)
-
-                # Constraints to enforce mu >= max(expr, 0)
-                # Since mu >= 0 (nonneg), we only need mu >= expr
-                constraints.append(mu1 >= s_min - s[k])
-                constraints.append(mu2 >= s[k] - s_max)
-                constraints.append(mu3 >= d_min - d[k])
-
-                # Total mu
-                mu = mu1 + mu2 + mu3
-
-                # Adding for minimisation
-                mu_vars.append((obs_idx, k, mu1, mu2, mu3, d_max, mu))
-
-                # Main collision avoidance constraint (pass-left only)
-                constraints.append(d[k] >= d_max - M * mu)
-
-        # --- Objective: minimise L1 tracking error + small μ penalty ---
-        # Small penalty to prefer mu = max(...) over mu > max(...), but not so large
-        # that it prevents passing obstacles (mu can be large during approach)
-        mu_penalty = 2*M
-        mu_cost = sum(mu for _, _, _, _, _, _, mu in mu_vars) if mu_vars else 0
-        objective = cp.Minimize(0.9*cp.sum(e_s) + 0.05*cp.sum(e_d) + 0.5*cp.sum(e_v) + mu_penalty * mu_cost) 
-
-        # --- Solve ---
-        problem = cp.Problem(objective, constraints)
+        # Ego dimensions for Minkowski sum
+        dx = self._ego_length / 2.0
+        dy = self._ego_width / 2.0
 
         try:
-            problem.solve(solver=cp.ECOS, verbose=False)
+            model = gp.Model("milp_collision_avoidance")
+            model.Params.OutputFlag = 0  # Suppress output
+
+            # ==================== DECISION VARIABLES ====================
+            # States: s, d, vs, vd at each timestep
+            s = model.addVars(H + 1, lb=-GRB.INFINITY, name="s")
+            d = model.addVars(H + 1, lb=-GRB.INFINITY, name="d")
+            vs = model.addVars(H + 1, lb=0, name="vs")  # forward motion only
+            vd = model.addVars(H + 1, lb=-GRB.INFINITY, name="vd")
+
+            # Controls: a_s, a_d at each timestep
+            a_s = model.addVars(H, lb=-max_accel, ub=max_accel, name="a_s")
+            a_d = model.addVars(H, lb=-max_accel, ub=max_accel, name="a_d")
+
+            # L1 slack variables for tracking (non-negative)
+            e_s = model.addVars(H + 1, lb=0, name="e_s")
+            e_d = model.addVars(H + 1, lb=0, name="e_d")
+            e_v = model.addVars(H + 1, lb=0, name="e_v")
+
+            # ==================== INITIAL STATE ====================
+            model.addConstr(s[0] == s0, "init_s")
+            model.addConstr(d[0] == d0, "init_d")
+            model.addConstr(vs[0] == vs0, "init_vs")
+            model.addConstr(vd[0] == vd0, "init_vd")
+
+            # ==================== DYNAMICS (ZOH) ====================
+            for k in range(H):
+                model.addConstr(s[k + 1] == s[k] + vs[k] * dt, f"dyn_s_{k}")
+                model.addConstr(d[k + 1] == d[k] + vd[k] * dt, f"dyn_d_{k}")
+                model.addConstr(vs[k + 1] == vs[k] + a_s[k] * dt, f"dyn_vs_{k}")
+                model.addConstr(vd[k + 1] == vd[k] + a_d[k] * dt, f"dyn_vd_{k}")
+
+            # ==================== KINEMATIC FEASIBILITY ====================
+            # vs >= rho * |vd| (ensures realistic turning)
+            for k in range(H + 1):
+                model.addConstr(vs[k] >= rho * vd[k], f"kin_pos_{k}")
+                model.addConstr(vs[k] >= -rho * vd[k], f"kin_neg_{k}")
+
+            # ==================== ROAD BOUNDARIES ====================
+            for k in range(H + 1):
+                model.addConstr(d[k] >= road_right[k], f"road_right_{k}")
+                model.addConstr(d[k] <= road_left[k], f"road_left_{k}")
+
+            # ==================== L1 TRACKING CONSTRAINTS ====================
+            for k in range(H + 1):
+                # Reference trajectory: advance at v_goal, capped at s_goal
+                ref_s = min(s0 + v_goal * k * dt, s_goal)
+                ref_d = 0.0
+
+                # e_s >= |s - ref_s|
+                model.addConstr(e_s[k] >= s[k] - ref_s, f"es_pos_{k}")
+                model.addConstr(e_s[k] >= ref_s - s[k], f"es_neg_{k}")
+
+                # e_d >= |d - ref_d|
+                model.addConstr(e_d[k] >= d[k] - ref_d, f"ed_pos_{k}")
+                model.addConstr(e_d[k] >= ref_d - d[k], f"ed_neg_{k}")
+
+                # e_v >= |vs - v_goal|
+                model.addConstr(e_v[k] >= vs[k] - v_goal, f"ev_pos_{k}")
+                model.addConstr(e_v[k] >= v_goal - vs[k], f"ev_neg_{k}")
+
+            # ==================== COLLISION AVOIDANCE ====================
+            # Paper's μ-based formulation with Gurobi's GenConstrMax
+            # Added: slack variables for soft constraints (ensures feasibility)
+            mu_vars = []
+            collision_slack_vars = []
+            COLLISION_PENALTY = 1e6  # Heavy penalty for constraint violation
+
+            for obs_idx in range(N_obs):
+                obs = obstacles[obs_idx]
+
+                # Obstacle dimensions in Frenet frame
+                obs_half_L = obs['length'] / 2.0
+                obs_half_W = obs['width'] / 2.0
+                obs_s0 = float(obs['s'][0])
+                _, _, _, road_angle = self._frenet._interpolate(obs_s0)
+                dh = obs.get('heading', road_angle) - road_angle
+
+                # Obstacle semi-axes (a = longitudinal, b = lateral) + collision margin
+                obs_a = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + self._collision_margin
+                obs_b = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + self._collision_margin
+
+                for k in range(1, H + 1):  # Skip initial state (can't change it)
+                    # Obstacle position at timestep k
+                    s_obs = float(obs['s'][k] if k < len(obs['s']) else obs['s'][-1])
+                    d_obs = float(obs['d'][k] if k < len(obs['d']) else obs['d'][-1])
+
+                    # STEP 1: Enlarged rectangle bounds (Minkowski sum)
+                    s_min = s_obs - obs_a - dx
+                    s_max = s_obs + obs_a + dx
+                    d_min = d_obs - obs_b - dy
+                    d_max = d_obs + obs_b + dy
+
+                    # Debug check: verify obstacle doesn't block entire road
+                    road_width = road_left[k] - road_right[k]
+                    obs_width = 2 * (obs_b + dy)
+                    if obs_width >= road_width:
+                        logger.warning(f"Obstacle {obs_idx} blocks road at k={k}: "
+                                      f"obs_width={obs_width:.2f} >= road_width={road_width:.2f}")
+
+                    # STEP 2: Create auxiliary variables for expressions
+                    # a1 = s_min - s[k] (positive when ego is BEHIND obstacle)
+                    # a2 = s[k] - s_max (positive when ego is IN FRONT of obstacle)
+                    # a3 = d_min - d[k] (positive when ego is to RIGHT of obstacle)
+                    a1 = model.addVar(lb=-GRB.INFINITY, name=f"a1_{obs_idx}_{k}")
+                    a2 = model.addVar(lb=-GRB.INFINITY, name=f"a2_{obs_idx}_{k}")
+                    a3 = model.addVar(lb=-GRB.INFINITY, name=f"a3_{obs_idx}_{k}")
+
+                    model.addConstr(a1 == s_min - s[k], f"a1_def_{obs_idx}_{k}")
+                    model.addConstr(a2 == s[k] - s_max, f"a2_def_{obs_idx}_{k}")
+                    model.addConstr(a3 == d_min - d[k], f"a3_def_{obs_idx}_{k}")
+
+                    # STEP 3: μ_i = max(a_i, 0) using Gurobi's GenConstrMax
+                    mu1 = model.addVar(lb=0, name=f"mu1_{obs_idx}_{k}")
+                    mu2 = model.addVar(lb=0, name=f"mu2_{obs_idx}_{k}")
+                    mu3 = model.addVar(lb=0, name=f"mu3_{obs_idx}_{k}")
+
+                    model.addGenConstrMax(mu1, [a1], constant=0.0, name=f"max_mu1_{obs_idx}_{k}")
+                    model.addGenConstrMax(mu2, [a2], constant=0.0, name=f"max_mu2_{obs_idx}_{k}")
+                    model.addGenConstrMax(mu3, [a3], constant=0.0, name=f"max_mu3_{obs_idx}_{k}")
+
+                    # Total μ = μ1 + μ2 + μ3
+                    mu = model.addVar(lb=0, name=f"mu_{obs_idx}_{k}")
+                    model.addConstr(mu == mu1 + mu2 + mu3, f"mu_sum_{obs_idx}_{k}")
+                    mu_vars.append(mu)
+
+                    # STEP 4: Main collision constraint (soft constraint with slack)
+                    # d >= d_max - M * mu - slack
+                    # slack >= 0, heavily penalized in objective
+                    slack = model.addVar(lb=0, name=f"slack_{obs_idx}_{k}")
+                    collision_slack_vars.append(slack)
+                    model.addConstr(d[k] >= d_max - M * mu - slack, f"avoid_{obs_idx}_{k}")
+
+            # ==================== OBJECTIVE ====================
+            # Minimize L1 tracking error + heavy penalty for collision slack
+            obj = 0.9 * gp.quicksum(e_s[k] for k in range(H + 1))
+            obj += 0.05 * gp.quicksum(e_d[k] for k in range(H + 1))
+            obj += 0.5 * gp.quicksum(e_v[k] for k in range(H + 1))
+            # Add collision slack penalty (ensures feasibility, heavily discourages violations)
+            obj += COLLISION_PENALTY * gp.quicksum(collision_slack_vars)
+            model.setObjective(obj, GRB.MINIMIZE)
+
+            # ==================== SOLVE ====================
+            model.optimize()
+
+            if model.Status == GRB.INFEASIBLE:
+                # Compute IIS to understand infeasibility
+                model.computeIIS()
+                print("MILP INFEASIBLE - IIS constraints:")
+                for c in model.getConstrs():
+                    if c.IISConstr:
+                        print(f"  {c.ConstrName}")
+                return None
+
+            if model.Status != GRB.OPTIMAL:
+                print(f"MILP did not converge: status={model.Status}")
+                return None
+
+            # ==================== EXTRACT SOLUTION ====================
+            s_val = np.array([s[k].X for k in range(H + 1)])
+            d_val = np.array([d[k].X for k in range(H + 1)])
+            vs_val = np.array([vs[k].X for k in range(H + 1)])
+            vd_val = np.array([vd[k].X for k in range(H + 1)])
+
+            milp_states = np.column_stack([s_val, d_val, vs_val, vd_val])
+
+            # Debug output
+            mu_cost = sum(mu.X for mu in mu_vars) if mu_vars else 0
+            e_v_sum = sum(e_v[k].X for k in range(H + 1))
+            print(f"MILP: s0={s0:.2f}, s_goal={s_goal:.2f}, vs0={vs0:.2f}, v_goal={v_goal:.2f}")
+            print(f"MILP: s[H]={s_val[-1]:.2f}, vs[H]={vs_val[-1]:.2f}, d[H]={d_val[-1]:.2f}")
+            print(f"MILP: delta_s={s_val[-1] - s0:.2f}, mu_cost={mu_cost:.2f}, e_v={e_v_sum:.2f}")
+            print(f"MILP: N_obs={N_obs}, H={H}")
+
+            return milp_states
+
+        except gp.GurobiError as e:
+            print(f"MILP Gurobi error: {e}")
+            return None
         except Exception as e:
-            print("MILP solver exception: %s", e)
-            logger.debug("MILP solver exception: %s", e)
+            print(f"MILP solver exception: {e}")
             return None
-
-        if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-            print("MILP did not converge: %s", problem.status)
-            logger.debug("MILP did not converge: %s", problem.status)
-            return None
-
-        # Extract states: (H+1, 4) [s, d, vs, vd]
-        milp_states = np.column_stack([
-            s.value,
-            d.value,
-            vs.value,
-            vd.value
-        ])
-
-        # Debug output
-        print(f"MILP: s0={s0:.2f}, s_goal={s_goal:.2f}, vs0={vs0:.2f}, v_goal={v_goal:.2f}")
-        print(f"MILP: s[H]={s.value[-1]:.2f}, vs[H]={vs.value[-1]:.2f}")
-        print(f"MILP: delta_s={s.value[-1] - s0:.2f}, max_accel={max_accel:.2f}")
-        print(f"MILP: sum(e_s)={sum(e_s.value):.2f}, sum(e_v)={sum(e_v.value):.2f}")
-        print(f"MILP: N_obs={N_obs}, H={H}, dt={dt}")
-        print(f"MILP: vs profile: {[f'{v:.1f}' for v in vs.value[::10]]}")  # Every 10th step
-        if mu_vars:
-            print(f"MILP: mu_vars count={len(mu_vars)}, first few mu sums: {[f'{mu.value:.2f}' for _, _, _, _, _, _, mu in mu_vars[:5]]}")
-
-        return milp_states
 
     # ------------------------------------------------------------------
     # MILP -> NLP warm-start conversion
