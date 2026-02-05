@@ -269,23 +269,23 @@ class OptimisationPlotter:
 
         dynamic = []
 
-        # --- MILP trajectory line (warm-start) ---
-        if milp_trajectory is not None and len(milp_trajectory) > 1:
-            line, = ax.plot(
-                milp_trajectory[:, 0], milp_trajectory[:, 1],
-                'c--', linewidth=1.5, label='MILP trajectory', zorder=4,
-            )
-            ax.draw_artist(line)
-            dynamic.append(line)
-
-        # # --- Optimised trajectory line (NLP) ---
-        # if optimised_trajectory is not None and len(optimised_trajectory) > 1:
+        # # --- MILP trajectory line (warm-start) ---
+        # if milp_trajectory is not None and len(milp_trajectory) > 1:
         #     line, = ax.plot(
-        #         optimised_trajectory[:, 0], optimised_trajectory[:, 1],
-        #         'r-', linewidth=2, label='NLP trajectory', zorder=5,
+        #         milp_trajectory[:, 0], milp_trajectory[:, 1],
+        #         'c--', linewidth=1.5, label='MILP trajectory', zorder=4,
         #     )
         #     ax.draw_artist(line)
         #     dynamic.append(line)
+
+        # --- Optimised trajectory line (NLP) ---
+        if optimised_trajectory is not None and len(optimised_trajectory) > 1:
+            line, = ax.plot(
+                optimised_trajectory[:, 0], optimised_trajectory[:, 1],
+                'r-', linewidth=2, label='NLP trajectory', zorder=5,
+            )
+            ax.draw_artist(line)
+            dynamic.append(line)
 
         # --- Compute unified timestep indices for all footprints ---
         # Use ego rollout length as the reference horizon
@@ -301,38 +301,38 @@ class OptimisationPlotter:
             if footprint_indices[-1] != horizon_len - 1:
                 footprint_indices.append(horizon_len - 1)
 
-        # --- Vehicle footprints along trajectory ---
-        if full_rollout is not None and len(full_rollout) > 1:
-            for idx in footprint_indices:
-                if idx >= len(full_rollout):
-                    continue
-                x_k, y_k, heading_k = (full_rollout[idx, 0],
-                                        full_rollout[idx, 1],
-                                        full_rollout[idx, 2])
-                corners = calculate_multiple_bboxes(
-                    [x_k], [y_k],
-                    self._metadata.length, self._metadata.width, heading_k,
-                )[0]  # (4, 2)
+        # # --- Vehicle footprints along trajectory ---
+        # if full_rollout is not None and len(full_rollout) > 1:
+        #     for idx in footprint_indices:
+        #         if idx >= len(full_rollout):
+        #             continue
+        #         x_k, y_k, heading_k = (full_rollout[idx, 0],
+        #                                 full_rollout[idx, 1],
+        #                                 full_rollout[idx, 2])
+        #         corners = calculate_multiple_bboxes(
+        #             [x_k], [y_k],
+        #             self._metadata.length, self._metadata.width, heading_k,
+        #         )[0]  # (4, 2)
 
-                # Check drivability via map — if any corner has no
-                # drivable lane nearby, colour the footprint red.
-                in_drivable = all(
-                    len(self._scenario_map.lanes_at(
-                        c, drivable_only=True, max_distance=1.0)) > 0
-                    for c in corners
-                )
-                colour = (0.2, 0.8, 0.2, 0.25) if in_drivable \
-                    else (0.9, 0.2, 0.2, 0.35)
+        #         # Check drivability via map — if any corner has no
+        #         # drivable lane nearby, colour the footprint red.
+        #         in_drivable = all(
+        #             len(self._scenario_map.lanes_at(
+        #                 c, drivable_only=True, max_distance=1.0)) > 0
+        #             for c in corners
+        #         )
+        #         colour = (0.2, 0.8, 0.2, 0.25) if in_drivable \
+        #             else (0.9, 0.2, 0.2, 0.35)
 
-                patch = MplPolygon(
-                    corners, closed=True,
-                    facecolor=colour,
-                    edgecolor=colour[:3] + (0.8,),
-                    linewidth=0.8, zorder=4,
-                )
-                ax.add_patch(patch)
-                ax.draw_artist(patch)
-                dynamic.append(patch)
+        #         patch = MplPolygon(
+        #             corners, closed=True,
+        #             facecolor=colour,
+        #             edgecolor=colour[:3] + (0.8,),
+        #             linewidth=0.8, zorder=4,
+        #         )
+        #         ax.add_patch(patch)
+        #         ax.draw_artist(patch)
+        #         dynamic.append(patch)
 
         # --- MILP collision avoidance rectangles (Paper's formulation) ---
         # Disabled - uncomment to visualize Minkowski-sum rectangles
@@ -371,14 +371,10 @@ class OptimisationPlotter:
         # Uses the same footprint_indices as ego vehicle for alignment
         if obstacles and frenet and footprint_indices:
             for obs in obstacles:
-                # Project obstacle body-frame dimensions into Frenet (s, d)
-                obs_half_L = obs['length'] / 2.0
-                obs_half_W = obs['width'] / 2.0
-                obs_s0 = float(obs['s'][0])
-                _, _, _, road_angle_obs = frenet._interpolate(obs_s0)
-                dh = obs.get('heading', road_angle_obs) - road_angle_obs
-                rx = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + collision_margin
-                ry = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + collision_margin
+                # Use actual obstacle dimensions (not Frenet-projected)
+                # The ellipse represents the obstacle's body plus collision margin
+                obs_half_L = obs['length'] / 2.0 + collision_margin
+                obs_half_W = obs['width'] / 2.0 + collision_margin
 
                 # Use world positions if available
                 world_pts = obs.get('world_positions', None)
@@ -419,9 +415,11 @@ class OptimisationPlotter:
                         # Fallback: road tangent angle at this s position
                         _, _, _, ellipse_angle = frenet._interpolate(float(s_arr[idx]))
 
+                    # Ellipse width is along the vehicle's length (heading direction)
+                    # Ellipse height is along the vehicle's width (perpendicular to heading)
                     ellipse = MplEllipse(
                         xy=(cx, cy),
-                        width=2 * rx, height=2 * ry,
+                        width=2 * obs_half_L, height=2 * obs_half_W,
                         angle=np.degrees(ellipse_angle),
                         facecolor=facecolor,
                         edgecolor=edgecolor,

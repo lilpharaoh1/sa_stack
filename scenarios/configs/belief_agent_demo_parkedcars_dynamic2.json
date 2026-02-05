@@ -14,7 +14,7 @@
         "box": {
           "center": [
             92.4,
-            -40.1
+            -32.1
           ],
           "length": 10,
           "width": 3.5,
@@ -40,10 +40,9 @@
     {
       "id": 1,
       "type": "TrafficAgent",
-      "open_loop": true,
       "spawn": {
         "box": {
-          "center": [20, -2.5],
+          "center": [45, -2.5],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
@@ -68,10 +67,9 @@
     {
       "id": 2,
       "type": "TrafficAgent",
-      "open_loop": true,
       "spawn": {
         "box": {
-          "center": [40, -2.5],
+          "center": [60, -2.5],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
@@ -96,7 +94,6 @@
     {
       "id": 3,
       "type": "TrafficAgent",
-      "open_loop": true,
       "spawn": {
         "box": {
           "center": [170.0, 1.5],
@@ -121,5 +118,9 @@
         }
       }
     }
-  ]
+  ],
+    "static_objects": [
+      {"position": [93.4, -25.0], "heading": 1.57, "blueprint": "vehicle.audi.a2"},
+      {"position": [93.4, -18.0], "heading": 1.57, "blueprint": "vehicle.audi.a2"}
+    ]
 }

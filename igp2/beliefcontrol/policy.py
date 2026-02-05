@@ -14,6 +14,7 @@ Two control policies are provided:
 """
 
 import logging
+import time
 from typing import List, Optional, Dict, Tuple
 
 import numpy as np
@@ -523,10 +524,10 @@ class TwoStageOPT:
     ``d_right <= d <= d_left``.
 
     **Stage 1 — MILP (coarse trajectory).**
-    A Mixed-Integer Linear Program over a point-mass model
-    ``[s, d, vs, vd]`` in Frenet coordinates minimises L1 tracking error
+    A smooth approximation of MILP over a point-mass model
+    ``[s, d, vs, vd]`` in Frenet coordinates minimises L2 tracking error
     subject to ZOH dynamics, kinematic feasibility, road boundaries,
-    and Big-M rectangle collision avoidance.
+    and smooth penalty-based collision avoidance.
 
     **Stage 2 — NLP (refined trajectory).**
     A CasADi + IPOPT nonlinear program over the bicycle kinematic model
@@ -539,6 +540,35 @@ class TwoStageOPT:
     ``horizon`` steps (default 40 = 8 s), but only the first action is
     applied for one simulation step (receding-horizon MPC).
 
+    **MILP and NLP parameters are configured separately** via ``milp_params``
+    and ``nlp_params`` dicts. See ``MILP_DEFAULTS`` and ``NLP_DEFAULTS`` for
+    available parameters and their defaults.
+
+    MILP Parameters (point-mass model):
+        - a_s_min/a_s_max: Longitudinal acceleration bounds (m/s^2)
+        - a_d_min/a_d_max: Lateral acceleration bounds (m/s^2)
+        - jerk_s_max: Longitudinal jerk max (m/s^3)
+        - jerk_d_max: Lateral jerk max (m/s^3)
+        - vs_min/vs_max: Longitudinal velocity bounds (m/s)
+        - vd_min/vd_max: Lateral velocity bounds (m/s)
+        - rho: Kinematic feasibility ratio (vs >= rho * |vd|)
+        - w_s: Weight for longitudinal position tracking
+        - w_d: Weight for lateral position tracking
+        - w_v: Weight for velocity tracking
+        - w_a_s: Weight for longitudinal acceleration
+        - w_a_d: Weight for lateral acceleration
+
+    NLP Parameters (bicycle model):
+        - a_min/a_max: Acceleration bounds (m/s^2)
+        - delta_max: Max steering angle magnitude (rad)
+        - jerk_max: Max jerk (m/s^3)
+        - v_min/v_max: Velocity bounds (m/s)
+        - w_s: Weight for longitudinal position tracking
+        - w_d: Weight for lateral position tracking
+        - w_v: Weight for velocity tracking
+        - w_a: Weight for acceleration norm
+        - w_delta: Weight for steering angle norm
+
     Args:
         fps: Simulation framerate.
         metadata: Agent physical metadata (wheelbase, limits, etc.).
@@ -547,32 +577,96 @@ class TwoStageOPT:
         horizon: Number of planning steps (default 40).
         dt: Planning timestep in seconds (default 0.2).
         target_speed: Desired cruising speed (m/s).
-        delta_max: Maximum steering angle (rad).
-        a_min: Minimum acceleration (m/s^2, negative for braking).
-        a_max: Maximum acceleration (m/s^2).
-        jerk_max: Maximum jerk (m/s^3).
-        v_max: Maximum speed (m/s).
-        milp_rho: Kinematic feasibility ratio for MILP.
-        big_m: Big-M constant for collision avoidance.
-        w_x: Cost weight for longitudinal tracking.
-        w_v: Cost weight for speed tracking.
-        w_y: Cost weight for lateral deviation.
-        w_a: Cost weight for acceleration.
-        w_delta: Cost weight for steering.
         collision_margin: Extra safety margin around obstacles (m).
+        big_m: Big-M constant for collision avoidance.
+        milp_params: Dict of MILP-specific parameters (see MILP_DEFAULTS).
+        nlp_params: Dict of NLP-specific parameters (see NLP_DEFAULTS).
+
+    Example:
+        >>> policy = TwoStageOPT(
+        ...     fps=20, metadata=meta, reference_waypoints=waypoints,
+        ...     milp_params={'rho': 2.0, 'w_s': 1.0, 'a_s_max': 2.0},
+        ...     nlp_params={'delta_max': 0.3, 'w_d': 3.0, 'jerk_max': 0.3},
+        ... )
     """
 
     # Paper default parameters
-    DEFAULT_HORIZON = 40
+    DEFAULT_HORIZON = 20
     DEFAULT_DT = 0.2
-    DEFAULT_DELTA_MAX = 0.45
-    DEFAULT_A_MIN = -3.0
-    DEFAULT_A_MAX = 3.0
-    DEFAULT_JERK_MAX = 0.5
-    DEFAULT_V_MAX = 10.0
-    DEFAULT_RHO = 1.5
     DEFAULT_BIG_M = 1000.0
     N_OBS_MAX = 10  # pre-allocated obstacle slots in NLP
+
+
+    # # MILP default parameters (point-mass model with [s, d, vs, vd] state)
+    # MILP_DEFAULTS = {
+    #     'a_s_min': -3.0,      # Longitudinal acceleration min (m/s^2)
+    #     'a_s_max': 3.0,       # Longitudinal acceleration max (m/s^2)
+    #     'a_d_min': -0.5,      # Lateral acceleration min (m/s^2)
+    #     'a_d_max': 0.5,       # Lateral acceleration max (m/s^2)
+    #     'jerk_s_max': 0.5,    # Longitudinal jerk max (m/s^3)
+    #     'jerk_d_max': 0.1,    # Lateral jerk max (m/s^3)
+    #     'vs_min': 0.0,        # Longitudinal velocity min (m/s)
+    #     'vs_max': 3.0,        # Longitudinal velocity max (m/s)
+    #     'vd_min': -1.0,       # Lateral velocity min (m/s)
+    #     'vd_max': 1.0,        # Lateral velocity max (m/s)
+    #     'rho': 1.5,           # Kinematic feasibility ratio (vs >= rho * |vd|)
+    #     'w_s': 0.9,           # Weight for longitudinal position tracking
+    #     'w_d': 0.05,          # Weight for lateral position tracking
+    #     'w_v': 0.5,           # Weight for velocity tracking
+    #     'w_a_s': 0.4,        # Weight for longitudinal acceleration
+    #     'w_a_d': 0.4,        # Weight for lateral acceleration
+    # }
+
+    # # NLP default parameters (bicycle model with [s, d, phi, v] state)
+    # NLP_DEFAULTS = {
+    #     'a_min': -3.0,        # Acceleration min (m/s^2)
+    #     'a_max': 3.0,         # Acceleration max (m/s^2)
+    #     'delta_max': 0.45,    # Max steering angle magnitude (rad)
+    #     'jerk_max': 0.5,      # Max jerk (m/s^3)
+    #     'v_min': 0.0,         # Velocity min (m/s)
+    #     'v_max': 10.0,        # Velocity max (m/s)
+    #     'w_s': 0.1,           # Weight for longitudinal position tracking
+    #     'w_d': 0.05,           # Weight for lateral position tracking
+    #     'w_v': 2.5,           # Weight for velocity tracking
+    #     'w_a': 1.0,           # Weight for acceleration norm
+    #     'w_delta': 2.0,       # Weight for steering angle norm
+    # }
+
+    # MILP default parameters (point-mass model with [s, d, vs, vd] state)
+    MILP_DEFAULTS = {
+        'a_s_min': -3.0,      # Longitudinal acceleration min (m/s^2)
+        'a_s_max': 3.0,       # Longitudinal acceleration max (m/s^2)
+        'a_d_min': -3.0,      # Lateral acceleration min (m/s^2)
+        'a_d_max': 3.0,       # Lateral acceleration max (m/s^2)
+        'jerk_s_max': 1.0,    # Longitudinal jerk max (m/s^3)
+        'jerk_d_max': 1.0,    # Lateral jerk max (m/s^3)
+        'vs_min': 0.0,        # Longitudinal velocity min (m/s)
+        'vs_max': 8.0,       # Longitudinal velocity max (m/s)
+        'vd_min': -8.0,       # Lateral velocity min (m/s)
+        'vd_max': 8.0,        # Lateral velocity max (m/s)
+        'rho': 1.5,           # Kinematic feasibility ratio (vs >= rho * |vd|)
+        'w_s': 0.9,           # Weight for longitudinal position tracking
+        'w_d': 0.05,          # Weight for lateral position tracking
+        'w_v': 0.5,           # Weight for velocity tracking
+        'w_a_s': 0.4,        # Weight for longitudinal acceleration
+        'w_a_d': 0.4,        # Weight for lateral acceleration
+    }
+
+    # NLP default parameters (bicycle model with [s, d, phi, v] state)
+    NLP_DEFAULTS = {
+        'a_min': -3.0,        # Acceleration min (m/s^2)
+        'a_max': 3.0,         # Acceleration max (m/s^2)
+        'delta_max': 0.45,    # Max steering angle magnitude (rad)
+        'delta_rate_max': 0.18,  # Max steering rate (rad/s)
+        'jerk_max': 0.5,      # Max jerk (m/s^3)
+        'v_min': 0.0,         # Velocity min (m/s)
+        'v_max': 8.0,        # Velocity max (m/s)
+        'w_s': 0.01,           # Weight for longitudinal position tracking
+        'w_d': 500.0,           # Weight for lateral position tracking
+        'w_v': 0.5,           # Weight for velocity tracking
+        'w_a': 1.0,           # Weight for acceleration norm
+        'w_delta': 2.0,       # Weight for steering angle norm
+    }
 
     def __init__(self,
                  fps: int,
@@ -581,21 +675,23 @@ class TwoStageOPT:
                  scenario_map: Optional[Map] = None,
                  horizon: int = None,
                  dt: float = None,
-                 target_speed: float = 6.5,
+                 target_speed: float = 5.0,
+                 collision_margin: float = 0.5,
+                 big_m: float = None,
+                 milp_params: Optional[Dict] = None,
+                 nlp_params: Optional[Dict] = None,
+                 # Legacy params (for back-compat, override milp/nlp_params)
                  delta_max: float = None,
                  a_min: float = None,
                  a_max: float = None,
                  jerk_max: float = None,
                  v_max: float = None,
                  milp_rho: float = None,
-                 big_m: float = None,
-                 w_x: float = 1.0,
-                 w_v: float = 0.5,
-                 w_y: float = 2.0,
-                 w_a: float = 0.1,
-                 w_delta: float = 0.1,
-                 collision_margin: float = 0.5,
-                 # Legacy params (ignored for back-compat)
+                 w_x: float = None,
+                 w_v: float = None,
+                 w_y: float = None,
+                 w_a: float = None,
+                 w_delta: float = None,
                  max_steer=None, w_ref=None, w_speed=None, w_smooth=None,
                  **kwargs):
         self._fps = fps
@@ -606,22 +702,51 @@ class TwoStageOPT:
         self._scenario_map = scenario_map
         self._horizon = horizon if horizon is not None else self.DEFAULT_HORIZON
         self._target_speed = target_speed
-
-        # Dynamics limits
-        self._delta_max = delta_max if delta_max is not None else self.DEFAULT_DELTA_MAX
-        self._a_min = a_min if a_min is not None else self.DEFAULT_A_MIN
-        self._a_max = a_max if a_max is not None else self.DEFAULT_A_MAX
-        self._jerk_max = jerk_max if jerk_max is not None else self.DEFAULT_JERK_MAX
-        self._v_max = v_max if v_max is not None else self.DEFAULT_V_MAX
-        self._milp_rho = milp_rho if milp_rho is not None else self.DEFAULT_RHO
         self._big_m = big_m if big_m is not None else self.DEFAULT_BIG_M
 
-        # Cost weights (paper's cost function)
-        self._w_x = w_x
-        self._w_v = w_v
-        self._w_y = w_y
-        self._w_a = w_a
-        self._w_delta = w_delta
+        # Build MILP parameters from defaults + provided overrides
+        self._milp = dict(self.MILP_DEFAULTS)
+        if milp_params is not None:
+            self._milp.update(milp_params)
+
+        # Build NLP parameters from defaults + provided overrides
+        self._nlp = dict(self.NLP_DEFAULTS)
+        if nlp_params is not None:
+            self._nlp.update(nlp_params)
+
+        # Apply legacy parameter overrides (for backwards compatibility)
+        if milp_rho is not None:
+            self._milp['rho'] = milp_rho
+        if v_max is not None:
+            self._milp['vs_max'] = v_max  # Legacy v_max applies to longitudinal
+            self._nlp['v_max'] = v_max
+        if a_min is not None:
+            self._milp['a_s_min'] = a_min
+            self._milp['a_d_min'] = a_min
+            self._nlp['a_min'] = a_min
+        if a_max is not None:
+            self._milp['a_s_max'] = a_max
+            self._milp['a_d_max'] = a_max
+            self._nlp['a_max'] = a_max
+        if delta_max is not None:
+            self._nlp['delta_max'] = delta_max
+        if jerk_max is not None:
+            self._nlp['jerk_max'] = jerk_max
+        if w_x is not None:
+            self._milp['w_s'] = w_x
+            self._nlp['w_s'] = w_x
+        if w_y is not None:
+            self._milp['w_d'] = w_y
+            self._nlp['w_d'] = w_y
+        if w_v is not None:
+            self._milp['w_v'] = w_v
+            self._nlp['w_v'] = w_v
+        if w_a is not None:
+            self._milp['w_a_s'] = w_a
+            self._milp['w_a_d'] = w_a
+            self._nlp['w_a'] = w_a
+        if w_delta is not None:
+            self._nlp['w_delta'] = w_delta
 
         # Collision
         self._collision_margin = collision_margin
@@ -641,6 +766,7 @@ class TwoStageOPT:
         self._last_rollout: Optional[np.ndarray] = None       # (H+1, 4) world
         self._last_milp_rollout: Optional[np.ndarray] = None  # (H+1, 2) world positions from MILP
         self._ref_start_idx: int = 0
+        self._step_count: int = 0
 
         # Obstacle data (stored for plotter access)
         self._last_obstacles: Optional[List] = None
@@ -699,15 +825,16 @@ class TwoStageOPT:
         self._last_obstacles = obstacles
         self._last_other_agents = other_agents
 
-        # Goal in Frenet: s_goal = total path length, d_goal = 0
-        s_goal = self._frenet.total_length
+        self._step_count += 1
 
         # --- Stage 1: MILP ---
+        t_milp_start = time.time()
         milp_states = self._solve_milp(frenet_state, road_left, road_right,
                                        obstacles)
+        t_milp = time.time() - t_milp_start
 
         if milp_states is None:
-            logger.warning("MILP failed - returning zero action")
+            print(f"[Step {self._step_count:4d}] MILP: FAILED ({t_milp*1000:.1f}ms)")
             action = Action(acceleration=0.0, steer_angle=0.0,
                             target_speed=self._target_speed)
             return action, [np.array([state.position])], 0
@@ -721,16 +848,23 @@ class TwoStageOPT:
         self._last_milp_rollout = self._milp_states_to_world(milp_states)
 
         # --- Stage 2: NLP ---
+        t_nlp_start = time.time()
         nlp_states, nlp_controls, nlp_ok = self._solve_nlp(
             frenet_state, warm_states, warm_controls,
             road_left, road_right, obstacles)
+        t_nlp = time.time() - t_nlp_start
 
         if not nlp_ok:
             final_states = warm_states
             final_controls = warm_controls
+            nlp_status = "FAILED"
         else:
             final_states = nlp_states
             final_controls = nlp_controls
+            nlp_status = "OK"
+
+        # Print concise status
+        print(f"[Step {self._step_count:4d}] MILP: OK ({t_milp*1000:.1f}ms) | NLP: {nlp_status} ({t_nlp*1000:.1f}ms)")
 
         self._prev_nlp_states = final_states.copy()
         self._prev_nlp_controls = final_controls.copy()
@@ -799,6 +933,26 @@ class TwoStageOPT:
         """Ego vehicle width (m)."""
         return self._ego_width
 
+    @property
+    def milp_params(self) -> Dict:
+        """MILP-specific parameters (copy of internal dict)."""
+        return dict(self._milp)
+
+    @property
+    def nlp_params(self) -> Dict:
+        """NLP-specific parameters (copy of internal dict)."""
+        return dict(self._nlp)
+
+    @property
+    def horizon(self) -> int:
+        """Planning horizon (number of steps)."""
+        return self._horizon
+
+    @property
+    def dt(self) -> float:
+        """Planning timestep (seconds)."""
+        return self._dt
+
     def reset(self):
         """Reset all MPC state."""
         self._prev_milp_states = None
@@ -810,6 +964,7 @@ class TwoStageOPT:
         self._nlp_solver = None
         self._last_obstacles = None
         self._last_other_agents = None
+        self._step_count = 0
 
     # ------------------------------------------------------------------
     # Frenet state conversion
@@ -1045,10 +1200,19 @@ class TwoStageOPT:
         """
         H = self._horizon
         dt = self._dt
-        rho = self._milp_rho
         M = 1e4  # Big-M from paper
-        max_accel = min(self._a_max, -self._a_min)
         beta = 10.0  # Softplus sharpness (higher = closer to true max)
+
+        # MILP-specific parameters
+        milp = self._milp
+        rho = milp['rho']
+        a_s_min, a_s_max = milp['a_s_min'], milp['a_s_max']
+        a_d_min, a_d_max = milp['a_d_min'], milp['a_d_max']
+        jerk_s_max, jerk_d_max = milp['jerk_s_max'], milp['jerk_d_max']
+        vs_min, vs_max = milp['vs_min'], milp['vs_max']
+        vd_min, vd_max = milp['vd_min'], milp['vd_max']
+        w_s, w_d, w_v = milp['w_s'], milp['w_d'], milp['w_v']
+        w_a_s, w_a_d = milp['w_a_s'], milp['w_a_d']
 
         # Initial Frenet velocity components
         s0, d0, phi0, v0 = frenet_state
@@ -1057,9 +1221,9 @@ class TwoStageOPT:
 
         N_obs = min(len(obstacles), self.N_OBS_MAX)
 
-        # Goal reference
-        s_goal = self._frenet.total_length
+        # Goal reference: point vehicle would reach at target speed over the horizon
         v_goal = self._target_speed
+        s_goal = min(s0 + v_goal * H * dt, self._frenet.total_length)
 
         # Ego dimensions for Minkowski sum
         dx = self._ego_length / 2.0
@@ -1108,12 +1272,30 @@ class TwoStageOPT:
 
             # ==================== STATE BOUNDS ====================
             for k in range(H + 1):
-                opti.subject_to(vs[k] >= 0)  # forward motion only
+                # Longitudinal velocity bounds
+                opti.subject_to(vs[k] >= vs_min)
+                opti.subject_to(vs[k] <= vs_max)
+                # Lateral velocity bounds
+                opti.subject_to(vd[k] >= vd_min)
+                opti.subject_to(vd[k] <= vd_max)
 
             # ==================== CONTROL BOUNDS ====================
             for k in range(H):
-                opti.subject_to(opti.bounded(-max_accel, a_s[k], max_accel))
-                opti.subject_to(opti.bounded(-max_accel, a_d[k], max_accel))
+                opti.subject_to(opti.bounded(a_s_min, a_s[k], a_s_max))
+                opti.subject_to(opti.bounded(a_d_min, a_d[k], a_d_max))
+
+            # ==================== JERK CONSTRAINTS ====================
+            jerk_s_limit = jerk_s_max * dt
+            jerk_d_limit = jerk_d_max * dt
+            for k in range(H - 1):
+                # Longitudinal jerk
+                opti.subject_to(opti.bounded(-jerk_s_limit,
+                                             a_s[k + 1] - a_s[k],
+                                             jerk_s_limit))
+                # Lateral jerk
+                opti.subject_to(opti.bounded(-jerk_d_limit,
+                                             a_d[k + 1] - a_d[k],
+                                             jerk_d_limit))
 
             # ==================== ROAD BOUNDARIES ====================
             for k in range(H + 1):
@@ -1127,14 +1309,14 @@ class TwoStageOPT:
             for k in range(H + 1):
                 ref_s = min(s0 + v_goal * k * dt, s_goal)
                 ref_d = 0.0
-                cost += 0.9 * (s[k] - ref_s) ** 2
-                cost += 0.05 * (d[k] - ref_d) ** 2
-                cost += 0.5 * (vs[k] - v_goal) ** 2
+                cost += w_s * (s[k] - ref_s) ** 2
+                cost += w_d * (d[k] - ref_d) ** 2
+                cost += w_v * (vs[k] - v_goal) ** 2
 
             # Control effort
             for k in range(H):
-                cost += 0.01 * a_s[k] ** 2
-                cost += 0.01 * a_d[k] ** 2
+                cost += w_a_s * a_s[k] ** 2
+                cost += w_a_d * a_d[k] ** 2
 
             # ==================== COLLISION AVOIDANCE ====================
             # Smooth penalty-based formulation that allows passing on ANY side
@@ -1208,7 +1390,7 @@ class TwoStageOPT:
             opti.minimize(cost)
 
             # ==================== SOLVER OPTIONS ====================
-            p_opts = {'expand': True}
+            p_opts = {'expand': True, 'print_time': False}
             s_opts = {
                 'max_iter': 500,
                 'tol': 1e-4,
@@ -1238,34 +1420,89 @@ class TwoStageOPT:
             vd_val = sol.value(vd).flatten()
 
             milp_states = np.column_stack([s_val, d_val, vs_val, vd_val])
-
-            # Debug output
-            print(f"Stage1: s0={s0:.2f}, s_goal={s_goal:.2f}, vs0={vs0:.2f}, v_goal={v_goal:.2f}")
-            print(f"Stage1: s[H]={s_val[-1]:.2f}, vs[H]={vs_val[-1]:.2f}, d[H]={d_val[-1]:.2f}")
-            print(f"Stage1: delta_s={s_val[-1] - s0:.2f}, N_obs={N_obs}, H={H}")
-
             return milp_states
 
         except Exception as e:
-            print(f"Stage1 solver failed: {e}")
             logger.debug(f"Stage1 solver failed: {e}")
 
-            # Try to extract debug values from failed solve
+            # Diagnose constraint violations
+            print(f"  MILP FAILURE DIAGNOSIS:")
             try:
-                print("Stage1 DEBUG - Last values before failure:")
-                print(f"  s: {opti.debug.value(s)[:5]}...")
-                print(f"  d: {opti.debug.value(d)[:5]}...")
-                print(f"  vs: {opti.debug.value(vs)[:5]}...")
-                print(f"  vd: {opti.debug.value(vd)[:5]}...")
-                print(f"  road_left[:5]: {road_left[:5]}")
-                print(f"  road_right[:5]: {road_right[:5]}")
+                s_dbg = opti.debug.value(s).flatten()
+                d_dbg = opti.debug.value(d).flatten()
+                vs_dbg = opti.debug.value(vs).flatten()
+                vd_dbg = opti.debug.value(vd).flatten()
+                a_s_dbg = opti.debug.value(a_s).flatten()
+                a_d_dbg = opti.debug.value(a_d).flatten()
 
-                # Show obstacle info
-                for obs_idx, obs in enumerate(obstacles[:3]):
-                    print(f"  Obstacle {obs_idx}: s={obs['s'][0]:.2f}, d={obs['d'][0]:.2f}, "
-                          f"L={obs['length']:.2f}, W={obs['width']:.2f}")
+                violations = []
+
+                # Check initial state constraints
+                if abs(s_dbg[0] - s0) > 1e-3:
+                    violations.append(f"Initial s: {s_dbg[0]:.3f} != {s0:.3f}")
+                if abs(d_dbg[0] - d0) > 1e-3:
+                    violations.append(f"Initial d: {d_dbg[0]:.3f} != {d0:.3f}")
+                if abs(vs_dbg[0] - vs0) > 1e-3:
+                    violations.append(f"Initial vs: {vs_dbg[0]:.3f} != {vs0:.3f}")
+                if abs(vd_dbg[0] - vd0) > 1e-3:
+                    violations.append(f"Initial vd: {vd_dbg[0]:.3f} != {vd0:.3f}")
+
+                # Check velocity bounds
+                for k in range(H + 1):
+                    if vs_dbg[k] < vs_min - 1e-3:
+                        violations.append(f"vs[{k}]={vs_dbg[k]:.3f} < vs_min={vs_min}")
+                    if vs_dbg[k] > vs_max + 1e-3:
+                        violations.append(f"vs[{k}]={vs_dbg[k]:.3f} > vs_max={vs_max}")
+                    if vd_dbg[k] < vd_min - 1e-3:
+                        violations.append(f"vd[{k}]={vd_dbg[k]:.3f} < vd_min={vd_min}")
+                    if vd_dbg[k] > vd_max + 1e-3:
+                        violations.append(f"vd[{k}]={vd_dbg[k]:.3f} > vd_max={vd_max}")
+
+                # Check kinematic feasibility: vs >= rho * |vd|
+                for k in range(H + 1):
+                    if vs_dbg[k] < rho * abs(vd_dbg[k]) - 1e-3:
+                        violations.append(f"Kinematic[{k}]: vs={vs_dbg[k]:.3f} < rho*|vd|={rho * abs(vd_dbg[k]):.3f}")
+
+                # Check road boundaries
+                for k in range(H + 1):
+                    if d_dbg[k] < road_right[k] - 1e-3:
+                        violations.append(f"Road right[{k}]: d={d_dbg[k]:.3f} < {road_right[k]:.3f}")
+                    if d_dbg[k] > road_left[k] + 1e-3:
+                        violations.append(f"Road left[{k}]: d={d_dbg[k]:.3f} > {road_left[k]:.3f}")
+
+                # Check control bounds
+                for k in range(H):
+                    if a_s_dbg[k] < a_s_min - 1e-3:
+                        violations.append(f"a_s[{k}]={a_s_dbg[k]:.3f} < a_s_min={a_s_min}")
+                    if a_s_dbg[k] > a_s_max + 1e-3:
+                        violations.append(f"a_s[{k}]={a_s_dbg[k]:.3f} > a_s_max={a_s_max}")
+                    if a_d_dbg[k] < a_d_min - 1e-3:
+                        violations.append(f"a_d[{k}]={a_d_dbg[k]:.3f} < a_d_min={a_d_min}")
+                    if a_d_dbg[k] > a_d_max + 1e-3:
+                        violations.append(f"a_d[{k}]={a_d_dbg[k]:.3f} > a_d_max={a_d_max}")
+
+                # Check jerk constraints
+                for k in range(H - 1):
+                    jerk_s = a_s_dbg[k + 1] - a_s_dbg[k]
+                    jerk_d = a_d_dbg[k + 1] - a_d_dbg[k]
+                    if abs(jerk_s) > jerk_s_limit + 1e-3:
+                        violations.append(f"Jerk_s[{k}]={jerk_s:.3f} > limit={jerk_s_limit:.3f}")
+                    if abs(jerk_d) > jerk_d_limit + 1e-3:
+                        violations.append(f"Jerk_d[{k}]={jerk_d:.3f} > limit={jerk_d_limit:.3f}")
+
+                if violations:
+                    print(f"    Violated constraints ({len(violations)} total):")
+                    for v in violations[:10]:  # Show first 10
+                        print(f"      - {v}")
+                    if len(violations) > 10:
+                        print(f"      ... and {len(violations) - 10} more")
+                else:
+                    print(f"    No obvious constraint violations found in debug values")
+                    print(f"    Initial state: s0={s0:.2f}, d0={d0:.2f}, vs0={vs0:.2f}, vd0={vd0:.2f}")
+                    print(f"    Road bounds[0]: left={road_left[0]:.2f}, right={road_right[0]:.2f}")
+
             except Exception as debug_e:
-                print(f"  (Could not extract debug values: {debug_e})")
+                print(f"    (Could not extract debug values: {debug_e})")
 
             return None
 
@@ -1286,6 +1523,7 @@ class TwoStageOPT:
         H = self._horizon
         dt = self._dt
         L = self._wheelbase
+        nlp = self._nlp
 
         s_arr = milp_states[:, 0]
         d_arr = milp_states[:, 1]
@@ -1303,14 +1541,14 @@ class TwoStageOPT:
         for k in range(H):
             # Acceleration
             a_k = np.clip((speeds[k + 1] - speeds[k]) / dt,
-                          self._a_min, self._a_max)
+                          nlp['a_min'], nlp['a_max'])
 
             # Steering from heading change
             d_phi = (phis[k + 1] - phis[k] + np.pi) % (2 * np.pi) - np.pi
             spd = max(speeds[k], 0.5)
             sin_arg = np.clip(d_phi * L / (2.0 * spd * dt), -1.0, 1.0)
             delta_k = np.clip(np.arcsin(sin_arg),
-                              -self._delta_max, self._delta_max)
+                              -nlp['delta_max'], nlp['delta_max'])
 
             nlp_controls[k] = [a_k, delta_k]
 
@@ -1345,6 +1583,16 @@ class TwoStageOPT:
         dt = self._dt
         L = self._wheelbase
 
+        # NLP-specific parameters
+        nlp = self._nlp
+        a_min, a_max = nlp['a_min'], nlp['a_max']
+        delta_max = nlp['delta_max']
+        delta_rate_max = nlp['delta_rate_max']
+        jerk_max = nlp['jerk_max']
+        v_min, v_max = nlp['v_min'], nlp['v_max']
+        w_s, w_d, w_v = nlp['w_s'], nlp['w_d'], nlp['w_v']
+        w_a, w_delta = nlp['w_a'], nlp['w_delta']
+
         try:
             opti = ca.Opti()
 
@@ -1355,19 +1603,20 @@ class TwoStageOPT:
             # Parameters for obstacle positions (pre-allocated slots)
             N_obs = min(len(obstacles), self.N_OBS_MAX)
 
-            # Goal
-            s_goal = self._frenet.total_length
+            # Goal: point vehicle would reach at target speed over the horizon
+            s0 = frenet_state[0]
             v_goal = self._target_speed
+            s_goal = min(s0 + v_goal * H * dt, self._frenet.total_length)
 
             # --- Cost function ---
             cost = 0.0
             for k in range(H + 1):
-                cost += self._w_x * (S[0, k] - s_goal)**2
-                cost += self._w_v * (S[3, k] - v_goal)**2
-                cost += self._w_y * S[1, k]**2
+                cost += w_s * (S[0, k] - s_goal)**2
+                cost += w_v * (S[3, k] - v_goal)**2
+                cost += w_d * S[1, k]**2
             for k in range(H):
-                cost += self._w_a * U[0, k]**2
-                cost += self._w_delta * U[1, k]**2
+                cost += w_a * U[0, k]**2
+                cost += w_delta * U[1, k]**2
             opti.minimize(cost)
 
             # --- Initial state constraint ---
@@ -1394,37 +1643,49 @@ class TwoStageOPT:
 
             # --- Control bounds ---
             for k in range(H):
-                opti.subject_to(opti.bounded(self._a_min, U[0, k], self._a_max))
-                opti.subject_to(opti.bounded(-self._delta_max, U[1, k], self._delta_max))
+                opti.subject_to(opti.bounded(a_min, U[0, k], a_max))
+                opti.subject_to(opti.bounded(-delta_max, U[1, k], delta_max))
 
             # --- Speed bounds ---
             for k in range(H + 1):
-                opti.subject_to(opti.bounded(0.0, S[3, k], self._v_max))
+                opti.subject_to(opti.bounded(v_min, S[3, k], v_max))
 
             # --- Jerk constraints ---
-            jerk_limit = self._jerk_max * dt
+            jerk_limit = jerk_max * dt
             for k in range(H - 1):
                 opti.subject_to(opti.bounded(-jerk_limit,
                                              U[0, k + 1] - U[0, k],
                                              jerk_limit))
 
+            # --- Steering rate constraints ---
+            delta_rate_limit = delta_rate_max * dt
+            for k in range(H - 1):
+                opti.subject_to(opti.bounded(-delta_rate_limit,
+                                             U[1, k + 1] - U[1, k],
+                                             delta_rate_limit))
+
             # --- Elliptical collision avoidance (corner-based) ---
             # Check all four corners of the rotated ego vehicle against
-            # an exclusion ellipse around each obstacle.
+            # an exclusion ellipse around each obstacle, oriented in the
+            # obstacle's body frame.
             half_L = self._ego_length / 2.0
             half_W = self._ego_width / 2.0
 
             for obs_idx in range(N_obs):
                 obs = obstacles[obs_idx]
 
-                # Project obstacle body-frame dimensions into Frenet (s, d)
+                # Use actual obstacle dimensions for ellipse semi-axes
                 obs_half_L = obs['length'] / 2.0
                 obs_half_W = obs['width'] / 2.0
+                rx = obs_half_L + self._collision_margin  # Along obstacle length
+                ry = obs_half_W + self._collision_margin  # Along obstacle width
+
+                # Get obstacle heading (relative to global/Frenet s-axis)
+                # For the first timestep, compute road angle to get relative heading
                 obs_s0 = float(obs['s'][0])
                 _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
-                dh = obs.get('heading', road_angle_obs) - road_angle_obs
-                rx = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + self._collision_margin
-                ry = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + self._collision_margin
+                # Obstacle heading relative to Frenet frame (angle from s-axis to obstacle forward)
+                obs_heading_frenet = obs.get('heading', road_angle_obs) - road_angle_obs
 
                 for k in range(1, H + 1):
                     s_obs = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
@@ -1433,13 +1694,28 @@ class TwoStageOPT:
                     cos_phi = ca.cos(S[2, k])
                     sin_phi = ca.sin(S[2, k])
 
+                    # Rotation from Frenet to obstacle body frame
+                    # theta = -obs_heading_frenet (negative because we're transforming TO body frame)
+                    cos_theta = np.cos(-obs_heading_frenet)
+                    sin_theta = np.sin(-obs_heading_frenet)
+
                     for sl, sw in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                        # Ego corner in Frenet coordinates
                         c_s = S[0, k] + sl * half_L * cos_phi - sw * half_W * sin_phi
                         c_d = S[1, k] + sl * half_L * sin_phi + sw * half_W * cos_phi
 
+                        # Translate to obstacle-centered coordinates
+                        ds = c_s - s_obs
+                        dd = c_d - d_obs
+
+                        # Rotate to obstacle body frame
+                        x_body = cos_theta * ds + sin_theta * dd
+                        y_body = -sin_theta * ds + cos_theta * dd
+
+                        # Ellipse constraint in obstacle body frame
                         opti.subject_to(
-                            ((c_s - s_obs) / rx)**2 +
-                            ((c_d - d_obs) / ry)**2 >= 1.0)
+                            (x_body / rx)**2 +
+                            (y_body / ry)**2 >= 1.0)
 
             # --- Initial guess ---
             opti.set_initial(S, warm_states.T)
@@ -1462,15 +1738,111 @@ class TwoStageOPT:
             nlp_states = sol.value(S).T   # (H+1, 4)
             nlp_controls = sol.value(U).T  # (H, 2)
 
-            # Debug output
-            s0_nlp = frenet_state[0]
-            v0_nlp = frenet_state[3]
-            print(f"NLP: s0={s0_nlp:.2f}, s_goal={s_goal:.2f}, v0={v0_nlp:.2f}, v_goal={v_goal:.2f}")
-            print(f"NLP: s[H]={nlp_states[-1, 0]:.2f}, v[H]={nlp_states[-1, 3]:.2f}")
-            print(f"NLP: delta_s={nlp_states[-1, 0] - s0_nlp:.2f}")
-
             return nlp_states, nlp_controls, True
 
         except Exception as e:
             logger.debug("NLP solver failed: %s", e)
+
+            # Diagnose constraint violations
+            print(f"  NLP FAILURE DIAGNOSIS:")
+            try:
+                S_dbg = opti.debug.value(S).T  # (H+1, 4)
+                U_dbg = opti.debug.value(U).T  # (H, 2)
+
+                s_dbg = S_dbg[:, 0]
+                d_dbg = S_dbg[:, 1]
+                phi_dbg = S_dbg[:, 2]
+                v_dbg = S_dbg[:, 3]
+                a_dbg = U_dbg[:, 0]
+                delta_dbg = U_dbg[:, 1]
+
+                violations = []
+
+                # Check initial state constraints
+                if abs(s_dbg[0] - frenet_state[0]) > 1e-3:
+                    violations.append(f"Initial s: {s_dbg[0]:.3f} != {frenet_state[0]:.3f}")
+                if abs(d_dbg[0] - frenet_state[1]) > 1e-3:
+                    violations.append(f"Initial d: {d_dbg[0]:.3f} != {frenet_state[1]:.3f}")
+                if abs(phi_dbg[0] - frenet_state[2]) > 1e-3:
+                    violations.append(f"Initial phi: {phi_dbg[0]:.3f} != {frenet_state[2]:.3f}")
+                if abs(v_dbg[0] - frenet_state[3]) > 1e-3:
+                    violations.append(f"Initial v: {v_dbg[0]:.3f} != {frenet_state[3]:.3f}")
+
+                # Check speed bounds
+                for k in range(H + 1):
+                    if v_dbg[k] < v_min - 1e-3:
+                        violations.append(f"v[{k}]={v_dbg[k]:.3f} < v_min={v_min}")
+                    if v_dbg[k] > v_max + 1e-3:
+                        violations.append(f"v[{k}]={v_dbg[k]:.3f} > v_max={v_max}")
+
+                # Check control bounds
+                for k in range(H):
+                    if a_dbg[k] < a_min - 1e-3:
+                        violations.append(f"a[{k}]={a_dbg[k]:.3f} < a_min={a_min}")
+                    if a_dbg[k] > a_max + 1e-3:
+                        violations.append(f"a[{k}]={a_dbg[k]:.3f} > a_max={a_max}")
+                    if abs(delta_dbg[k]) > delta_max + 1e-3:
+                        violations.append(f"|delta[{k}]|={abs(delta_dbg[k]):.3f} > delta_max={delta_max}")
+
+                # Check jerk constraints
+                jerk_limit = jerk_max * dt
+                for k in range(H - 1):
+                    jerk = abs(a_dbg[k + 1] - a_dbg[k])
+                    if jerk > jerk_limit + 1e-3:
+                        violations.append(f"Jerk[{k}]={jerk:.3f} > limit={jerk_limit:.3f}")
+
+                # Check steering rate constraints
+                delta_rate_limit = delta_rate_max * dt
+                for k in range(H - 1):
+                    delta_rate = abs(delta_dbg[k + 1] - delta_dbg[k])
+                    if delta_rate > delta_rate_limit + 1e-3:
+                        violations.append(f"DeltaRate[{k}]={delta_rate:.3f} > limit={delta_rate_limit:.3f}")
+
+                # Check collision constraints (ellipse)
+                half_L = self._ego_length / 2.0
+                half_W = self._ego_width / 2.0
+                for obs_idx in range(N_obs):
+                    obs = obstacles[obs_idx]
+                    obs_half_L = obs['length'] / 2.0
+                    obs_half_W = obs['width'] / 2.0
+                    rx = obs_half_L + self._collision_margin
+                    ry = obs_half_W + self._collision_margin
+
+                    obs_s0 = float(obs['s'][0])
+                    _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
+                    obs_heading_frenet = obs.get('heading', road_angle_obs) - road_angle_obs
+                    cos_theta = np.cos(-obs_heading_frenet)
+                    sin_theta = np.sin(-obs_heading_frenet)
+
+                    for k in range(1, H + 1):
+                        s_obs = float(obs['s'][k] if k < len(obs['s']) else obs['s'][-1])
+                        d_obs = float(obs['d'][k] if k < len(obs['d']) else obs['d'][-1])
+
+                        cos_phi = np.cos(phi_dbg[k])
+                        sin_phi = np.sin(phi_dbg[k])
+
+                        for sl, sw in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                            c_s = s_dbg[k] + sl * half_L * cos_phi - sw * half_W * sin_phi
+                            c_d = d_dbg[k] + sl * half_L * sin_phi + sw * half_W * cos_phi
+                            ds = c_s - s_obs
+                            dd = c_d - d_obs
+                            x_body = cos_theta * ds + sin_theta * dd
+                            y_body = -sin_theta * ds + cos_theta * dd
+                            ellipse_val = (x_body / rx)**2 + (y_body / ry)**2
+                            if ellipse_val < 1.0 - 1e-3:
+                                violations.append(f"Collision obs{obs_idx}[{k}] corner({sl},{sw}): ellipse={ellipse_val:.3f} < 1.0")
+
+                if violations:
+                    print(f"    Violated constraints ({len(violations)} total):")
+                    for v in violations[:10]:  # Show first 10
+                        print(f"      - {v}")
+                    if len(violations) > 10:
+                        print(f"      ... and {len(violations) - 10} more")
+                else:
+                    print(f"    No obvious constraint violations found in debug values")
+                    print(f"    Initial: s={frenet_state[0]:.2f}, d={frenet_state[1]:.2f}, phi={frenet_state[2]:.2f}, v={frenet_state[3]:.2f}")
+
+            except Exception as debug_e:
+                print(f"    (Could not extract debug values: {debug_e})")
+
             return warm_states, warm_controls, False
