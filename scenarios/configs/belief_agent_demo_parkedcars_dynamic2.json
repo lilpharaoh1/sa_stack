@@ -120,7 +120,6 @@
     }
   ],
     "static_objects": [
-      {"position": [93.4, -25.0], "heading": 1.57, "blueprint": "vehicle.audi.a2"},
-      {"position": [93.4, -18.0], "heading": 1.57, "blueprint": "vehicle.audi.a2"}
+      {"position": [93.4, -25.0], "heading": 1.57, "blueprint": "vehicle.audi.a2"}
     ]
 }

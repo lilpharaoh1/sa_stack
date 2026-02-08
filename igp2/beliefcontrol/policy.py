@@ -21,6 +21,9 @@ import numpy as np
 import cvxpy as cp
 from shapely.geometry import LineString
 import casadi as ca
+import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse, Polygon
+from matplotlib.collections import PatchCollection
 
 from igp2.core.agentstate import AgentState, AgentMetadata
 from igp2.core.vehicle import Action
@@ -646,8 +649,8 @@ class TwoStageOPT:
         'vd_max': 8.0,        # Lateral velocity max (m/s)
         'rho': 1.5,           # Kinematic feasibility ratio (vs >= rho * |vd|)
         'w_s': 0.9,           # Weight for longitudinal position tracking
-        'w_d': 0.05,          # Weight for lateral position tracking
-        'w_v': 0.5,           # Weight for velocity tracking
+        'w_d': 10.0,          # Weight for lateral position tracking
+        'w_v': 0.1,           # Weight for velocity tracking
         'w_a_s': 0.4,        # Weight for longitudinal acceleration
         'w_a_d': 0.4,        # Weight for lateral acceleration
     }
@@ -657,13 +660,13 @@ class TwoStageOPT:
         'a_min': -3.0,        # Acceleration min (m/s^2)
         'a_max': 3.0,         # Acceleration max (m/s^2)
         'delta_max': 0.45,    # Max steering angle magnitude (rad)
-        'delta_rate_max': 0.18,  # Max steering rate (rad/s)
+        'delta_rate_max': 0.8,  # Max steering rate (rad/s)
         'jerk_max': 0.5,      # Max jerk (m/s^3)
         'v_min': 0.0,         # Velocity min (m/s)
         'v_max': 8.0,        # Velocity max (m/s)
-        'w_s': 0.01,           # Weight for longitudinal position tracking
+        'w_s': 0.9,           # Weight for longitudinal position tracking
         'w_d': 500.0,           # Weight for lateral position tracking
-        'w_v': 0.5,           # Weight for velocity tracking
+        'w_v': 0.1,           # Weight for velocity tracking
         'w_a': 1.0,           # Weight for acceleration norm
         'w_delta': 2.0,       # Weight for steering angle norm
     }
@@ -680,6 +683,8 @@ class TwoStageOPT:
                  big_m: float = None,
                  milp_params: Optional[Dict] = None,
                  nlp_params: Optional[Dict] = None,
+                 use_prev_nlp_on_fail: bool = True,
+                 debug_plot_nlp: bool = True,
                  # Legacy params (for back-compat, override milp/nlp_params)
                  delta_max: float = None,
                  a_min: float = None,
@@ -703,6 +708,8 @@ class TwoStageOPT:
         self._horizon = horizon if horizon is not None else self.DEFAULT_HORIZON
         self._target_speed = target_speed
         self._big_m = big_m if big_m is not None else self.DEFAULT_BIG_M
+        self._use_prev_nlp_on_fail = use_prev_nlp_on_fail
+        self._debug_plot_nlp = debug_plot_nlp
 
         # Build MILP parameters from defaults + provided overrides
         self._milp = dict(self.MILP_DEFAULTS)
@@ -776,6 +783,10 @@ class TwoStageOPT:
         self._nlp_solver = None
         self._nlp_built = False
 
+        # Debug plotting figure (created on first use)
+        self._debug_fig = None
+        self._debug_axes = None
+
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
@@ -825,6 +836,9 @@ class TwoStageOPT:
         self._last_obstacles = obstacles
         self._last_other_agents = other_agents
 
+        # Goal in Frenet: s_goal = total path length, d_goal = 0
+        s_goal = self._frenet.total_length
+
         self._step_count += 1
 
         # --- Stage 1: MILP ---
@@ -855,9 +869,19 @@ class TwoStageOPT:
         t_nlp = time.time() - t_nlp_start
 
         if not nlp_ok:
-            final_states = warm_states
-            final_controls = warm_controls
-            nlp_status = "FAILED"
+            # NLP failed - decide which fallback to use
+            if (self._use_prev_nlp_on_fail and
+                self._prev_nlp_states is not None and
+                self._prev_nlp_controls is not None):
+                # Use previous NLP solution
+                final_states = self._prev_nlp_states.copy()
+                final_controls = self._prev_nlp_controls.copy()
+                nlp_status = "FAILED(prev)"
+            else:
+                # Fall back to MILP warm-start
+                final_states = warm_states
+                final_controls = warm_controls
+                nlp_status = "FAILED(milp)"
         else:
             final_states = nlp_states
             final_controls = nlp_controls
@@ -865,6 +889,16 @@ class TwoStageOPT:
 
         # Print concise status
         print(f"[Step {self._step_count:4d}] MILP: OK ({t_milp*1000:.1f}ms) | NLP: {nlp_status} ({t_nlp*1000:.1f}ms)")
+
+        # Print velocity profile
+        velocities = final_states[:, 3]  # [s, d, phi, v] -> v is index 3
+        v_str = " ".join([f"{v:.2f}" for v in velocities])
+        print(f"  Velocity profile (H={len(velocities)-1}): [{v_str}]")
+
+        # Print steering control profile
+        steerings = final_controls[:, 1]  # [a, delta] -> delta is index 1
+        delta_str = " ".join([f"{np.degrees(d):+.1f}" for d in steerings])
+        print(f"  Steering profile (deg): [{delta_str}]")
 
         self._prev_nlp_states = final_states.copy()
         self._prev_nlp_controls = final_controls.copy()
@@ -1315,8 +1349,8 @@ class TwoStageOPT:
 
             # Control effort
             for k in range(H):
-                cost += w_a_s * a_s[k] ** 2
-                cost += w_a_d * a_d[k] ** 2
+                cost += w_a_s * a_s[k]
+                cost += w_a_d * a_d[k]
 
             # ==================== COLLISION AVOIDANCE ====================
             # Smooth penalty-based formulation that allows passing on ANY side
@@ -1506,6 +1540,7 @@ class TwoStageOPT:
 
             return None
 
+
     # ------------------------------------------------------------------
     # MILP -> NLP warm-start conversion
     # ------------------------------------------------------------------
@@ -1603,17 +1638,19 @@ class TwoStageOPT:
             # Parameters for obstacle positions (pre-allocated slots)
             N_obs = min(len(obstacles), self.N_OBS_MAX)
 
-            # Goal: point vehicle would reach at target speed over the horizon
+            # Goal: point ahead if driving at target speed for horizon
             s0 = frenet_state[0]
             v_goal = self._target_speed
-            s_goal = min(s0 + v_goal * H * dt, self._frenet.total_length)
+            s_max = self._frenet.total_length
 
             # --- Cost function ---
             cost = 0.0
             for k in range(H + 1):
-                cost += w_s * (S[0, k] - s_goal)**2
-                cost += w_v * (S[3, k] - v_goal)**2
+                # Reference s: where vehicle would be at timestep k driving at target speed
+                ref_s = min(s0 + v_goal * k * dt, s_max)
+                cost += w_s * (S[0, k] - ref_s)**2
                 cost += w_d * S[1, k]**2
+                cost += w_v * (S[3, k] - v_goal)**2
             for k in range(H):
                 cost += w_a * U[0, k]**2
                 cost += w_delta * U[1, k]**2
@@ -1636,10 +1673,22 @@ class TwoStageOPT:
                 opti.subject_to(
                     S[3, k + 1] == S[3, k] + U[0, k] * dt)
 
-            # --- Road boundary constraints ---
+            # --- Road boundary constraints (corner-based) ---
+            # Check all four corners of the rotated ego vehicle stay within road
+            half_L = self._ego_length / 2.0
+            half_W = self._ego_width / 2.0
+
             for k in range(H + 1):
-                opti.subject_to(S[1, k] >= road_right[k])
-                opti.subject_to(S[1, k] <= road_left[k])
+                cos_phi = ca.cos(S[2, k])
+                sin_phi = ca.sin(S[2, k])
+
+                # Check all four corners: (sl, sw) in {(1,1), (1,-1), (-1,1), (-1,-1)}
+                for sl, sw in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                    # Corner lateral position in Frenet frame
+                    c_d = S[1, k] + sl * half_L * sin_phi + sw * half_W * cos_phi
+
+                    opti.subject_to(c_d >= road_right[k])
+                    opti.subject_to(c_d <= road_left[k])
 
             # --- Control bounds ---
             for k in range(H):
@@ -1665,57 +1714,79 @@ class TwoStageOPT:
                                              delta_rate_limit))
 
             # --- Elliptical collision avoidance (corner-based) ---
-            # Check all four corners of the rotated ego vehicle against
-            # an exclusion ellipse around each obstacle, oriented in the
-            # obstacle's body frame.
-            half_L = self._ego_length / 2.0
-            half_W = self._ego_width / 2.0
+            # Based on Eiras et al. Section III-3, Equations 9-10
+            #
+            # OBSTACLE REPRESENTATION (Eq. 9):
+            #   Each obstacle i at timestep k is an ellipse with:
+            #   - Center: (s^i_k, d^i_k) in Frenet coordinates
+            #   - Orientation: φ^i_k (heading relative to road)
+            #   - Semi-axes: (a^i_k, b^i_k) where a is along length, b along width
+            #
+            # EGO VEHICLE CORNERS (Eq. 6):
+            #   c^α(z_k) = R(φ_k) × [α_l * l/2, α_w * w/2]^T + [s_k, d_k]^T
+            #   where α = (α_l, α_w) ∈ {(±1, ±1)} for the 4 corners
+            #   R(φ) = [[cos(φ), -sin(φ)], [sin(φ), cos(φ)]]
+            #
+            # COLLISION CONSTRAINT (Eq. 10): g^{i,α}(z_k) >= 1
+            #   g = d^T × R(φ^i)^T × S × R(φ^i) × d
+            #   where d = corner - obstacle_center, S = diag(1/a^2, 1/b^2)
+            #
+            # Equivalently in obstacle body frame:
+            #   d_body = R(-φ^i) × d
+            #   g = (d_body_x / a)^2 + (d_body_y / b)^2 >= 1
+            #
+            # Interpretation: g > 1 means corner is OUTSIDE ellipse (safe)
+
+            half_L = self._ego_length / 2.0  # l/2
+            half_W = self._ego_width / 2.0   # w/2
 
             for obs_idx in range(N_obs):
                 obs = obstacles[obs_idx]
 
-                # Use actual obstacle dimensions for ellipse semi-axes
-                obs_half_L = obs['length'] / 2.0
-                obs_half_W = obs['width'] / 2.0
-                rx = obs_half_L + self._collision_margin  # Along obstacle length
-                ry = obs_half_W + self._collision_margin  # Along obstacle width
+                # Ellipse semi-axes (Eq. 9): a^i_k, b^i_k
+                # a = along obstacle length, b = along obstacle width
+                # collision_margin acts as safety buffer (like uncertainty in paper)
+                a_i = obs['length'] / 2.0 + self._collision_margin
+                b_i = obs['width'] / 2.0 + self._collision_margin
 
-                # Get obstacle heading (relative to global/Frenet s-axis)
-                # For the first timestep, compute road angle to get relative heading
+                # Obstacle heading φ^i relative to Frenet s-axis
                 obs_s0 = float(obs['s'][0])
                 _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
-                # Obstacle heading relative to Frenet frame (angle from s-axis to obstacle forward)
-                obs_heading_frenet = obs.get('heading', road_angle_obs) - road_angle_obs
+                phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
+
+                # Precompute rotation to obstacle body frame: R(-φ^i)
+                cos_neg_phi_i = np.cos(-phi_i)
+                sin_neg_phi_i = np.sin(-phi_i)
 
                 for k in range(1, H + 1):
-                    s_obs = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
-                    d_obs = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
+                    # Obstacle center (s^i_k, d^i_k) at timestep k
+                    s_obs_k = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
+                    d_obs_k = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
 
-                    cos_phi = ca.cos(S[2, k])
-                    sin_phi = ca.sin(S[2, k])
+                    # Ego heading φ_k at timestep k
+                    cos_phi_k = ca.cos(S[2, k])
+                    sin_phi_k = ca.sin(S[2, k])
 
-                    # Rotation from Frenet to obstacle body frame
-                    # theta = -obs_heading_frenet (negative because we're transforming TO body frame)
-                    cos_theta = np.cos(-obs_heading_frenet)
-                    sin_theta = np.sin(-obs_heading_frenet)
+                    # Check all 4 corners: α = (α_l, α_w) ∈ {(±1, ±1)}
+                    for alpha_l, alpha_w in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                        # Corner position c^α (Eq. 6):
+                        # c = R(φ_k) × [α_l * l/2, α_w * w/2]^T + [s_k, d_k]^T
+                        c_s = S[0, k] + alpha_l * half_L * cos_phi_k - alpha_w * half_W * sin_phi_k
+                        c_d = S[1, k] + alpha_l * half_L * sin_phi_k + alpha_w * half_W * cos_phi_k
 
-                    for sl, sw in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
-                        # Ego corner in Frenet coordinates
-                        c_s = S[0, k] + sl * half_L * cos_phi - sw * half_W * sin_phi
-                        c_d = S[1, k] + sl * half_L * sin_phi + sw * half_W * cos_phi
+                        # Vector from obstacle center to corner: d = c - (s^i_k, d^i_k)
+                        d_s = c_s - s_obs_k
+                        d_d = c_d - d_obs_k
 
-                        # Translate to obstacle-centered coordinates
-                        ds = c_s - s_obs
-                        dd = c_d - d_obs
+                        # Rotate to obstacle body frame: d_body = R(-φ^i) × d
+                        d_body_x = cos_neg_phi_i * d_s + sin_neg_phi_i * d_d
+                        d_body_y = -sin_neg_phi_i * d_s + cos_neg_phi_i * d_d
 
-                        # Rotate to obstacle body frame
-                        x_body = cos_theta * ds + sin_theta * dd
-                        y_body = -sin_theta * ds + cos_theta * dd
-
-                        # Ellipse constraint in obstacle body frame
-                        opti.subject_to(
-                            (x_body / rx)**2 +
-                            (y_body / ry)**2 >= 1.0)
+                        # Ellipse containment function g (Eq. 10):
+                        # g = (d_body_x / a)^2 + (d_body_y / b)^2
+                        # Constraint: g >= 1 (corner must be outside ellipse)
+                        g = (d_body_x / a_i)**2 + (d_body_y / b_i)**2
+                        opti.subject_to(g >= 1.0)
 
             # --- Initial guess ---
             opti.set_initial(S, warm_states.T)
@@ -1737,6 +1808,11 @@ class TwoStageOPT:
 
             nlp_states = sol.value(S).T   # (H+1, 4)
             nlp_controls = sol.value(U).T  # (H, 2)
+
+            # Debug plotting if enabled
+            if self._debug_plot_nlp and N_obs > 0:
+                self._plot_nlp_debug(nlp_states, obstacles, road_left, road_right,
+                                     frenet_state, title_suffix=f" (step {self._step_count})")
 
             return nlp_states, nlp_controls, True
 
@@ -1798,9 +1874,20 @@ class TwoStageOPT:
                     if delta_rate > delta_rate_limit + 1e-3:
                         violations.append(f"DeltaRate[{k}]={delta_rate:.3f} > limit={delta_rate_limit:.3f}")
 
-                # Check collision constraints (ellipse)
+                # Check road boundary constraints (corner-based)
                 half_L = self._ego_length / 2.0
                 half_W = self._ego_width / 2.0
+                for k in range(H + 1):
+                    cos_phi = np.cos(phi_dbg[k])
+                    sin_phi = np.sin(phi_dbg[k])
+                    for sl, sw in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                        c_d = d_dbg[k] + sl * half_L * sin_phi + sw * half_W * cos_phi
+                        if c_d < road_right[k] - 1e-3:
+                            violations.append(f"Road right[{k}] corner({sl},{sw}): c_d={c_d:.3f} < {road_right[k]:.3f}")
+                        if c_d > road_left[k] + 1e-3:
+                            violations.append(f"Road left[{k}] corner({sl},{sw}): c_d={c_d:.3f} > {road_left[k]:.3f}")
+
+                # Check collision constraints (ellipse)
                 for obs_idx in range(N_obs):
                     obs = obstacles[obs_idx]
                     obs_half_L = obs['length'] / 2.0
@@ -1841,8 +1928,187 @@ class TwoStageOPT:
                 else:
                     print(f"    No obvious constraint violations found in debug values")
                     print(f"    Initial: s={frenet_state[0]:.2f}, d={frenet_state[1]:.2f}, phi={frenet_state[2]:.2f}, v={frenet_state[3]:.2f}")
+                    print(f"    Ego dimensions: L={2*half_L:.2f}, W={2*half_W:.2f}")
+                    print(f"    Road bounds[0]: left={road_left[0]:.2f}, right={road_right[0]:.2f}, width={road_left[0]-road_right[0]:.2f}")
+
+                    # Show obstacle info and gap analysis
+                    if N_obs > 0:
+                        print(f"    Obstacles ({N_obs}):")
+                        for obs_idx in range(min(N_obs, 3)):
+                            obs = obstacles[obs_idx]
+                            obs_d0 = float(obs['d'][0])
+                            obs_half_W = obs['width'] / 2.0
+                            # Obstacle occupies [obs_d0 - obs_half_W, obs_d0 + obs_half_W]
+                            obs_left = obs_d0 + obs_half_W + self._collision_margin
+                            obs_right = obs_d0 - obs_half_W - self._collision_margin
+                            gap_left = road_left[0] - obs_left  # Gap between obstacle and left road edge
+                            gap_right = obs_right - road_right[0]  # Gap between obstacle and right road edge
+                            print(f"      Obs{obs_idx}: d={obs_d0:.2f}, W={obs['width']:.2f}, gaps: left={gap_left:.2f}, right={gap_right:.2f}")
+                            # Check if ego can fit in either gap
+                            ego_needed = 2 * half_W + 0.1  # Width needed + small margin
+                            if gap_left < ego_needed and gap_right < ego_needed:
+                                print(f"      WARNING: Ego needs {ego_needed:.2f}m but gaps are too small!")
 
             except Exception as debug_e:
                 print(f"    (Could not extract debug values: {debug_e})")
 
             return warm_states, warm_controls, False
+
+    def _plot_nlp_debug(self, nlp_states, obstacles, road_left, road_right,
+                        frenet_state, title_suffix=""):
+        """Plot NLP solution for debugging: trajectory, ego corners, obstacle ellipses.
+
+        All values are plotted in raw Frenet coordinates (s, d) without any transforms.
+        This helps diagnose coordinate frame issues. Updates in place without creating new windows.
+
+        Args:
+            nlp_states: (H+1, 4) array with columns [s, d, phi, v].
+            obstacles: List of obstacle dicts with 's', 'd', 'length', 'width', 'heading'.
+            road_left: (H+1,) left road boundary in d.
+            road_right: (H+1,) right road boundary in d.
+            frenet_state: [s, d, phi, v] initial state.
+            title_suffix: Optional suffix for plot title.
+        """
+        H = len(nlp_states) - 1
+        half_L = self._ego_length / 2.0
+        half_W = self._ego_width / 2.0
+
+        # Extract trajectory
+        s_traj = nlp_states[:, 0]
+        d_traj = nlp_states[:, 1]
+        phi_traj = nlp_states[:, 2]
+
+        # Create figure on first call, reuse afterwards
+        if self._debug_fig is None or not plt.fignum_exists(self._debug_fig.number):
+            plt.ion()  # Interactive mode
+            self._debug_fig, self._debug_axes = plt.subplots(1, 2, figsize=(16, 8))
+            self._debug_fig.show()
+
+        fig = self._debug_fig
+        ax1, ax2 = self._debug_axes
+
+        # Clear axes for redraw
+        ax1.clear()
+        ax2.clear()
+
+        # --- Left plot: Full trajectory view in Frenet (s, d) ---
+        ax1.set_title(f"NLP Solution in Frenet Frame (s, d){title_suffix}")
+        ax1.set_xlabel("s (longitudinal)")
+        ax1.set_ylabel("d (lateral)")
+
+        # Plot road boundaries
+        ax1.fill_between(s_traj, road_right, road_left, alpha=0.2, color='gray', label='Road')
+        ax1.plot(s_traj, road_left, 'k--', linewidth=1, label='Road left')
+        ax1.plot(s_traj, road_right, 'k--', linewidth=1, label='Road right')
+
+        # Plot trajectory centerline
+        ax1.plot(s_traj, d_traj, 'b-', linewidth=2, label='Ego trajectory', zorder=5)
+        ax1.scatter(s_traj[0], d_traj[0], c='green', s=100, marker='o', zorder=10, label='Start')
+        ax1.scatter(s_traj[-1], d_traj[-1], c='red', s=100, marker='x', zorder=10, label='End')
+
+        # Plot ego vehicle corners at each timestep
+        for k in range(0, H + 1, max(1, H // 10)):  # Sample every ~10% of horizon
+            cos_phi = np.cos(phi_traj[k])
+            sin_phi = np.sin(phi_traj[k])
+
+            # Compute 4 corners in Frenet frame (Eq. 6)
+            corners = []
+            for alpha_l, alpha_w in [(1, 1), (1, -1), (-1, -1), (-1, 1)]:  # CCW order
+                c_s = s_traj[k] + alpha_l * half_L * cos_phi - alpha_w * half_W * sin_phi
+                c_d = d_traj[k] + alpha_l * half_L * sin_phi + alpha_w * half_W * cos_phi
+                corners.append([c_s, c_d])
+
+            poly = Polygon(corners, closed=True, fill=False, edgecolor='blue',
+                           linewidth=1, alpha=0.5 + 0.5 * k / H)
+            ax1.add_patch(poly)
+
+        # Plot obstacle ellipses
+        for obs_idx, obs in enumerate(obstacles):
+            # Ellipse semi-axes
+            a_i = obs['length'] / 2.0 + self._collision_margin
+            b_i = obs['width'] / 2.0 + self._collision_margin
+
+            # Obstacle heading in Frenet frame
+            obs_s0 = float(obs['s'][0])
+            _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
+            phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
+            phi_i_deg = np.degrees(phi_i)
+
+            # Plot ellipse at each timestep (sample a few)
+            for k in range(0, min(H + 1, len(obs['s'])), max(1, H // 5)):
+                s_obs_k = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
+                d_obs_k = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
+
+                # Ellipse center and dimensions (raw values, no transform)
+                ellipse = Ellipse((s_obs_k, d_obs_k), width=2*a_i, height=2*b_i,
+                                  angle=phi_i_deg, fill=False, edgecolor='red',
+                                  linewidth=2, alpha=0.3 + 0.7 * k / H)
+                ax1.add_patch(ellipse)
+
+                # Mark center
+                ax1.scatter(s_obs_k, d_obs_k, c='red', s=30, marker='+', alpha=0.5)
+
+            # Label
+            ax1.annotate(f'Obs{obs_idx}', (float(obs['s'][0]), float(obs['d'][0])),
+                         fontsize=8, color='red')
+
+        ax1.legend(loc='upper right', fontsize=8)
+        ax1.set_aspect('equal')
+        ax1.grid(True, alpha=0.3)
+
+        # --- Right plot: Zoomed view showing corner-ellipse distances ---
+        ax2.set_title(f"Corner-Ellipse Collision Check (g values){title_suffix}")
+        ax2.set_xlabel("Timestep k")
+        ax2.set_ylabel("g value (>= 1 is safe)")
+
+        # Compute g values for each corner and each obstacle
+        for obs_idx, obs in enumerate(obstacles):
+            a_i = obs['length'] / 2.0 + self._collision_margin
+            b_i = obs['width'] / 2.0 + self._collision_margin
+
+            obs_s0 = float(obs['s'][0])
+            _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
+            phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
+            cos_neg_phi_i = np.cos(-phi_i)
+            sin_neg_phi_i = np.sin(-phi_i)
+
+            corner_labels = [(1, 1, 'FR'), (1, -1, 'FL'), (-1, 1, 'RR'), (-1, -1, 'RL')]
+            for alpha_l, alpha_w, corner_name in corner_labels:
+                g_values = []
+                for k in range(1, H + 1):
+                    s_obs_k = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
+                    d_obs_k = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
+
+                    cos_phi_k = np.cos(phi_traj[k])
+                    sin_phi_k = np.sin(phi_traj[k])
+
+                    # Corner position (Eq. 6)
+                    c_s = s_traj[k] + alpha_l * half_L * cos_phi_k - alpha_w * half_W * sin_phi_k
+                    c_d = d_traj[k] + alpha_l * half_L * sin_phi_k + alpha_w * half_W * cos_phi_k
+
+                    # Vector from obstacle center to corner
+                    d_s = c_s - s_obs_k
+                    d_d = c_d - d_obs_k
+
+                    # Rotate to obstacle body frame
+                    d_body_x = cos_neg_phi_i * d_s + sin_neg_phi_i * d_d
+                    d_body_y = -sin_neg_phi_i * d_s + cos_neg_phi_i * d_d
+
+                    # Ellipse containment function g (Eq. 10)
+                    g = (d_body_x / a_i)**2 + (d_body_y / b_i)**2
+                    g_values.append(g)
+
+                ax2.plot(range(1, H + 1), g_values,
+                         label=f'Obs{obs_idx} {corner_name}', alpha=0.7)
+
+        # Safe threshold line
+        ax2.axhline(y=1.0, color='r', linestyle='--', linewidth=2, label='Safe threshold (g=1)')
+        ax2.legend(loc='upper right', fontsize=7, ncol=2)
+        ax2.grid(True, alpha=0.3)
+        ax2.set_ylim(bottom=0)
+
+        # Update the figure in place
+        fig.tight_layout()
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        plt.pause(0.001)  # Small pause to allow GUI update

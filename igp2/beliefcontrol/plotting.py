@@ -269,14 +269,14 @@ class OptimisationPlotter:
 
         dynamic = []
 
-        # # --- MILP trajectory line (warm-start) ---
-        # if milp_trajectory is not None and len(milp_trajectory) > 1:
-        #     line, = ax.plot(
-        #         milp_trajectory[:, 0], milp_trajectory[:, 1],
-        #         'c--', linewidth=1.5, label='MILP trajectory', zorder=4,
-        #     )
-        #     ax.draw_artist(line)
-        #     dynamic.append(line)
+        # --- MILP trajectory line (warm-start) ---
+        if milp_trajectory is not None and len(milp_trajectory) > 1:
+            line, = ax.plot(
+                milp_trajectory[:, 0], milp_trajectory[:, 1],
+                'c--', linewidth=1.5, label='MILP trajectory', zorder=4,
+            )
+            ax.draw_artist(line)
+            dynamic.append(line)
 
         # --- Optimised trajectory line (NLP) ---
         if optimised_trajectory is not None and len(optimised_trajectory) > 1:
