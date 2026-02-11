@@ -79,9 +79,9 @@ class StandaloneWaypointTracker:
     """
 
     # PID gains matching WaypointManeuver defaults
-    LATERAL_KP = 1.95
+    LATERAL_KP = 1.0
     LATERAL_KI = 0.2
-    LATERAL_KD = 0.0
+    LATERAL_KD = 0.05
     LONGITUDINAL_KP = 1.0
     LONGITUDINAL_KI = 0.05
     LONGITUDINAL_KD = 0.0

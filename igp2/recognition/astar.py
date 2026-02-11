@@ -53,7 +53,8 @@ class AStar:
                n_trajectories: int = 1,
                open_loop: bool = True,
                debug: bool = False,
-               visible_region: Circle = None) -> Tuple[List[VelocityTrajectory], List[List[MacroAction]]]:
+               visible_region: Circle = None,
+               fps: int = 20) -> Tuple[List[VelocityTrajectory], List[List[MacroAction]]]:
         """ Run A* search from the current frame to find trajectories to the given goal.
 
         Args:
@@ -120,6 +121,7 @@ class AStar:
                 for ma_args in macro_action.get_possible_args(frame[agent_id], scenario_map, goal):
                     try:
                         ma_args["open_loop"] = open_loop
+                        ma_args["fps"] = fps
                         config = MacroActionConfig(ma_args)
                         new_ma = macro_action(config, agent_id=agent_id, frame=frame, scenario_map=scenario_map)
 

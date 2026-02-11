@@ -71,13 +71,16 @@ class PIDController:
                     K_I -- Integral term
         """
         if args_lateral is None:
-            args_lateral = {'K_P': 1.0, 'K_I': 0.05, 'K_D': 0.2}
+            # args_lateral = {'K_P': 1.0, 'K_I': 0.05, 'K_D': 0.2} # Works well with CARLA physics engine
+            args_lateral = {'K_P': 1.0, 'K_I': 0.2, 'K_D': 0.05} # Works well with bicycle model
         if args_longitudinal is None:
             args_longitudinal = {'K_P': 1.0, 'K_I': 0.0, 'K_D': 0.0}
         self.max_steer = max_steering
         # Steering rate limit: 0.33 per step was calibrated for dt=0.05 (20 fps).
         # Scale with dt so the maximum steering rate (rad/s) stays constant.
         self._max_steer_change = 0.33 * (dt / 0.05)
+
+        print("\n\n\n\n\n args_lateral:", args_lateral)
 
         self.past_steering = 0.0
         self._lon_controller = PIDLongitudinalController(dt=dt, **args_longitudinal)

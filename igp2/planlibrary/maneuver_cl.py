@@ -49,7 +49,7 @@ class ClosedLoopManeuver(Maneuver, abc.ABC):
 class WaypointManeuver(ClosedLoopManeuver, abc.ABC):
     WAYPOINT_MARGIN = 1
     COMPLETION_MARGIN = 0.5
-    LATERAL_ARGS = {'K_P': 1.95, 'K_I': 0.2, 'K_D': 0.0}
+    LATERAL_ARGS = {'K_P': 1.0, 'K_I': 0.2, 'K_D': 0.05}
     LONGITUDINAL_ARGS = {'K_P': 1.0, 'K_I': 0.05, 'K_D': 0.0}
     ACC_ARGS = {'a_a': 5, 'b_a': 5, 'delta': 4., 's_0': 2., 'T_a': 1.5}
 
