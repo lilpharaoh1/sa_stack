@@ -232,27 +232,42 @@ class OptimisationPlotter:
                frenet=None,
                ego_length: float = 4.5,
                ego_width: float = 1.8,
-               collision_margin: float = 0.5):
+               collision_margin: float = 0.5,
+               true_rollout: Optional[np.ndarray] = None,
+               true_milp_trajectory: Optional[np.ndarray] = None,
+               all_other_agents=None,
+               agent_beliefs=None,
+               true_obstacles=None,
+               true_frenet=None):
         """Redraw dynamic content for one simulation step.
 
         Args:
             state: Current ego state (for view centre and current footprint).
             optimised_trajectory: (H+1, 2) position-only trajectory from
-                the optimiser.
+                the human (belief) optimiser.
             full_rollout: (H+1, 4) full state rollout [x, y, heading, speed]
-                from the optimiser.  If provided, vehicle footprints are
-                drawn along the trajectory.  May be None.
+                from the human optimiser.  May be None.
             trajectory_cl: Closed-loop history trajectory of the agent.
             agent_id: Agent ID (for the title).
             step: Current simulation step (for the title).
-            milp_trajectory: (H+1, 2) position-only trajectory from the MILP
-                stage.  If provided, drawn as a cyan dashed line.  May be None.
-            other_agents: Dict {agent_id: AgentState} of other vehicles.
-            obstacles: List of obstacle dicts from _predict_obstacles.
-            frenet: _FrenetFrame instance for coordinate conversion.
+            milp_trajectory: (H+1, 2) MILP trajectory from the human policy.
+                Drawn as a cyan dashed line.  May be None.
+            other_agents: Dict {agent_id: AgentState} of visible vehicles
+                (from human/belief policy).
+            obstacles: List of obstacle dicts from human policy.
+            frenet: _FrenetFrame from human policy.
             ego_length: Ego vehicle length (m).
             ego_width: Ego vehicle width (m).
             collision_margin: Extra safety margin around obstacles (m).
+            true_rollout: (H+1, 4) full state rollout from the true
+                (ground-truth) optimiser.  Drawn as a green line.
+            true_milp_trajectory: (H+1, 2) MILP trajectory from the true
+                policy.  Drawn as a green dashed line.
+            all_other_agents: Dict {agent_id: AgentState} of ALL other
+                vehicles (visible and hidden).  Used for drawing.
+            agent_beliefs: Dict {agent_id: AgentBelief} with belief info.
+            true_obstacles: List of obstacle dicts from true policy.
+            true_frenet: _FrenetFrame from true policy.
         """
         if self._fig is None or not plt.fignum_exists(self._fig.number):
             self._init()
@@ -278,11 +293,31 @@ class OptimisationPlotter:
             ax.draw_artist(line)
             dynamic.append(line)
 
-        # --- Optimised trajectory line (NLP) ---
+        # --- Optimised trajectory line (human/belief NLP) ---
         if optimised_trajectory is not None and len(optimised_trajectory) > 1:
             line, = ax.plot(
                 optimised_trajectory[:, 0], optimised_trajectory[:, 1],
-                'r-', linewidth=2, label='NLP trajectory', zorder=5,
+                'r-', linewidth=2, label='Human NLP', zorder=5,
+            )
+            ax.draw_artist(line)
+            dynamic.append(line)
+
+        # --- True (ground-truth) MILP trajectory ---
+        if true_milp_trajectory is not None and len(true_milp_trajectory) > 1:
+            line, = ax.plot(
+                true_milp_trajectory[:, 0], true_milp_trajectory[:, 1],
+                color=(0.0, 0.6, 0.0), linestyle='--', linewidth=1.5,
+                label='True MILP', zorder=4,
+            )
+            ax.draw_artist(line)
+            dynamic.append(line)
+
+        # --- True (ground-truth) NLP trajectory ---
+        if true_rollout is not None and len(true_rollout) > 1:
+            line, = ax.plot(
+                true_rollout[:, 0], true_rollout[:, 1],
+                color=(0.0, 0.7, 0.0), linestyle='-', linewidth=2,
+                label='True NLP', zorder=5,
             )
             ax.draw_artist(line)
             dynamic.append(line)
@@ -367,63 +402,80 @@ class OptimisationPlotter:
         #             ax.draw_artist(rect)
         #             dynamic.append(rect)
 
-        # --- NLP collision avoidance ellipses ---
-        # Uses the same footprint_indices as ego vehicle for alignment
-        if obstacles and frenet and footprint_indices:
+        # --- Merge human + true obstacle predictions ---
+        # Human obstacles are the belief-filtered set; true obstacles
+        # include every agent.  We merge them keyed by agent_id so that
+        # hidden / velocity-biased agents are drawn with distinct styles.
+        merged_obstacles = {}  # aid -> (obs_dict, frenet_ref, belief_tag)
+        # "normal" = no belief effect, "hidden" = not visible,
+        # "biased" = visible but velocity_error != 0
+        if obstacles:
             for obs in obstacles:
-                # Use actual obstacle dimensions (not Frenet-projected)
-                # The ellipse represents the obstacle's body plus collision margin
+                aid = obs.get('agent_id')
+                belief = agent_beliefs.get(aid) if agent_beliefs and aid is not None else None
+                if belief is not None and belief.velocity_error != 0.0:
+                    tag = 'biased'
+                else:
+                    tag = 'normal'
+                merged_obstacles[aid] = (obs, frenet, tag)
+        if true_obstacles:
+            for obs in true_obstacles:
+                aid = obs.get('agent_id')
+                if aid in merged_obstacles:
+                    continue  # already have from human policy
+                merged_obstacles[aid] = (obs, true_frenet or frenet, 'hidden')
+
+        # --- NLP collision avoidance ellipses ---
+        if merged_obstacles and footprint_indices:
+            for aid, (obs, obs_frenet, tag) in merged_obstacles.items():
+                if obs_frenet is None:
+                    continue
                 obs_half_L = obs['length'] / 2.0 + collision_margin
                 obs_half_W = obs['width'] / 2.0 + collision_margin
 
-                # Use world positions if available
                 world_pts = obs.get('world_positions', None)
                 s_arr = obs['s']
                 n_obs_steps = len(s_arr)
-
-                # Color based on whether using planned or predicted trajectory
-                uses_planned = obs.get('uses_planned_trajectory', False)
-                if uses_planned:
-                    facecolor = (0.0, 0.7, 0.0, 0.12)
-                    edgecolor = (0.0, 0.5, 0.0, 0.5)
-                else:
-                    facecolor = (1.0, 0.6, 0.0, 0.12)
-                    edgecolor = (0.8, 0.4, 0.0, 0.5)
-
-                # Get headings array if available
                 obs_headings = obs.get('headings', None)
 
-                # Use unified footprint_indices for alignment with ego
+                if tag == 'hidden':
+                    facecolor = (1.0, 1.0, 1.0, 0.0)
+                    edgecolor = (0.8, 0.2, 0.2, 0.5)
+                elif tag == 'biased':
+                    facecolor = (1.0, 0.7, 0.0, 0.10)
+                    edgecolor = (0.9, 0.5, 0.0, 0.5)
+                else:
+                    uses_planned = obs.get('uses_planned_trajectory', False)
+                    if uses_planned:
+                        facecolor = (0.0, 0.7, 0.0, 0.12)
+                        edgecolor = (0.0, 0.5, 0.0, 0.5)
+                    else:
+                        facecolor = (1.0, 0.6, 0.0, 0.12)
+                        edgecolor = (0.8, 0.4, 0.0, 0.5)
+
                 for idx in footprint_indices:
-                    # Skip if index exceeds obstacle trajectory length
                     if idx >= n_obs_steps:
                         continue
-
-                    # Use stored world position if available
                     if world_pts is not None and idx < len(world_pts):
                         cx, cy = world_pts[idx]
                     else:
-                        # Fallback: convert from Frenet
-                        w = frenet.frenet_to_world(float(s_arr[idx]),
-                                                   float(obs['d'][idx]))
+                        w = obs_frenet.frenet_to_world(float(s_arr[idx]),
+                                                       float(obs['d'][idx]))
                         cx, cy = w['x'], w['y']
 
-                    # Use computed heading if available, otherwise fall back to road tangent
                     if obs_headings is not None and idx < len(obs_headings):
                         ellipse_angle = obs_headings[idx]
                     else:
-                        # Fallback: road tangent angle at this s position
-                        _, _, _, ellipse_angle = frenet._interpolate(float(s_arr[idx]))
+                        _, _, _, ellipse_angle = obs_frenet._interpolate(float(s_arr[idx]))
 
-                    # Ellipse width is along the vehicle's length (heading direction)
-                    # Ellipse height is along the vehicle's width (perpendicular to heading)
+                    ls = ':' if tag == 'hidden' else '--'
                     ellipse = MplEllipse(
                         xy=(cx, cy),
                         width=2 * obs_half_L, height=2 * obs_half_W,
                         angle=np.degrees(ellipse_angle),
                         facecolor=facecolor,
                         edgecolor=edgecolor,
-                        linestyle='--', linewidth=0.8,
+                        linestyle=ls, linewidth=0.8,
                         zorder=3,
                     )
                     ax.add_patch(ellipse)
@@ -431,65 +483,100 @@ class OptimisationPlotter:
                     dynamic.append(ellipse)
 
         # --- Predicted/Planned obstacle trajectories ---
-        # Truncate to horizon_len for alignment with ego trajectory
-        if obstacles:
-            for obs in obstacles:
-                # Use stored world positions if available, otherwise convert from Frenet
+        if merged_obstacles:
+            for aid, (obs, obs_frenet, tag) in merged_obstacles.items():
                 if 'world_positions' in obs:
                     world_pts = obs['world_positions']
-                elif frenet is not None:
-                    world_pts = frenet.frenet_to_world_batch(obs['s'], obs['d'])
+                elif obs_frenet is not None:
+                    world_pts = obs_frenet.frenet_to_world_batch(obs['s'], obs['d'])
                 else:
                     continue
 
-                # Truncate to match ego horizon for visual alignment
                 if horizon_len > 0 and len(world_pts) > horizon_len:
                     world_pts = world_pts[:horizon_len]
 
-                # Use different color for planned vs predicted trajectories
-                uses_planned = obs.get('uses_planned_trajectory', False)
-                if uses_planned:
-                    # Green for actual planned trajectories
-                    color = (0.0, 0.7, 0.0)
-                    linestyle = '-'
-                    linewidth = 1.5
-                else:
-                    # Orange dashed for constant-velocity predictions
-                    color = (0.8, 0.4, 0.0)
-                    linestyle = '--'
+                if tag == 'hidden':
+                    color = (0.8, 0.2, 0.2)
+                    linestyle = ':'
                     linewidth = 1.0
+                    alpha = 0.5
+                elif tag == 'biased':
+                    color = (0.9, 0.5, 0.0)
+                    linestyle = '-.'
+                    linewidth = 1.5
+                    alpha = 0.7
+                else:
+                    uses_planned = obs.get('uses_planned_trajectory', False)
+                    if uses_planned:
+                        color = (0.0, 0.7, 0.0)
+                        linestyle = '-'
+                        linewidth = 1.5
+                    else:
+                        color = (0.8, 0.4, 0.0)
+                        linestyle = '--'
+                        linewidth = 1.0
+                    alpha = 0.7
 
                 line, = ax.plot(
                     world_pts[:, 0], world_pts[:, 1],
                     color=color, linestyle=linestyle,
-                    linewidth=linewidth, alpha=0.7, zorder=5,
+                    linewidth=linewidth, alpha=alpha, zorder=5,
                 )
                 ax.draw_artist(line)
                 dynamic.append(line)
 
-        # --- True obstacle positions ---
-        if other_agents:
-            for aid, agent_state in other_agents.items():
+        # --- All obstacle positions ---
+        # Agents affected by beliefs (not visible or velocity_error != 0)
+        # are drawn with hatching and a distinct outline.
+        draw_agents = all_other_agents if all_other_agents else other_agents
+        if draw_agents:
+            for aid, agent_state in draw_agents.items():
                 obs_meta = getattr(agent_state, 'metadata', None)
                 obs_length = obs_meta.length if obs_meta else 4.5
                 obs_width = obs_meta.width if obs_meta else 1.8
                 is_static = (obs_meta is not None
                              and getattr(obs_meta, 'agent_type', '') == 'static')
 
+                # Check whether beliefs alter this agent's treatment
+                belief = agent_beliefs.get(aid) if agent_beliefs else None
+                has_belief_effect = (belief is not None
+                                     and (not belief.visible
+                                          or belief.velocity_error != 0.0))
+
                 corners = calculate_multiple_bboxes(
                     [agent_state.position[0]], [agent_state.position[1]],
                     obs_length, obs_width, agent_state.heading,
                 )[0]
 
-                colour = (0.6, 0.6, 0.6, 0.4) if is_static \
-                    else (0.0, 0.8, 0.8, 0.35)
-                edge = (0.4, 0.4, 0.4, 0.8) if is_static \
-                    else (0.0, 0.6, 0.6, 0.8)
+                if is_static:
+                    colour = (0.6, 0.6, 0.6, 0.4)
+                    edge = (0.4, 0.4, 0.4, 0.8)
+                    hatch = None
+                    lw = 1.0
+                elif not has_belief_effect:
+                    # Normal agent — no belief distortion
+                    colour = (0.0, 0.8, 0.8, 0.35)
+                    edge = (0.0, 0.6, 0.6, 0.8)
+                    hatch = None
+                    lw = 1.0
+                elif not belief.visible:
+                    # Hidden: no fill, hatched, red outline
+                    colour = (1.0, 1.0, 1.0, 0.0)
+                    edge = (0.8, 0.2, 0.2, 0.8)
+                    hatch = '///'
+                    lw = 1.5
+                else:
+                    # Visible but velocity_error != 0: light fill, hatched, orange outline
+                    colour = (1.0, 0.7, 0.0, 0.15)
+                    edge = (0.9, 0.5, 0.0, 0.8)
+                    hatch = '...'
+                    lw = 1.5
 
                 patch = MplPolygon(
                     corners, closed=True,
                     facecolor=colour, edgecolor=edge,
-                    linewidth=1.0, zorder=6,
+                    linewidth=lw, hatch=hatch,
+                    zorder=6,
                 )
                 ax.add_patch(patch)
                 ax.draw_artist(patch)
@@ -527,7 +614,8 @@ class OptimisationPlotter:
         dynamic.append(cur_patch)
 
         ax.set_title(
-            f"TwoStageOPT  Agent {agent_id}  step={step}")
+            f"BeliefAgent {agent_id}  step={step}  "
+            f"(red=human, green=true)")
 
         # Blit and flush
         self._fig.canvas.blit(ax.bbox)

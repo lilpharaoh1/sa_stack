@@ -35,6 +35,11 @@
           "width": 7,
           "heading": 0.0
         }
+      },
+      "beliefs": {
+        "1": {"visible": true, "velocity_error": 0.0},
+        "2": {"visible": true, "velocity_error": 0.0},
+        "3": {"visible": false, "velocity_error": 0.0}
       }
     },
     {

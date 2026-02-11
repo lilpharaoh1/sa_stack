@@ -103,25 +103,31 @@ class StepDiagnostics:
         """
         ego_id = self.ego_agent.agent_id
         ego_state = frame.get(ego_id) if frame else None
-        policy = getattr(self.ego_agent, '_policy_obj', None)
 
-        # --- Ego trajectory & control from the optimisation ---
-        ego_rollout = getattr(policy, 'last_rollout', None) if policy else None
-        ego_milp_rollout = getattr(policy, 'last_milp_rollout', None) if policy else None
+        human_policy = getattr(self.ego_agent, '_human_policy', None)
+        true_policy = getattr(self.ego_agent, '_true_policy', None)
 
-        # --- Optimisation convergence ---
-        # The policy prints status; we mirror the info here for logging.
-        # TwoStageOPT stores _prev_nlp_states only when NLP succeeds.
-        nlp_converged = None
-        if policy is not None:
-            nlp_converged = getattr(policy, '_prev_nlp_states', None) is not None
+        # --- Human (belief) policy outputs ---
+        human_rollout = getattr(human_policy, 'last_rollout', None) if human_policy else None
+        human_milp_rollout = getattr(human_policy, 'last_milp_rollout', None) if human_policy else None
+        human_nlp_converged = None
+        if human_policy is not None:
+            human_nlp_converged = getattr(human_policy, '_prev_nlp_states', None) is not None
+        human_obstacles = getattr(human_policy, 'last_obstacles', None) if human_policy else None
+        human_other_agents = getattr(human_policy, 'last_other_agents', None) if human_policy else None
 
-        # --- Obstacle predictions used in the optimisation ---
-        predicted_obstacles = getattr(policy, 'last_obstacles', None) if policy else None
-        other_agent_states = getattr(policy, 'last_other_agents', None) if policy else None
+        # --- True (ground-truth) policy outputs ---
+        true_rollout = getattr(true_policy, 'last_rollout', None) if true_policy else None
+        true_milp_rollout = getattr(true_policy, 'last_milp_rollout', None) if true_policy else None
+        true_nlp_converged = None
+        if true_policy is not None:
+            true_nlp_converged = getattr(true_policy, '_prev_nlp_states', None) is not None
+        true_obstacles = getattr(true_policy, 'last_obstacles', None) if true_policy else None
+        true_other_agents = getattr(true_policy, 'last_other_agents', None) if true_policy else None
 
-        # --- Predicted trajectories (from BeliefAgent._predict_agent_trajectories) ---
-        predicted_trajectories = dict(self.ego_agent._agent_trajectories)
+        # --- Predicted trajectories ---
+        human_trajectories = dict(self.ego_agent._human_agent_trajectories)
+        true_trajectories = dict(self.ego_agent._true_agent_trajectories)
 
         # --- Dynamic agent states (from frame, excluding ego and static) ---
         dynamic_agents = {aid: s for aid, s in frame.items()
@@ -131,10 +137,10 @@ class StepDiagnostics:
         static_obstacles = {aid: s for aid, s in frame.items()
                             if aid < 0} if frame else {}
 
-        # --- Goal reached? Check if any state in the NLP rollout is at the goal ---
+        # --- Goal reached? Based on TRUE policy rollout ---
         goal_reached = False
-        if self.ego_goal is not None and ego_rollout is not None:
-            for pt in ego_rollout[:, :2]:
+        if self.ego_goal is not None and true_rollout is not None:
+            for pt in true_rollout[:, :2]:
                 if self.ego_goal.reached(pt):
                     goal_reached = True
                     break
@@ -144,12 +150,21 @@ class StepDiagnostics:
             "ego_position": np.array(ego_state.position) if ego_state else None,
             "ego_speed": float(ego_state.speed) if ego_state else None,
             "ego_heading": float(ego_state.heading) if ego_state else None,
-            "ego_rollout": ego_rollout,
-            "ego_milp_rollout": ego_milp_rollout,
-            "nlp_converged": nlp_converged,
-            "predicted_obstacles": predicted_obstacles,
-            "other_agent_states": other_agent_states,
-            "predicted_trajectories": predicted_trajectories,
+            # Human (belief) policy
+            "human_rollout": human_rollout,
+            "human_milp_rollout": human_milp_rollout,
+            "human_nlp_converged": human_nlp_converged,
+            "human_obstacles": human_obstacles,
+            "human_other_agents": human_other_agents,
+            "human_trajectories": human_trajectories,
+            # True (ground-truth) policy
+            "true_rollout": true_rollout,
+            "true_milp_rollout": true_milp_rollout,
+            "true_nlp_converged": true_nlp_converged,
+            "true_obstacles": true_obstacles,
+            "true_other_agents": true_other_agents,
+            "true_trajectories": true_trajectories,
+            # Scene
             "dynamic_agents": dynamic_agents,
             "static_obstacles": static_obstacles,
             "goal_reached": goal_reached,
@@ -170,7 +185,10 @@ def create_agent(agent_config, frame, fps, scenario_map):
     agent_type = agent_config["type"]
 
     if agent_type == "BeliefAgent":
-        return ip.BeliefAgent(**base, scenario_map=scenario_map)
+        agent_beliefs = agent_config.get("beliefs", None)
+        logger.info("create_agent: BeliefAgent beliefs from config = %s", agent_beliefs)
+        return ip.BeliefAgent(**base, scenario_map=scenario_map,
+                              agent_beliefs=agent_beliefs)
     elif agent_type == "TrafficAgent":
         open_loop = agent_config.get("open_loop", False)
         return ip.TrafficAgent(**base, open_loop=open_loop)
@@ -282,9 +300,11 @@ def main():
                         carla_sim.remove_agent(aid)
                 break
 
-        if ego_agent is not None and hasattr(ego_agent, "beliefs") and ego_agent.beliefs:
+        if ego_agent is not None and hasattr(ego_agent, "agent_beliefs") and ego_agent.agent_beliefs:
             if t % 20 == 0:
-                logger.info("t=%d  beliefs=%s", t, ego_agent.beliefs)
+                logger.info("t=%d  beliefs=%s", t,
+                            {aid: (b.visible, b.velocity_error)
+                             for aid, b in ego_agent.agent_beliefs.items()})
 
     else:
         # Loop completed without reaching goal

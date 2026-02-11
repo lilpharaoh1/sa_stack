@@ -49,23 +49,27 @@ class StepRecord:
     ego_speed: Optional[float]
     ego_heading: Optional[float]
 
-    # Optimisation outputs
-    ego_rollout: Optional[np.ndarray]        # (H+1, 4) [x, y, heading, speed]
-    ego_milp_rollout: Optional[np.ndarray]   # (H+1, 2) [x, y]
-    nlp_converged: Optional[bool]
+    # Human (belief) policy outputs
+    human_rollout: Optional[np.ndarray]        # (H+1, 4) [x, y, heading, speed]
+    human_milp_rollout: Optional[np.ndarray]   # (H+1, 2) [x, y]
+    human_nlp_converged: Optional[bool]
+    human_obstacles: Optional[List]
+    human_other_agents: Optional[Dict]
+    human_trajectories: Dict[int, np.ndarray]
 
-    # Obstacle predictions used by the optimisation
-    predicted_obstacles: Optional[List]
-    other_agent_states: Optional[Dict]
-
-    # Forward-simulated trajectories from BeliefAgent
-    predicted_trajectories: Dict[int, np.ndarray]
+    # True (ground-truth) policy outputs
+    true_rollout: Optional[np.ndarray]
+    true_milp_rollout: Optional[np.ndarray]
+    true_nlp_converged: Optional[bool]
+    true_obstacles: Optional[List]
+    true_other_agents: Optional[Dict]
+    true_trajectories: Dict[int, np.ndarray]
 
     # Scene snapshot
     dynamic_agents: Dict[int, Any]   # non-ego, ID >= 0
     static_obstacles: Dict[int, Any] # ID < 0
 
-    # Completion
+    # Completion (based on true policy)
     goal_reached: bool
 
 
@@ -154,8 +158,10 @@ def create_agent(agent_config, frame, fps, scenario_map, plot_interval=1):
     agent_type = agent_config["type"]
 
     if agent_type == "BeliefAgent":
+        agent_beliefs = agent_config.get("beliefs", None)
         return ip.BeliefAgent(**base, scenario_map=scenario_map,
-                              plot_interval=plot_interval)
+                              plot_interval=plot_interval,
+                              agent_beliefs=agent_beliefs)
     elif agent_type == "TrafficAgent":
         open_loop = agent_config.get("open_loop", False)
         return ip.TrafficAgent(**base, open_loop=open_loop)
@@ -167,28 +173,39 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame) -> StepRecord
     """Collect diagnostics for one simulation step."""
     ego_id = ego_agent.agent_id
     ego_state = frame.get(ego_id) if frame else None
-    policy = getattr(ego_agent, '_policy_obj', None)
 
-    ego_rollout = getattr(policy, 'last_rollout', None) if policy else None
-    ego_milp_rollout = getattr(policy, 'last_milp_rollout', None) if policy else None
+    human_policy = getattr(ego_agent, '_human_policy', None)
+    true_policy = getattr(ego_agent, '_true_policy', None)
 
-    nlp_converged = None
-    if policy is not None:
-        nlp_converged = getattr(policy, '_prev_nlp_states', None) is not None
+    # Human (belief) policy
+    human_rollout = getattr(human_policy, 'last_rollout', None) if human_policy else None
+    human_milp = getattr(human_policy, 'last_milp_rollout', None) if human_policy else None
+    human_nlp_converged = None
+    if human_policy is not None:
+        human_nlp_converged = getattr(human_policy, '_prev_nlp_states', None) is not None
+    human_obstacles = getattr(human_policy, 'last_obstacles', None) if human_policy else None
+    human_other_agents = getattr(human_policy, 'last_other_agents', None) if human_policy else None
+    human_trajectories = dict(ego_agent._human_agent_trajectories)
 
-    predicted_obstacles = getattr(policy, 'last_obstacles', None) if policy else None
-    other_agent_states = getattr(policy, 'last_other_agents', None) if policy else None
-    predicted_trajectories = dict(ego_agent._agent_trajectories)
+    # True (ground-truth) policy
+    true_rollout = getattr(true_policy, 'last_rollout', None) if true_policy else None
+    true_milp = getattr(true_policy, 'last_milp_rollout', None) if true_policy else None
+    true_nlp_converged = None
+    if true_policy is not None:
+        true_nlp_converged = getattr(true_policy, '_prev_nlp_states', None) is not None
+    true_obstacles = getattr(true_policy, 'last_obstacles', None) if true_policy else None
+    true_other_agents = getattr(true_policy, 'last_other_agents', None) if true_policy else None
+    true_trajectories = dict(ego_agent._true_agent_trajectories)
 
     dynamic_agents = {aid: s for aid, s in frame.items()
                       if aid != ego_id and aid >= 0} if frame else {}
     static_obstacles = {aid: s for aid, s in frame.items()
                         if aid < 0} if frame else {}
 
-    # Goal reached: check if any point in the NLP rollout is at the goal
+    # Goal reached: based on TRUE policy rollout
     goal_reached = False
-    if ego_goal is not None and ego_rollout is not None:
-        for pt in ego_rollout[:, :2]:
+    if ego_goal is not None and true_rollout is not None:
+        for pt in true_rollout[:, :2]:
             if ego_goal.reached(pt):
                 goal_reached = True
                 break
@@ -199,12 +216,18 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame) -> StepRecord
         ego_position=np.array(ego_state.position) if ego_state else None,
         ego_speed=float(ego_state.speed) if ego_state else None,
         ego_heading=float(ego_state.heading) if ego_state else None,
-        ego_rollout=ego_rollout,
-        ego_milp_rollout=ego_milp_rollout,
-        nlp_converged=nlp_converged,
-        predicted_obstacles=predicted_obstacles,
-        other_agent_states=other_agent_states,
-        predicted_trajectories=predicted_trajectories,
+        human_rollout=human_rollout,
+        human_milp_rollout=human_milp,
+        human_nlp_converged=human_nlp_converged,
+        human_obstacles=human_obstacles,
+        human_other_agents=human_other_agents,
+        human_trajectories=human_trajectories,
+        true_rollout=true_rollout,
+        true_milp_rollout=true_milp,
+        true_nlp_converged=true_nlp_converged,
+        true_obstacles=true_obstacles,
+        true_other_agents=true_other_agents,
+        true_trajectories=true_trajectories,
         dynamic_agents=dynamic_agents,
         static_obstacles=static_obstacles,
         goal_reached=goal_reached,
