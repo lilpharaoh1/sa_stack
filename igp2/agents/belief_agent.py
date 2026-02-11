@@ -6,10 +6,11 @@ Extends Agent directly with:
 - An update_beliefs() hook called each timestep
 - A policy() hook that delegates to a configurable control policy
 - A reference path to the goal computed via A* open-loop maneuvers
+- Internal trajectory prediction for other agents (bicycle model forward sim)
 """
 
 import logging
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
 
@@ -24,6 +25,162 @@ from igp2.beliefcontrol.policy import SampleBased, TwoStageOPT
 from igp2.beliefcontrol.plotting import BeliefPlotter, OptimisationPlotter
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Trajectory forward-simulation utilities
+# ---------------------------------------------------------------------------
+
+def _bicycle_step(position: np.ndarray, heading: float, speed: float,
+                  accel: float, steer: float, dt: float,
+                  wheelbase: float) -> Tuple[np.ndarray, float, float]:
+    """Single kinematic bicycle model step (matches CarlaSim._bicycle_step)."""
+    x, y = position
+    x_new = x + speed * np.cos(heading + steer) * dt
+    y_new = y + speed * np.sin(heading + steer) * dt
+    theta_new = heading + (2.0 * speed / wheelbase) * np.sin(steer) * dt
+    v_new = max(0.0, speed + accel * dt)
+    theta_new = (theta_new + np.pi) % (2 * np.pi) - np.pi
+    return np.array([x_new, y_new]), theta_new, v_new
+
+
+class _WaypointTracker:
+    """Lightweight PID waypoint tracker for forward simulation.
+
+    Replicates WaypointManeuver's PID control without modifying agent state.
+    """
+
+    LATERAL_KP = 1.0
+    LATERAL_KI = 0.2
+    LATERAL_KD = 0.05
+    LONGITUDINAL_KP = 1.0
+    LONGITUDINAL_KI = 0.05
+    LONGITUDINAL_KD = 0.0
+
+    def __init__(self, waypoints: np.ndarray, target_speed: float, dt: float):
+        self.waypoints = waypoints
+        self.target_speed = target_speed
+        self.dt = dt
+        self.waypoint_idx = 0
+        self.waypoint_margin = max(1.0, dt * 20.0)
+        self.lat_integral = 0.0
+        self.lat_prev_error = 0.0
+        self.lon_integral = 0.0
+        self.lon_prev_error = 0.0
+
+    def get_action(self, position: np.ndarray, heading: float, speed: float,
+                   max_steer: float = 0.5, max_accel: float = 3.0
+                   ) -> Tuple[float, float]:
+        if self.waypoint_idx >= len(self.waypoints):
+            return 0.0, 0.0
+
+        while self.waypoint_idx < len(self.waypoints) - 1:
+            if np.linalg.norm(self.waypoints[self.waypoint_idx] - position) < self.waypoint_margin:
+                self.waypoint_idx += 1
+            else:
+                break
+
+        target = self.waypoints[self.waypoint_idx]
+        dx, dy = target[0] - position[0], target[1] - position[1]
+        target_heading = np.arctan2(dy, dx)
+
+        lat_error = (target_heading - heading + np.pi) % (2 * np.pi) - np.pi
+        lon_error = self.target_speed - speed
+
+        self.lat_integral += lat_error * self.dt
+        lat_derivative = (lat_error - self.lat_prev_error) / self.dt if self.dt > 0 else 0.0
+        steer = np.clip(
+            self.LATERAL_KP * lat_error + self.LATERAL_KI * self.lat_integral + self.LATERAL_KD * lat_derivative,
+            -max_steer, max_steer)
+        self.lat_prev_error = lat_error
+
+        self.lon_integral += lon_error * self.dt
+        lon_derivative = (lon_error - self.lon_prev_error) / self.dt if self.dt > 0 else 0.0
+        accel = np.clip(
+            self.LONGITUDINAL_KP * lon_error + self.LONGITUDINAL_KI * self.lon_integral + self.LONGITUDINAL_KD * lon_derivative,
+            -max_accel, max_accel)
+        self.lon_prev_error = lon_error
+
+        return accel, steer
+
+
+def _get_agent_waypoints_and_speeds(agent) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Extract all future waypoints and velocities from an agent's macro actions."""
+    if not hasattr(agent, 'macro_actions') or not agent.macro_actions:
+        return None, None
+
+    all_waypoints = []
+    all_speeds = []
+    for macro in agent.macro_actions:
+        if not hasattr(macro, '_maneuvers'):
+            continue
+        for maneuver in macro._maneuvers:
+            if hasattr(maneuver, 'trajectory') and maneuver.trajectory is not None:
+                traj = maneuver.trajectory
+                all_waypoints.append(traj.path)
+                if traj.velocity is not None and len(traj.velocity) == len(traj.path):
+                    vel = np.asarray(traj.velocity)
+                    all_speeds.append(vel if vel.ndim == 1 else np.linalg.norm(vel, axis=1))
+                else:
+                    all_speeds.append(None)
+
+    if not all_waypoints:
+        return None, None
+
+    waypoints = np.vstack(all_waypoints)
+    speeds = np.concatenate(all_speeds) if all(s is not None for s in all_speeds) else None
+    return waypoints, speeds
+
+
+def _simulate_agent_trajectory(agent, frame: Dict[int, AgentState],
+                               n_steps: int, dt: float) -> Optional[np.ndarray]:
+    """Forward simulate one agent's trajectory using bicycle model + PID."""
+    if not hasattr(agent, 'agent_id'):
+        return None
+
+    aid = agent.agent_id
+    if aid not in frame:
+        return None
+
+    waypoints, speeds = _get_agent_waypoints_and_speeds(agent)
+    if waypoints is None or len(waypoints) < 2:
+        return None
+
+    meta = agent.metadata if hasattr(agent, 'metadata') else None
+    wheelbase = meta.wheelbase if meta is not None else 2.5
+    max_steer = getattr(meta, 'max_steer', 0.5) if meta is not None else 0.5
+    max_accel = getattr(meta, 'max_acceleration', 3.0) if meta is not None else 3.0
+
+    state = frame[aid]
+    position = np.array(state.position)
+    heading = float(state.heading)
+    speed = float(state.speed)
+
+    dists = np.linalg.norm(waypoints - position, axis=1)
+    closest_idx = int(np.argmin(dists))
+    future_wp = waypoints[closest_idx:]
+    future_sp = speeds[closest_idx:] if speeds is not None else None
+
+    if len(future_wp) < 2:
+        return None
+
+    if future_sp is not None and len(future_sp) > 0:
+        target_speed = float(np.mean(future_sp))
+    elif speed > 0.5:
+        target_speed = speed
+    else:
+        target_speed = 5.0
+
+    tracker = _WaypointTracker(future_wp, target_speed, dt)
+
+    trajectory = np.zeros((n_steps + 1, 2))
+    trajectory[0] = position
+    for k in range(n_steps):
+        accel, steer = tracker.get_action(position, heading, speed, max_steer, max_accel)
+        position, heading, speed = _bicycle_step(position, heading, speed, accel, steer, dt, wheelbase)
+        trajectory[k + 1] = position
+
+    return trajectory
 
 # Mapping from string name to policy class for configuration
 POLICY_TYPES = {
@@ -86,7 +243,8 @@ class BeliefAgent(Agent):
         self._policy_type = policy_type
         self._plot_interval = plot_interval
         self._step_count = 0
-        self._agent_trajectories: Dict[int, np.ndarray] = {}  # Planned trajectories of other agents
+        self._other_agents: Dict[int, Any] = {}  # References to other agents in the scene
+        self._agent_trajectories: Dict[int, np.ndarray] = {}  # Predicted trajectories
 
         # Compute reference path to goal via A* open-loop maneuvers.
         self._reference_path: List[Tuple[Lane, np.ndarray]] = []
@@ -198,17 +356,47 @@ class BeliefAgent(Agent):
         """
         pass
 
-    def set_agent_trajectories(self, trajectories: Dict[int, np.ndarray]):
-        """Set planned trajectories of other agents for collision avoidance.
+    def set_agents(self, agents: Dict[int, Any]):
+        """Register the other agents in the scene.
 
-        When provided, the policy will use these trajectories instead of
-        constant-velocity prediction for other agents.
+        The BeliefAgent will forward-simulate these agents each step to
+        predict their trajectories for collision avoidance.  Later, beliefs
+        will control which agents are visible and how far ahead to predict.
 
         Args:
-            trajectories: Dict mapping agent_id -> (T, 2) array of planned
-                world positions. T should ideally match the planning horizon.
+            agents: Dict mapping agent_id -> Agent instance.  The ego agent
+                (self) may be included; it will be skipped automatically.
         """
-        self._agent_trajectories = trajectories
+        self._other_agents = {aid: a for aid, a in agents.items()
+                              if aid != self.agent_id}
+
+    def _predict_agent_trajectories(self, frame: Dict[int, AgentState]) -> Dict[int, np.ndarray]:
+        """Forward-simulate other agents to predict their trajectories.
+
+        Uses the bicycle model + PID waypoint tracker to replicate what
+        each agent's closed-loop controller will do.
+
+        Args:
+            frame: Current observation frame with all agent states.
+
+        Returns:
+            Dict mapping agent_id -> (T, 2) predicted position array.
+        """
+        dt = 1.0 / self._fps
+        # Compute horizon from the policy if available
+        policy = self._policy_obj
+        if hasattr(policy, '_horizon') and hasattr(policy, '_dt'):
+            horizon_time = policy._horizon * policy._dt + 1.0
+        else:
+            horizon_time = 10.0
+        n_steps = int(horizon_time / dt)
+
+        trajectories = {}
+        for aid, agent in self._other_agents.items():
+            traj = _simulate_agent_trajectory(agent, frame, n_steps, dt)
+            if traj is not None:
+                trajectories[aid] = traj
+        return trajectories
 
     def policy(self, observation: Observation) -> Action:
         """Delegate to the configured control policy to produce an action.
@@ -294,7 +482,7 @@ class BeliefAgent(Agent):
 
     def next_action(self, observation: Observation,
                     prediction: TrajectoryPrediction = None) -> Action:
-        """Compute next action: update beliefs, then apply policy.
+        """Compute next action: predict other agents, update beliefs, then apply policy.
 
         Args:
             observation: Current observation.
@@ -308,6 +496,12 @@ class BeliefAgent(Agent):
             pass
 
         self._step_count += 1
+
+        # Predict other agents' trajectories for collision avoidance
+        if self._other_agents:
+            self._agent_trajectories = self._predict_agent_trajectories(
+                observation.frame)
+
         self.update_beliefs(observation)
         return self.policy(observation)
 
