@@ -286,6 +286,7 @@ class CarlaSim:
         actor.destroy()
         self.agents[agent_id].agent.alive = False
         self.agents[agent_id] = None
+        self.__kinematic_states.pop(agent_id, None)
 
     def add_static_object(self,
                           position: tuple,

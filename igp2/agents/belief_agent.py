@@ -393,6 +393,8 @@ class BeliefAgent(Agent):
 
         trajectories = {}
         for aid, agent in self._other_agents.items():
+            if not getattr(agent, 'alive', True):
+                continue
             traj = _simulate_agent_trajectory(agent, frame, n_steps, dt)
             if traj is not None:
                 trajectories[aid] = traj

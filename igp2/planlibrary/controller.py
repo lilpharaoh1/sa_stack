@@ -80,8 +80,6 @@ class PIDController:
         # Scale with dt so the maximum steering rate (rad/s) stays constant.
         self._max_steer_change = 0.33 * (dt / 0.05)
 
-        print("\n\n\n\n\n args_lateral:", args_lateral)
-
         self.past_steering = 0.0
         self._lon_controller = PIDLongitudinalController(dt=dt, **args_longitudinal)
         self._lat_controller = PIDLateralController(dt=dt, **args_lateral)
