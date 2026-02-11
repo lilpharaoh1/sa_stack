@@ -2,7 +2,7 @@
   "scenario": {
     "map_path": "scenarios/maps/Town01.xodr",
     "max_speed": 10.0,
-    "fps": 20,
+    "fps": 5,
     "seed": 21,
     "max_steps": 1000
   },
@@ -55,8 +55,8 @@
       "goal": {
         "box": {
           "center": [
-            87.5,
-            -40.1
+            200.0,
+            -2.5
           ],
           "length": 5,
           "width": 7,
@@ -123,34 +123,7 @@
       "type": "TrafficAgent",
       "spawn": {
         "box": {
-          "center": [52.5, -2.5],
-          "length": 3.5,
-          "width": 10.0,
-          "heading": 0.0
-        },
-        "velocity": [
-          5.0,
-          10.0
-        ]
-      },
-      "goal": {
-        "box": {
-          "center": [
-            200.0,
-            -2.5
-          ],
-          "length": 5,
-          "width": 7,
-          "heading": 0.0
-        }
-      }
-    },
-    {
-      "id": 5,
-      "type": "TrafficAgent",
-      "spawn": {
-        "box": {
-          "center": [37.5, -2.5],
+          "center": [35, -2.5],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
