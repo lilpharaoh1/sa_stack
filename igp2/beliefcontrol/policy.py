@@ -21,9 +21,6 @@ import numpy as np
 import cvxpy as cp
 from shapely.geometry import LineString
 import casadi as ca
-import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse, Polygon
-from matplotlib.collections import PatchCollection
 
 from igp2.core.agentstate import AgentState, AgentMetadata
 from igp2.core.vehicle import Action
@@ -70,6 +67,7 @@ class SampleBased:
         self._controller = PIDController(
             1.0 / fps, self.LATERAL_ARGS, self.LONGITUDINAL_ARGS,
         )
+        self._waypoint_margin = self.WAYPOINT_MARGIN * (20.0 / fps)
 
     # ------------------------------------------------------------------
     # Public
@@ -169,11 +167,11 @@ class SampleBased:
         dists = np.linalg.norm(best_traj - state.position, axis=1)
         closest_idx = int(np.argmin(dists))
 
-        if dists[-1] < self.WAYPOINT_MARGIN:
+        if dists[-1] < self._waypoint_margin:
             target_idx = len(best_traj) - 1
         else:
             far = dists[closest_idx:]
-            offset = np.argmax(far >= self.WAYPOINT_MARGIN)
+            offset = np.argmax(far >= self._waypoint_margin)
             target_idx = closest_idx + offset
 
         target_wp = best_traj[target_idx]
@@ -641,8 +639,8 @@ class TwoStageOPT:
         'a_s_max': 3.0,       # Longitudinal acceleration max (m/s^2)
         'a_d_min': -3.0,      # Lateral acceleration min (m/s^2)
         'a_d_max': 3.0,       # Lateral acceleration max (m/s^2)
-        'jerk_s_max': 1.0,    # Longitudinal jerk max (m/s^3)
-        'jerk_d_max': 1.0,    # Lateral jerk max (m/s^3)
+        'jerk_s_max': 4.0,    # Longitudinal jerk max (m/s^3)
+        'jerk_d_max': 4.0,    # Lateral jerk max (m/s^3)
         'vs_min': 0.0,        # Longitudinal velocity min (m/s)
         'vs_max': 8.0,       # Longitudinal velocity max (m/s)
         'vd_min': -8.0,       # Lateral velocity min (m/s)
@@ -660,8 +658,8 @@ class TwoStageOPT:
         'a_min': -3.0,        # Acceleration min (m/s^2)
         'a_max': 3.0,         # Acceleration max (m/s^2)
         'delta_max': 0.45,    # Max steering angle magnitude (rad)
-        'delta_rate_max': 0.8,  # Max steering rate (rad/s)
-        'jerk_max': 0.5,      # Max jerk (m/s^3)
+        'delta_rate_max': 1.0,  # Max steering rate (rad/s)
+        'jerk_max': 4.0,      # Max jerk (m/s^3)
         'v_min': 0.0,         # Velocity min (m/s)
         'v_max': 8.0,        # Velocity max (m/s)
         'w_s': 0.9,           # Weight for longitudinal position tracking
@@ -679,12 +677,11 @@ class TwoStageOPT:
                  horizon: int = None,
                  dt: float = None,
                  target_speed: float = 5.0,
-                 collision_margin: float = 0.5,
+                 collision_margin: float = 0.9,
                  big_m: float = None,
                  milp_params: Optional[Dict] = None,
                  nlp_params: Optional[Dict] = None,
                  use_prev_nlp_on_fail: bool = True,
-                 debug_plot_nlp: bool = True,
                  # Legacy params (for back-compat, override milp/nlp_params)
                  delta_max: float = None,
                  a_min: float = None,
@@ -709,7 +706,6 @@ class TwoStageOPT:
         self._target_speed = target_speed
         self._big_m = big_m if big_m is not None else self.DEFAULT_BIG_M
         self._use_prev_nlp_on_fail = use_prev_nlp_on_fail
-        self._debug_plot_nlp = debug_plot_nlp
 
         # Build MILP parameters from defaults + provided overrides
         self._milp = dict(self.MILP_DEFAULTS)
@@ -783,9 +779,10 @@ class TwoStageOPT:
         self._nlp_solver = None
         self._nlp_built = False
 
-        # Debug plotting figure (created on first use)
-        self._debug_fig = None
-        self._debug_axes = None
+
+        # Debug: store predicted trajectory for comparison (k=0 and k=1 states)
+        self._predicted_next_state: Optional[np.ndarray] = None  # (2, 4) [s, d, phi, v] in Frenet
+        self._predicted_next_world: Optional[np.ndarray] = None  # (2, 4) [x, y, heading, v] in world
 
     # ------------------------------------------------------------------
     # Public interface
@@ -853,6 +850,9 @@ class TwoStageOPT:
                             target_speed=self._target_speed)
             return action, [np.array([state.position])], 0
 
+        if self._step_count > 22:
+            time.sleep(3)
+
         # Prepare NLP warm-start from MILP solution
         warm_states, warm_controls = self._milp_to_nlp_warmstart(
             milp_states, frenet_state)
@@ -890,15 +890,115 @@ class TwoStageOPT:
         # Print concise status
         print(f"[Step {self._step_count:4d}] MILP: OK ({t_milp*1000:.1f}ms) | NLP: {nlp_status} ({t_nlp*1000:.1f}ms)")
 
-        # Print velocity profile
-        velocities = final_states[:, 3]  # [s, d, phi, v] -> v is index 3
-        v_str = " ".join([f"{v:.2f}" for v in velocities])
-        print(f"  Velocity profile (H={len(velocities)-1}): [{v_str}]")
 
-        # Print steering control profile
-        steerings = final_controls[:, 1]  # [a, delta] -> delta is index 1
-        delta_str = " ".join([f"{np.degrees(d):+.1f}" for d in steerings])
-        print(f"  Steering profile (deg): [{delta_str}]")
+        # Debug: Print all constraint values
+        H = len(final_states) - 1
+        dt = self._dt
+        nlp = self._nlp
+        half_L = self._ego_length / 2.0
+        half_W = self._ego_width / 2.0
+
+        # Extract state and control trajectories
+        s_traj = final_states[:, 0]
+        d_traj = final_states[:, 1]
+        phi_traj = final_states[:, 2]
+        v_traj = final_states[:, 3]
+        a_traj = final_controls[:, 0]
+        delta_traj = final_controls[:, 1]
+
+        # Compute derived quantities
+        jerk = np.diff(a_traj) / dt  # (H-1,)
+        delta_rate = np.diff(delta_traj) / dt  # (H-1,)
+
+        # Get constraint bounds
+        a_min, a_max = nlp['a_min'], nlp['a_max']
+        delta_max = nlp['delta_max']
+        delta_rate_max = nlp['delta_rate_max']
+        jerk_max = nlp['jerk_max']
+        v_min, v_max = nlp['v_min'], nlp['v_max']
+
+        print(f"  --- Constraint Analysis ---")
+        print(f"  Acceleration: min={np.min(a_traj):.3f}, max={np.max(a_traj):.3f} | bounds=[{a_min:.2f}, {a_max:.2f}]")
+        print(f"  Steering (deg): min={np.degrees(np.min(delta_traj)):.2f}, max={np.degrees(np.max(delta_traj)):.2f} | bound=±{np.degrees(delta_max):.2f}")
+        print(f"  Velocity: min={np.min(v_traj):.3f}, max={np.max(v_traj):.3f} | bounds=[{v_min:.2f}, {v_max:.2f}]")
+        if len(jerk) > 0:
+            print(f"  Jerk: min={np.min(jerk):.3f}, max={np.max(jerk):.3f} | bound=±{jerk_max:.2f}")
+        if len(delta_rate) > 0:
+            print(f"  Steer rate (deg/s): min={np.degrees(np.min(delta_rate)):.2f}, max={np.degrees(np.max(delta_rate)):.2f} | bound=±{np.degrees(delta_rate_max):.2f}")
+
+        # Check road boundary constraints (corner-based)
+        road_violations = []
+        for k in range(H + 1):
+            cos_phi = np.cos(phi_traj[k])
+            sin_phi = np.sin(phi_traj[k])
+            for alpha_l, alpha_w, name in [(1, 1, 'FL'), (1, -1, 'FR'), (-1, 1, 'RL'), (-1, -1, 'RR')]:
+                c_d = d_traj[k] + alpha_l * half_L * sin_phi + alpha_w * half_W * cos_phi
+                margin_left = road_left[k] - c_d
+                margin_right = c_d - road_right[k]
+                if margin_left < 0 or margin_right < 0:
+                    road_violations.append(f"k={k} {name}: d={c_d:.3f}, margins(L={margin_left:.3f}, R={margin_right:.3f})")
+
+        if road_violations:
+            print(f"  Road boundary violations ({len(road_violations)}):")
+            for v in road_violations[:5]:
+                print(f"    {v}")
+        else:
+            print(f"  Road boundary: OK (all corners within bounds)")
+
+        # Check collision constraints (ellipse)
+        if obstacles:
+            collision_info = []
+            for obs_idx, obs in enumerate(obstacles):
+                a_i = obs['length'] / 2.0 + self._collision_margin
+                b_i = obs['width'] / 2.0 + self._collision_margin
+
+                obs_s0 = float(obs['s'][0])
+                _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
+                phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
+                cos_phi_i = np.cos(phi_i)
+                sin_phi_i = np.sin(phi_i)
+
+                min_g = float('inf')
+                min_g_info = ""
+                violations = []  # Track all timesteps with g < 1.0
+
+                for k in range(1, H + 1):
+                    s_obs_k = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
+                    d_obs_k = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
+
+                    cos_phi_k = np.cos(phi_traj[k])
+                    sin_phi_k = np.sin(phi_traj[k])
+
+                    for alpha_l, alpha_w, name in [(1, 1, 'FL'), (1, -1, 'FR'), (-1, 1, 'RL'), (-1, -1, 'RR')]:
+                        c_s = s_traj[k] + alpha_l * half_L * cos_phi_k - alpha_w * half_W * sin_phi_k
+                        c_d = d_traj[k] + alpha_l * half_L * sin_phi_k + alpha_w * half_W * cos_phi_k
+
+                        d_s = c_s - s_obs_k
+                        d_d = c_d - d_obs_k
+
+                        # R(-φ) rotation
+                        d_body_x = cos_phi_i * d_s + sin_phi_i * d_d
+                        d_body_y = -sin_phi_i * d_s + cos_phi_i * d_d
+
+                        g = (d_body_x / a_i)**2 + (d_body_y / b_i)**2
+
+                        if g < min_g:
+                            min_g = g
+                            min_g_info = f"k={k} {name}: g={g:.9f}, corner=({c_s:.2f},{c_d:.2f}), obs=({s_obs_k:.2f},{d_obs_k:.2f})"
+
+                        # Track violations
+                        if g < 1.0:
+                            violations.append(f"k={k} {name}: g={g:.9f}")
+
+                collision_info.append((obs_idx, min_g, min_g_info, violations))
+
+            print(f"  Collision constraints:")
+            for obs_idx, min_g, info, violations in collision_info:
+                status = "VIOLATED" if min_g < 1.0 else "OK"
+                print(f"    Obs{obs_idx}: min_g={min_g:.9f} ({status}) | {info}")
+                if violations:
+                    print(f"      All violations ({len(violations)}): {', '.join(violations[:10])}" +
+                          (f" ... and {len(violations)-10} more" if len(violations) > 10 else ""))
 
         self._prev_nlp_states = final_states.copy()
         self._prev_nlp_controls = final_controls.copy()
@@ -906,6 +1006,11 @@ class TwoStageOPT:
         # Convert Frenet trajectory to world coordinates
         self._last_rollout = self._frenet_trajectory_to_world(final_states)
         trajectory = self._last_rollout[:, :2]
+
+        # Store predicted trajectory for comparison on next step
+        # Keep k=0 (current) and k=1 (after dt) for interpolation to dt_sim
+        self._predicted_next_state = final_states[:2].copy()  # (2, 4) [s, d, phi, v] Frenet
+        self._predicted_next_world = self._last_rollout[:2].copy()  # (2, 4) [x, y, heading, v] world
 
         # Extract first control action
         accel = float(final_controls[0, 0])
@@ -1755,8 +1860,9 @@ class TwoStageOPT:
                 phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
 
                 # Precompute rotation to obstacle body frame: R(-φ^i)
-                cos_neg_phi_i = np.cos(-phi_i)
-                sin_neg_phi_i = np.sin(-phi_i)
+                # R(-φ) = [[cos(φ), sin(φ)], [-sin(φ), cos(φ)]]
+                cos_phi_i = np.cos(phi_i)
+                sin_phi_i = np.sin(phi_i)
 
                 for k in range(1, H + 1):
                     # Obstacle center (s^i_k, d^i_k) at timestep k
@@ -1779,8 +1885,9 @@ class TwoStageOPT:
                         d_d = c_d - d_obs_k
 
                         # Rotate to obstacle body frame: d_body = R(-φ^i) × d
-                        d_body_x = cos_neg_phi_i * d_s + sin_neg_phi_i * d_d
-                        d_body_y = -sin_neg_phi_i * d_s + cos_neg_phi_i * d_d
+                        # R(-φ) = [[cos(φ), sin(φ)], [-sin(φ), cos(φ)]]
+                        d_body_x = cos_phi_i * d_s + sin_phi_i * d_d
+                        d_body_y = -sin_phi_i * d_s + cos_phi_i * d_d
 
                         # Ellipse containment function g (Eq. 10):
                         # g = (d_body_x / a)^2 + (d_body_y / b)^2
@@ -1809,14 +1916,10 @@ class TwoStageOPT:
             nlp_states = sol.value(S).T   # (H+1, 4)
             nlp_controls = sol.value(U).T  # (H, 2)
 
-            # Debug plotting if enabled
-            if self._debug_plot_nlp and N_obs > 0:
-                self._plot_nlp_debug(nlp_states, obstacles, road_left, road_right,
-                                     frenet_state, title_suffix=f" (step {self._step_count})")
-
             return nlp_states, nlp_controls, True
 
         except Exception as e:
+            print("NLP solver failed: %s", e)
             logger.debug("NLP solver failed: %s", e)
 
             # Diagnose constraint violations
@@ -1898,8 +2001,9 @@ class TwoStageOPT:
                     obs_s0 = float(obs['s'][0])
                     _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
                     obs_heading_frenet = obs.get('heading', road_angle_obs) - road_angle_obs
-                    cos_theta = np.cos(-obs_heading_frenet)
-                    sin_theta = np.sin(-obs_heading_frenet)
+                    # R(-φ) = [[cos(φ), sin(φ)], [-sin(φ), cos(φ)]]
+                    cos_theta = np.cos(obs_heading_frenet)
+                    sin_theta = np.sin(obs_heading_frenet)
 
                     for k in range(1, H + 1):
                         s_obs = float(obs['s'][k] if k < len(obs['s']) else obs['s'][-1])
@@ -1913,11 +2017,61 @@ class TwoStageOPT:
                             c_d = d_dbg[k] + sl * half_L * sin_phi + sw * half_W * cos_phi
                             ds = c_s - s_obs
                             dd = c_d - d_obs
+                            # R(-φ) × d
                             x_body = cos_theta * ds + sin_theta * dd
                             y_body = -sin_theta * ds + cos_theta * dd
                             ellipse_val = (x_body / rx)**2 + (y_body / ry)**2
                             if ellipse_val < 1.0 - 1e-3:
                                 violations.append(f"Collision obs{obs_idx}[{k}] corner({sl},{sw}): ellipse={ellipse_val:.3f} < 1.0")
+
+                # Always print constraint value summaries
+                print(f"    --- Debug State Constraint Values ---")
+                print(f"    Acceleration: min={np.min(a_dbg):.3f}, max={np.max(a_dbg):.3f} | bounds=[{a_min:.2f}, {a_max:.2f}]")
+                print(f"    Steering (deg): min={np.degrees(np.min(delta_dbg)):.2f}, max={np.degrees(np.max(delta_dbg)):.2f} | bound=±{np.degrees(delta_max):.2f}")
+                print(f"    Velocity: min={np.min(v_dbg):.3f}, max={np.max(v_dbg):.3f} | bounds=[{v_min:.2f}, {v_max:.2f}]")
+
+                # Jerk and steering rate
+                if len(a_dbg) > 1:
+                    jerk_vals = np.diff(a_dbg) / dt
+                    print(f"    Jerk: min={np.min(jerk_vals):.3f}, max={np.max(jerk_vals):.3f} | bound=±{jerk_max:.2f}")
+                if len(delta_dbg) > 1:
+                    delta_rate_vals = np.diff(delta_dbg) / dt
+                    print(f"    Steer rate (deg/s): min={np.degrees(np.min(delta_rate_vals)):.2f}, max={np.degrees(np.max(delta_rate_vals)):.2f} | bound=±{np.degrees(delta_rate_max):.2f}")
+
+                # Find minimum g value across all corners and obstacles
+                if N_obs > 0:
+                    min_g_overall = float('inf')
+                    min_g_info = ""
+                    for obs_idx in range(N_obs):
+                        obs = obstacles[obs_idx]
+                        rx = obs['length'] / 2.0 + self._collision_margin
+                        ry = obs['width'] / 2.0 + self._collision_margin
+                        obs_s0 = float(obs['s'][0])
+                        _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
+                        obs_heading_frenet = obs.get('heading', road_angle_obs) - road_angle_obs
+                        cos_theta = np.cos(obs_heading_frenet)
+                        sin_theta = np.sin(obs_heading_frenet)
+
+                        for k in range(1, H + 1):
+                            s_obs = float(obs['s'][k] if k < len(obs['s']) else obs['s'][-1])
+                            d_obs = float(obs['d'][k] if k < len(obs['d']) else obs['d'][-1])
+                            cos_phi = np.cos(phi_dbg[k])
+                            sin_phi = np.sin(phi_dbg[k])
+
+                            for sl, sw, name in [(1, 1, 'FL'), (1, -1, 'FR'), (-1, 1, 'RL'), (-1, -1, 'RR')]:
+                                c_s = s_dbg[k] + sl * half_L * cos_phi - sw * half_W * sin_phi
+                                c_d = d_dbg[k] + sl * half_L * sin_phi + sw * half_W * cos_phi
+                                ds = c_s - s_obs
+                                dd = c_d - d_obs
+                                x_body = cos_theta * ds + sin_theta * dd
+                                y_body = -sin_theta * ds + cos_theta * dd
+                                g_val = (x_body / rx)**2 + (y_body / ry)**2
+                                if g_val < min_g_overall:
+                                    min_g_overall = g_val
+                                    min_g_info = f"Obs{obs_idx} k={k} {name}: g={g_val}, corner=({c_s:.2f},{c_d:.2f}), obs=({s_obs:.2f},{d_obs:.2f})"
+
+                    status = "VIOLATED" if min_g_overall < 1.0 else "OK"
+                    print(f"    Collision (min_g): {min_g_overall} ({status}) | {min_g_info}")
 
                 if violations:
                     print(f"    Violated constraints ({len(violations)} total):")
@@ -1954,161 +2108,3 @@ class TwoStageOPT:
 
             return warm_states, warm_controls, False
 
-    def _plot_nlp_debug(self, nlp_states, obstacles, road_left, road_right,
-                        frenet_state, title_suffix=""):
-        """Plot NLP solution for debugging: trajectory, ego corners, obstacle ellipses.
-
-        All values are plotted in raw Frenet coordinates (s, d) without any transforms.
-        This helps diagnose coordinate frame issues. Updates in place without creating new windows.
-
-        Args:
-            nlp_states: (H+1, 4) array with columns [s, d, phi, v].
-            obstacles: List of obstacle dicts with 's', 'd', 'length', 'width', 'heading'.
-            road_left: (H+1,) left road boundary in d.
-            road_right: (H+1,) right road boundary in d.
-            frenet_state: [s, d, phi, v] initial state.
-            title_suffix: Optional suffix for plot title.
-        """
-        H = len(nlp_states) - 1
-        half_L = self._ego_length / 2.0
-        half_W = self._ego_width / 2.0
-
-        # Extract trajectory
-        s_traj = nlp_states[:, 0]
-        d_traj = nlp_states[:, 1]
-        phi_traj = nlp_states[:, 2]
-
-        # Create figure on first call, reuse afterwards
-        if self._debug_fig is None or not plt.fignum_exists(self._debug_fig.number):
-            plt.ion()  # Interactive mode
-            self._debug_fig, self._debug_axes = plt.subplots(1, 2, figsize=(16, 8))
-            self._debug_fig.show()
-
-        fig = self._debug_fig
-        ax1, ax2 = self._debug_axes
-
-        # Clear axes for redraw
-        ax1.clear()
-        ax2.clear()
-
-        # --- Left plot: Full trajectory view in Frenet (s, d) ---
-        ax1.set_title(f"NLP Solution in Frenet Frame (s, d){title_suffix}")
-        ax1.set_xlabel("s (longitudinal)")
-        ax1.set_ylabel("d (lateral)")
-
-        # Plot road boundaries
-        ax1.fill_between(s_traj, road_right, road_left, alpha=0.2, color='gray', label='Road')
-        ax1.plot(s_traj, road_left, 'k--', linewidth=1, label='Road left')
-        ax1.plot(s_traj, road_right, 'k--', linewidth=1, label='Road right')
-
-        # Plot trajectory centerline
-        ax1.plot(s_traj, d_traj, 'b-', linewidth=2, label='Ego trajectory', zorder=5)
-        ax1.scatter(s_traj[0], d_traj[0], c='green', s=100, marker='o', zorder=10, label='Start')
-        ax1.scatter(s_traj[-1], d_traj[-1], c='red', s=100, marker='x', zorder=10, label='End')
-
-        # Plot ego vehicle corners at each timestep
-        for k in range(0, H + 1, max(1, H // 10)):  # Sample every ~10% of horizon
-            cos_phi = np.cos(phi_traj[k])
-            sin_phi = np.sin(phi_traj[k])
-
-            # Compute 4 corners in Frenet frame (Eq. 6)
-            corners = []
-            for alpha_l, alpha_w in [(1, 1), (1, -1), (-1, -1), (-1, 1)]:  # CCW order
-                c_s = s_traj[k] + alpha_l * half_L * cos_phi - alpha_w * half_W * sin_phi
-                c_d = d_traj[k] + alpha_l * half_L * sin_phi + alpha_w * half_W * cos_phi
-                corners.append([c_s, c_d])
-
-            poly = Polygon(corners, closed=True, fill=False, edgecolor='blue',
-                           linewidth=1, alpha=0.5 + 0.5 * k / H)
-            ax1.add_patch(poly)
-
-        # Plot obstacle ellipses
-        for obs_idx, obs in enumerate(obstacles):
-            # Ellipse semi-axes
-            a_i = obs['length'] / 2.0 + self._collision_margin
-            b_i = obs['width'] / 2.0 + self._collision_margin
-
-            # Obstacle heading in Frenet frame
-            obs_s0 = float(obs['s'][0])
-            _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
-            phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
-            phi_i_deg = np.degrees(phi_i)
-
-            # Plot ellipse at each timestep (sample a few)
-            for k in range(0, min(H + 1, len(obs['s'])), max(1, H // 5)):
-                s_obs_k = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
-                d_obs_k = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
-
-                # Ellipse center and dimensions (raw values, no transform)
-                ellipse = Ellipse((s_obs_k, d_obs_k), width=2*a_i, height=2*b_i,
-                                  angle=phi_i_deg, fill=False, edgecolor='red',
-                                  linewidth=2, alpha=0.3 + 0.7 * k / H)
-                ax1.add_patch(ellipse)
-
-                # Mark center
-                ax1.scatter(s_obs_k, d_obs_k, c='red', s=30, marker='+', alpha=0.5)
-
-            # Label
-            ax1.annotate(f'Obs{obs_idx}', (float(obs['s'][0]), float(obs['d'][0])),
-                         fontsize=8, color='red')
-
-        ax1.legend(loc='upper right', fontsize=8)
-        ax1.set_aspect('equal')
-        ax1.grid(True, alpha=0.3)
-
-        # --- Right plot: Zoomed view showing corner-ellipse distances ---
-        ax2.set_title(f"Corner-Ellipse Collision Check (g values){title_suffix}")
-        ax2.set_xlabel("Timestep k")
-        ax2.set_ylabel("g value (>= 1 is safe)")
-
-        # Compute g values for each corner and each obstacle
-        for obs_idx, obs in enumerate(obstacles):
-            a_i = obs['length'] / 2.0 + self._collision_margin
-            b_i = obs['width'] / 2.0 + self._collision_margin
-
-            obs_s0 = float(obs['s'][0])
-            _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
-            phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
-            cos_neg_phi_i = np.cos(-phi_i)
-            sin_neg_phi_i = np.sin(-phi_i)
-
-            corner_labels = [(1, 1, 'FR'), (1, -1, 'FL'), (-1, 1, 'RR'), (-1, -1, 'RL')]
-            for alpha_l, alpha_w, corner_name in corner_labels:
-                g_values = []
-                for k in range(1, H + 1):
-                    s_obs_k = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
-                    d_obs_k = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
-
-                    cos_phi_k = np.cos(phi_traj[k])
-                    sin_phi_k = np.sin(phi_traj[k])
-
-                    # Corner position (Eq. 6)
-                    c_s = s_traj[k] + alpha_l * half_L * cos_phi_k - alpha_w * half_W * sin_phi_k
-                    c_d = d_traj[k] + alpha_l * half_L * sin_phi_k + alpha_w * half_W * cos_phi_k
-
-                    # Vector from obstacle center to corner
-                    d_s = c_s - s_obs_k
-                    d_d = c_d - d_obs_k
-
-                    # Rotate to obstacle body frame
-                    d_body_x = cos_neg_phi_i * d_s + sin_neg_phi_i * d_d
-                    d_body_y = -sin_neg_phi_i * d_s + cos_neg_phi_i * d_d
-
-                    # Ellipse containment function g (Eq. 10)
-                    g = (d_body_x / a_i)**2 + (d_body_y / b_i)**2
-                    g_values.append(g)
-
-                ax2.plot(range(1, H + 1), g_values,
-                         label=f'Obs{obs_idx} {corner_name}', alpha=0.7)
-
-        # Safe threshold line
-        ax2.axhline(y=1.0, color='r', linestyle='--', linewidth=2, label='Safe threshold (g=1)')
-        ax2.legend(loc='upper right', fontsize=7, ncol=2)
-        ax2.grid(True, alpha=0.3)
-        ax2.set_ylim(bottom=0)
-
-        # Update the figure in place
-        fig.tight_layout()
-        fig.canvas.draw()
-        fig.canvas.flush_events()
-        plt.pause(0.001)  # Small pause to allow GUI update

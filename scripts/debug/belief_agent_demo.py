@@ -97,7 +97,7 @@ class StandaloneWaypointTracker:
         self.target_speed = target_speed
         self.dt = dt
         self.waypoint_idx = 0
-        self.waypoint_margin = 1.0
+        self.waypoint_margin = max(1.0, dt * 20.0)  # Scale with dt so look-ahead stays ~4 frames
 
         # PID state
         self.lat_integral = 0.0
@@ -539,6 +539,7 @@ def main():
         config = json.load(f)
 
     fps = config["scenario"].get("fps", 20)
+    print("\n\n\n\n\nUsing fps:", fps)
     ip.Maneuver.MAX_SPEED = config["scenario"].get("max_speed", 10.0)
 
     scenario_xodr = config["scenario"]["map_path"]
