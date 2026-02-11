@@ -76,6 +76,88 @@ def generate_random_frame(ego: int,
     return ret
 
 
+class StepDiagnostics:
+    """Collects per-timestep diagnostic data from the BeliefAgent and scene.
+
+    Stores information that will later be used for analysis / belief-conditioned
+    planning.  For now only the goal-reached check is acted upon; everything
+    else is silently recorded.
+    """
+
+    def __init__(self, ego_agent, ego_goal):
+        self.ego_agent = ego_agent
+        self.ego_goal = ego_goal
+        # Accumulated history (one entry per step)
+        self.history: List[Dict] = []
+
+    def check(self, step: int, frame: Dict) -> Dict:
+        """Run all per-step checks and return the diagnostics dict.
+
+        Args:
+            step: Current simulation step index.
+            frame: Current observation frame with all agent states.
+
+        Returns:
+            Dict with the diagnostics for this step. The same dict is also
+            appended to ``self.history``.
+        """
+        ego_id = self.ego_agent.agent_id
+        ego_state = frame.get(ego_id) if frame else None
+        policy = getattr(self.ego_agent, '_policy_obj', None)
+
+        # --- Ego trajectory & control from the optimisation ---
+        ego_rollout = getattr(policy, 'last_rollout', None) if policy else None
+        ego_milp_rollout = getattr(policy, 'last_milp_rollout', None) if policy else None
+
+        # --- Optimisation convergence ---
+        # The policy prints status; we mirror the info here for logging.
+        # TwoStageOPT stores _prev_nlp_states only when NLP succeeds.
+        nlp_converged = None
+        if policy is not None:
+            nlp_converged = getattr(policy, '_prev_nlp_states', None) is not None
+
+        # --- Obstacle predictions used in the optimisation ---
+        predicted_obstacles = getattr(policy, 'last_obstacles', None) if policy else None
+        other_agent_states = getattr(policy, 'last_other_agents', None) if policy else None
+
+        # --- Predicted trajectories (from BeliefAgent._predict_agent_trajectories) ---
+        predicted_trajectories = dict(self.ego_agent._agent_trajectories)
+
+        # --- Dynamic agent states (from frame, excluding ego and static) ---
+        dynamic_agents = {aid: s for aid, s in frame.items()
+                          if aid != ego_id and aid >= 0} if frame else {}
+
+        # --- Static obstacles (negative IDs in frame) ---
+        static_obstacles = {aid: s for aid, s in frame.items()
+                            if aid < 0} if frame else {}
+
+        # --- Goal reached? Check if any state in the NLP rollout is at the goal ---
+        goal_reached = False
+        if self.ego_goal is not None and ego_rollout is not None:
+            for pt in ego_rollout[:, :2]:
+                if self.ego_goal.reached(pt):
+                    goal_reached = True
+                    break
+
+        record = {
+            "step": step,
+            "ego_position": np.array(ego_state.position) if ego_state else None,
+            "ego_speed": float(ego_state.speed) if ego_state else None,
+            "ego_heading": float(ego_state.heading) if ego_state else None,
+            "ego_rollout": ego_rollout,
+            "ego_milp_rollout": ego_milp_rollout,
+            "nlp_converged": nlp_converged,
+            "predicted_obstacles": predicted_obstacles,
+            "other_agent_states": other_agent_states,
+            "predicted_trajectories": predicted_trajectories,
+            "dynamic_agents": dynamic_agents,
+            "static_obstacles": static_obstacles,
+            "goal_reached": goal_reached,
+        }
+        self.history.append(record)
+        return record
+
+
 def create_agent(agent_config, frame, fps, scenario_map):
     """Create an agent from its config dict."""
     base = {
@@ -169,19 +251,44 @@ def main():
                 args.steps, ego_id)
 
     ego_agent = agents.get(ego_id)
+    ego_goal = ego_agent.goal if ego_agent is not None else None
 
     # Tell the ego agent about the other agents so it can predict their trajectories
     if ego_agent is not None:
         ego_agent.set_agents(agents)
 
+    # Per-step monitoring
+    diagnostics = StepDiagnostics(ego_agent, ego_goal) if ego_agent is not None else None
+
     for t in range(args.steps):
         obs, acts = carla_sim.step()
+
+        current_frame = obs.frame if obs is not None else None
+
+        # Run diagnostics
+        if diagnostics is not None and current_frame is not None:
+            record = diagnostics.check(t, current_frame)
+
+            if record["goal_reached"]:
+                print(f"\n{'='*60}")
+                print(f"  SCENARIO SOLVED at step {t}")
+                print(f"  Ego position: {record['ego_position']}")
+                print(f"  Goal: {ego_goal}")
+                print(f"{'='*60}\n")
+
+                # Remove all agents from CARLA
+                for aid in list(carla_sim.agents.keys()):
+                    if carla_sim.agents[aid] is not None:
+                        carla_sim.remove_agent(aid)
+                break
 
         if ego_agent is not None and hasattr(ego_agent, "beliefs") and ego_agent.beliefs:
             if t % 20 == 0:
                 logger.info("t=%d  beliefs=%s", t, ego_agent.beliefs)
 
-        # time.sleep(0.05)
+    else:
+        # Loop completed without reaching goal
+        print(f"\nScenario NOT solved within {args.steps} steps.")
 
     logger.info("Done.")
 
