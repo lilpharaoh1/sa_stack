@@ -694,10 +694,6 @@ class TwoStageOPT:
                  w_y: float = None,
                  w_a: float = None,
                  w_delta: float = None,
-                 max_steer=None, w_ref=None, w_speed=None, w_smooth=None,
-                 w_x=None, w_v=None, w_y=None, w_a=None, w_delta=None,
-                 a_min=None, a_max=None, delta_max=None, jerk_max=None,
-                 v_max=None,
                  **kwargs):
         self._fps = fps
         self._dt_sim = 1.0 / fps
