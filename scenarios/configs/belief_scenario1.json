@@ -1,0 +1,133 @@
+{
+  "scenario": {
+    "map_path": "scenarios/maps/Town01.xodr",
+    "max_speed": 10.0,
+    "fps": 5,
+    "seed": 21,
+    "max_steps": 1000
+  },
+  "agents": [
+    {
+      "id": 0,
+      "type": "BeliefAgent",
+      "spawn": {
+        "box": {
+          "center": [
+            92.4,
+            -32.1
+          ],
+          "length": 10,
+          "width": 3.5,
+          "heading": 0.0
+        },
+        "velocity": [
+          5.0,
+          10.0
+        ]
+      },
+      "goal": {
+        "box": {
+          "center": [
+            20.0,
+            1.5
+          ],
+          "length": 5,
+          "width": 7,
+          "heading": 0.0
+        }
+      },
+      "beliefs": {
+        "1": {"visible": false, "velocity_error": 0.0},
+        "2": {"visible": true, "velocity_error": 0.0},
+        "3": {"visible": true, "velocity_error": 0.0}
+      }
+    },
+    {
+      "id": 1,
+      "type": "TrafficAgent",
+      "open_loop": true,
+      "spawn": {
+        "box": {
+          "center": [45, -2.5],
+          "length": 3.5,
+          "width": 10.0,
+          "heading": 0.0
+        },
+        "velocity": [
+          5.0,
+          10.0
+        ]
+      },
+      "goal": {
+        "box": {
+          "center": [
+            200.0,
+            -2.5
+          ],
+          "length": 5,
+          "width": 7,
+          "heading": 0.0
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "TrafficAgent",
+      "open_loop": true,
+      "spawn": {
+        "box": {
+          "center": [170.0, 1.5],
+          "length": 3.5,
+          "width": 10.0,
+          "heading": 0.0
+        },
+        "velocity": [
+          5.0,
+          10.0
+        ]
+      },
+      "goal": {
+        "box": {
+          "center": [
+            20.0,
+            1.5
+          ],
+          "length": 5,
+          "width": 7,
+          "heading": 0.0
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "TrafficAgent",
+      "open_loop": true,
+      "spawn": {
+        "box": {
+          "center": [63, -2.5],
+          "length": 3.5,
+          "width": 10.0,
+          "heading": 0.0
+        },
+        "velocity": [
+          5.0,
+          10.0
+        ]
+      },
+      "goal": {
+        "box": {
+          "center": [
+            200.0,
+            -2.5
+          ],
+          "length": 5,
+          "width": 7,
+          "heading": 0.0
+        }
+      }
+    }
+  ],
+    "static_objects": [
+      {"position": [93.4, -25.0], "heading": 1.57, "blueprint": "vehicle.audi.a2"}
+    ]
+}
