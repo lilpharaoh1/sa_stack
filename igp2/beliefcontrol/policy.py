@@ -536,9 +536,9 @@ class TwoStageOPT:
     regions, road boundaries, jerk constraints, and the paper's cost
     function.
 
-    The planning timestep ``dt`` (default 0.2 s) is independent of the
+    The planning timestep ``dt`` (default 0.1 s) is independent of the
     simulation framerate.  Each MPC call plans at ``dt`` resolution over
-    ``horizon`` steps (default 40 = 8 s), but only the first action is
+    ``horizon`` steps (default 40 = 4 s), but only the first action is
     applied for one simulation step (receding-horizon MPC).
 
     **MILP and NLP parameters are configured separately** via ``milp_params``
@@ -576,7 +576,7 @@ class TwoStageOPT:
         reference_waypoints: Concatenated A* reference path (N, 2).
         scenario_map: Road layout for boundary queries. May be None.
         horizon: Number of planning steps (default 40).
-        dt: Planning timestep in seconds (default 0.2).
+        dt: Planning timestep in seconds (default 0.1).
         target_speed: Desired cruising speed (m/s).
         collision_margin: Extra safety margin around obstacles (m).
         big_m: Big-M constant for collision avoidance.
@@ -695,6 +695,9 @@ class TwoStageOPT:
                  w_a: float = None,
                  w_delta: float = None,
                  max_steer=None, w_ref=None, w_speed=None, w_smooth=None,
+                 w_x=None, w_v=None, w_y=None, w_a=None, w_delta=None,
+                 a_min=None, a_max=None, delta_max=None, jerk_max=None,
+                 v_max=None,
                  **kwargs):
         self._fps = fps
         self._dt_sim = 1.0 / fps

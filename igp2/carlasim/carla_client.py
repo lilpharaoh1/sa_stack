@@ -171,7 +171,6 @@ class CarlaSim:
             metadata=state.metadata,
         )
 
-
     def __del__(self):
         try:
             self.__clear_agents()
@@ -271,7 +270,7 @@ class CarlaSim:
             heading=state.heading,
             metadata=state.metadata,
         )
-    
+
         self.__world.tick()
         logger.info(f"Added agent {carla_agent.agent_id} (actor {carla_agent.actor_id}).")
 
@@ -549,7 +548,6 @@ class CarlaSim:
             self.__spectator.set_transform(carla.Transform(camera_location, camera_rotation))
 
     def __take_actions(self, observation: Observation):
-        commands = []
         controls = {}
         for agent_id, agent in self.agents.items():
             if agent is None:
