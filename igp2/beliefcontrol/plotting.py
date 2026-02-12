@@ -10,11 +10,12 @@ static map once and efficiently update dynamic elements each frame.
 """
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon as MplPolygon, Ellipse as MplEllipse
+from matplotlib.lines import Line2D
+from matplotlib.patches import Polygon as MplPolygon, Ellipse as MplEllipse, Patch
 
 from igp2.core.agentstate import AgentState, AgentMetadata
 from igp2.core.goal import Goal
@@ -24,6 +25,12 @@ from igp2.opendrive.map import Map
 from igp2.opendrive.plot_map import plot_map
 
 logger = logging.getLogger(__name__)
+
+# Pool sizes for pre-allocated artists
+_MAX_OBS_LINES = 12     # obstacle trajectory lines
+_MAX_ELLIPSES = 60      # collision avoidance ellipses
+_MAX_VEHICLE_PATCHES = 8  # vehicle bounding boxes
+_MAX_TRUE_FOOTPRINTS = 30  # traffic agent footprints along true trajectory
 
 
 class BeliefPlotter:
@@ -81,33 +88,20 @@ class BeliefPlotter:
                trajectory_cl: StateTrajectory,
                agent_id: int,
                step: int):
-        """Redraw dynamic content on the persistent figure.
-
-        Args:
-            state: Current ego state (for position and view centre).
-            candidates: List of sampled trajectory arrays, each (H+1, 2).
-            best_idx: Index of the selected best candidate.
-            trajectory_cl: Closed-loop history trajectory of the agent.
-            agent_id: Agent ID (for the title).
-            step: Current simulation step (for the title).
-        """
+        """Redraw dynamic content on the persistent figure."""
         if self._fig is None or not plt.fignum_exists(self._fig.number):
             self._init()
 
         ax = self._ax
 
-        # Re-centre view
         margin = 40.0
         ax.set_xlim(state.position[0] - margin, state.position[0] + margin)
         ax.set_ylim(state.position[1] - margin, state.position[1] + margin)
 
-        # Restore static background
         self._fig.canvas.restore_region(self._background)
 
-        # --- dynamic artists ---
         dynamic = []
 
-        # Candidate trajectories
         for i, traj in enumerate(candidates):
             if i == best_idx:
                 continue
@@ -116,23 +110,20 @@ class BeliefPlotter:
             ax.draw_artist(line)
             dynamic.append(line)
 
-        # Best trajectory
         if candidates:
             best = candidates[best_idx]
             line, = ax.plot(best[:, 0], best[:, 1],
-                            'r-', linewidth=2, label='Selected trajectory', zorder=5)
+                            'r-', linewidth=2, zorder=5)
             ax.draw_artist(line)
             dynamic.append(line)
 
-        # Agent history
         if len(trajectory_cl) > 1:
             hist = trajectory_cl.path
             line, = ax.plot(hist[:, 0], hist[:, 1],
-                            'b-', linewidth=2, label='History', zorder=4)
+                            'b-', linewidth=2, zorder=4)
             ax.draw_artist(line)
             dynamic.append(line)
 
-        # Current position
         dot, = ax.plot(state.position[0], state.position[1],
                        'ko', markersize=6, zorder=6)
         ax.draw_artist(dot)
@@ -140,11 +131,9 @@ class BeliefPlotter:
 
         ax.set_title(f"BeliefAgent {agent_id}  step={step}")
 
-        # Blit and flush
         self._fig.canvas.blit(ax.bbox)
         self._fig.canvas.flush_events()
 
-        # Clean up dynamic artists
         for artist in dynamic:
             artist.remove()
 
@@ -152,15 +141,10 @@ class BeliefPlotter:
 class OptimisationPlotter:
     """Persistent matplotlib figure for the constraint-optimisation policy.
 
-    Draws the static map, reference path and goal once, then efficiently
-    redraws per-frame:
-
-    * The optimised trajectory as a line.
-    * Vehicle footprint rectangles at evenly-spaced steps along the
-      trajectory, coloured to indicate whether each footprint is inside
-      the drivable area (green) or outside (red).
-    * The agent's closed-loop history.
-    * The current vehicle position and footprint.
+    Uses pre-allocated artist pools to avoid the overhead of creating and
+    destroying matplotlib objects every frame.  All dynamic artists are
+    created once in :meth:`_init`, then updated in-place each frame via
+    ``set_data`` / ``set_center`` / ``set_xy`` / ``set_visible``.
 
     Args:
         scenario_map: The road layout to draw.
@@ -187,35 +171,148 @@ class OptimisationPlotter:
         self._ax: Optional[plt.Axes] = None
         self._background = None
 
-    # ------------------------------------------------------------------
-    # Lazy initialisation
-    # ------------------------------------------------------------------
+        # Pre-allocated artist handles (created in _init)
+        self._lines: Dict[str, Line2D] = {}
+        self._obs_lines: List[Line2D] = []
+        self._ellipses: List[MplEllipse] = []
+        self._vehicle_patches: List[MplPolygon] = []
+        self._true_footprints: List[MplPolygon] = []
+        self._ego_patch: Optional[MplPolygon] = None
 
     def _init(self):
-        """Create figure, draw static content, cache background."""
+        """Create figure, draw static content, pre-allocate artists, cache background."""
         plt.ion()
         self._fig, self._ax = plt.subplots(1, 1, figsize=(12, 8))
-        plot_map(self._scenario_map, ax=self._ax, markings=True)
+        ax = self._ax
+
+        plot_map(self._scenario_map, ax=ax, markings=True)
 
         if len(self._reference_waypoints) > 0:
-            self._ax.plot(
+            ax.plot(
                 self._reference_waypoints[:, 0],
                 self._reference_waypoints[:, 1],
-                'g-', linewidth=2, label='Reference path', zorder=3,
+                'g-', linewidth=2, zorder=3,
             )
 
         if self._goal is not None:
-            self._ax.plot(*self._goal.center, 'g*', markersize=12, zorder=6)
+            ax.plot(*self._goal.center, 'g*', markersize=12, zorder=6)
 
-        self._ax.set_aspect('equal')
-        self._ax.legend(loc='upper right', fontsize=8)
+        # --- Static legend (proxy artists) ---
+        legend_handles = [
+            Line2D([0], [0], color='r', linewidth=2, label='Human NLP'),
+            Line2D([0], [0], color=(0.0, 0.7, 0.0), linewidth=2, label='True NLP'),
+            Line2D([0], [0], color='c', linewidth=1.5, linestyle='--', label='Human MILP'),
+            Line2D([0], [0], color=(0.0, 0.7, 0.0), linewidth=1.5, linestyle='--',
+                   label='True MILP'),
+            Line2D([0], [0], color='g', linewidth=2, label='Reference'),
+            Patch(facecolor=(0.0, 0.7, 0.0, 0.35), edgecolor=(0.0, 0.5, 0.0, 0.8),
+                  label='Visible agent'),
+            Patch(facecolor='none', edgecolor=(0.8, 0.2, 0.2, 0.8),
+                  hatch='///', label='Hidden agent'),
+            Patch(facecolor='none', edgecolor=(0.8, 0.2, 0.2, 0.8),
+                  hatch='...', label='Biased agent'),
+            Line2D([0], [0], color=(0.8, 0.2, 0.2), linewidth=1.5, linestyle='-.',
+                   label='Biased prediction'),
+            Line2D([0], [0], color=(0.0, 0.7, 0.0), linewidth=1.5, linestyle='--',
+                   alpha=0.5, label='True prediction'),
+            Patch(facecolor=(0.0, 0.7, 0.0, 0.15), edgecolor=(0.0, 0.6, 0.0, 0.6),
+                  linestyle='--', label='True agent ellipse'),
+        ]
+        ax.legend(handles=legend_handles, loc='upper right', fontsize=6,
+                  framealpha=0.8)
+
+        # --- Pre-allocate fixed line artists ---
+        empty = ([], [])
+        self._lines = {
+            'human_milp': ax.plot(*empty, 'c--', linewidth=1.5, zorder=4)[0],
+            'human_nlp':  ax.plot(*empty, 'r-', linewidth=2, zorder=5)[0],
+            'true_milp':  ax.plot(*empty, color=(0, 0.7, 0), ls='--', lw=1.5, zorder=4)[0],
+            'true_nlp':   ax.plot(*empty, color=(0, 0.7, 0), ls='-', lw=2, zorder=5)[0],
+            'dot':        ax.plot(*empty, 'ko', markersize=6, zorder=7)[0],
+        }
+
+        # --- Pre-allocate obstacle trajectory line pool ---
+        self._obs_lines = []
+        for _ in range(_MAX_OBS_LINES):
+            l, = ax.plot(*empty, zorder=5)
+            self._obs_lines.append(l)
+
+        # --- Pre-allocate ellipse pool ---
+        self._ellipses = []
+        for _ in range(_MAX_ELLIPSES):
+            e = MplEllipse((0, 0), 0, 0, visible=False, zorder=3)
+            ax.add_patch(e)
+            self._ellipses.append(e)
+
+        # --- Pre-allocate vehicle patch pool ---
+        self._vehicle_patches = []
+        dummy = np.zeros((4, 2))
+        for _ in range(_MAX_VEHICLE_PATCHES):
+            p = MplPolygon(dummy, closed=True, visible=False, zorder=6)
+            ax.add_patch(p)
+            self._vehicle_patches.append(p)
+
+        # --- Pre-allocate true-path footprint ellipse pool ---
+        self._true_footprints = []
+        for _ in range(_MAX_TRUE_FOOTPRINTS):
+            e = MplEllipse((0, 0), 0, 0, visible=False,
+                           facecolor=(0.0, 0.7, 0.0, 0.15),
+                           edgecolor=(0.0, 0.6, 0.0, 0.6),
+                           linewidth=0.8, linestyle='--', zorder=6)
+            ax.add_patch(e)
+            self._true_footprints.append(e)
+
+        # --- Ego footprint patch ---
+        self._ego_patch = MplPolygon(
+            dummy, closed=True, visible=False,
+            facecolor=(0.1, 0.1, 0.1, 0.3), edgecolor='black',
+            linewidth=1.5, zorder=7,
+        )
+        ax.add_patch(self._ego_patch)
+
+        ax.set_aspect('equal')
         self._fig.tight_layout()
 
         self._fig.canvas.draw()
-        self._background = self._fig.canvas.copy_from_bbox(self._ax.bbox)
+        self._background = self._fig.canvas.copy_from_bbox(ax.bbox)
 
     # ------------------------------------------------------------------
-    # Public
+
+    def _hide_all(self):
+        """Reset all pooled artists to invisible / empty."""
+        for l in self._lines.values():
+            l.set_data([], [])
+        for l in self._obs_lines:
+            l.set_data([], [])
+            l.set_visible(False)
+        for e in self._ellipses:
+            e.set_visible(False)
+        for p in self._vehicle_patches:
+            p.set_visible(False)
+        for p in self._true_footprints:
+            p.set_visible(False)
+        self._ego_patch.set_visible(False)
+
+    def _draw_all(self):
+        """Call draw_artist on every pre-allocated artist."""
+        ax = self._ax
+        for l in self._lines.values():
+            ax.draw_artist(l)
+        for l in self._obs_lines:
+            if l.get_visible():
+                ax.draw_artist(l)
+        for e in self._ellipses:
+            if e.get_visible():
+                ax.draw_artist(e)
+        for p in self._vehicle_patches:
+            if p.get_visible():
+                ax.draw_artist(p)
+        for p in self._true_footprints:
+            if p.get_visible():
+                ax.draw_artist(p)
+        if self._ego_patch.get_visible():
+            ax.draw_artist(self._ego_patch)
+
     # ------------------------------------------------------------------
 
     def update(self,
@@ -226,31 +323,20 @@ class OptimisationPlotter:
                agent_id: int,
                step: int,
                *,
+               milp_trajectory: Optional[np.ndarray] = None,
                other_agents=None,
                obstacles=None,
                frenet=None,
                ego_length: float = 4.5,
                ego_width: float = 1.8,
-               collision_margin: float = 0.5):
-        """Redraw dynamic content for one simulation step.
-
-        Args:
-            state: Current ego state (for view centre and current footprint).
-            optimised_trajectory: (H+1, 2) position-only trajectory from
-                the optimiser.
-            full_rollout: (H+1, 4) full state rollout [x, y, heading, speed]
-                from the optimiser.  If provided, vehicle footprints are
-                drawn along the trajectory.  May be None.
-            trajectory_cl: Closed-loop history trajectory of the agent.
-            agent_id: Agent ID (for the title).
-            step: Current simulation step (for the title).
-            other_agents: Dict {agent_id: AgentState} of other vehicles.
-            obstacles: List of obstacle dicts from _predict_obstacles.
-            frenet: _FrenetFrame instance for coordinate conversion.
-            ego_length: Ego vehicle length (m).
-            ego_width: Ego vehicle width (m).
-            collision_margin: Extra safety margin around obstacles (m).
-        """
+               collision_margin: float = 0.5,
+               true_rollout: Optional[np.ndarray] = None,
+               true_milp_trajectory: Optional[np.ndarray] = None,
+               all_other_agents=None,
+               agent_beliefs=None,
+               true_obstacles=None,
+               true_frenet=None):
+        """Redraw dynamic content for one simulation step."""
         if self._fig is None or not plt.fignum_exists(self._fig.number):
             self._init()
 
@@ -261,176 +347,244 @@ class OptimisationPlotter:
         ax.set_xlim(state.position[0] - margin, state.position[0] + margin)
         ax.set_ylim(state.position[1] - margin, state.position[1] + margin)
 
-        # Restore static background
+        # Restore static background and reset all pooled artists
         self._fig.canvas.restore_region(self._background)
+        self._hide_all()
 
-        dynamic = []
+        # --- Fixed lines ---
+        if milp_trajectory is not None and len(milp_trajectory) > 1:
+            self._lines['human_milp'].set_data(
+                milp_trajectory[:, 0], milp_trajectory[:, 1])
 
-        # --- Optimised trajectory line ---
         if optimised_trajectory is not None and len(optimised_trajectory) > 1:
-            line, = ax.plot(
-                optimised_trajectory[:, 0], optimised_trajectory[:, 1],
-                'r-', linewidth=2, label='Optimised trajectory', zorder=5,
-            )
-            ax.draw_artist(line)
-            dynamic.append(line)
+            self._lines['human_nlp'].set_data(
+                optimised_trajectory[:, 0], optimised_trajectory[:, 1])
 
-        # --- Vehicle footprints along trajectory ---
-        if full_rollout is not None and len(full_rollout) > 1:
-            indices = list(range(0, len(full_rollout),
-                                 self._footprint_interval))
-            # Always include the last step
-            if indices[-1] != len(full_rollout) - 1:
-                indices.append(len(full_rollout) - 1)
+        if true_milp_trajectory is not None and len(true_milp_trajectory) > 1:
+            self._lines['true_milp'].set_data(
+                true_milp_trajectory[:, 0], true_milp_trajectory[:, 1])
 
-            for idx in indices:
-                x_k, y_k, heading_k = (full_rollout[idx, 0],
-                                        full_rollout[idx, 1],
-                                        full_rollout[idx, 2])
-                corners = calculate_multiple_bboxes(
-                    [x_k], [y_k],
-                    self._metadata.length, self._metadata.width, heading_k,
-                )[0]  # (4, 2)
+        if true_rollout is not None and len(true_rollout) > 1:
+            self._lines['true_nlp'].set_data(
+                true_rollout[:, 0], true_rollout[:, 1])
 
-                # Check drivability via map — if any corner has no
-                # drivable lane nearby, colour the footprint red.
-                in_drivable = all(
-                    len(self._scenario_map.lanes_at(
-                        c, drivable_only=True, max_distance=1.0)) > 0
-                    for c in corners
-                )
-                colour = (0.2, 0.8, 0.2, 0.25) if in_drivable \
-                    else (0.9, 0.2, 0.2, 0.35)
+        self._lines['dot'].set_data([state.position[0]], [state.position[1]])
 
-                patch = MplPolygon(
-                    corners, closed=True,
-                    facecolor=colour,
-                    edgecolor=colour[:3] + (0.8,),
-                    linewidth=0.8, zorder=4,
-                )
-                ax.add_patch(patch)
-                ax.draw_artist(patch)
-                dynamic.append(patch)
+        # --- Compute footprint indices ---
+        horizon_len = len(full_rollout) if full_rollout is not None else 0
+        if horizon_len == 0 and obstacles:
+            horizon_len = len(obstacles[0].get('s', []))
 
-        # --- NLP collision avoidance ellipses ---
-        if obstacles and frenet:
+        footprint_indices = []
+        if horizon_len > 1:
+            footprint_indices = list(range(0, horizon_len, self._footprint_interval))
+            if footprint_indices[-1] != horizon_len - 1:
+                footprint_indices.append(horizon_len - 1)
+
+        # --- Merge human + true obstacle predictions ---
+        merged = {}  # aid -> (obs, obs_frenet, tag, true_obs_or_None)
+        true_obs_by_aid = {}
+        if true_obstacles:
+            for obs in true_obstacles:
+                true_obs_by_aid[obs.get('agent_id')] = obs
+        if obstacles:
             for obs in obstacles:
-                # Project obstacle body-frame dimensions into Frenet (s, d)
-                obs_half_L = obs['length'] / 2.0
-                obs_half_W = obs['width'] / 2.0
-                obs_s0 = float(obs['s'][0])
-                _, _, _, road_angle_obs = frenet._interpolate(obs_s0)
-                dh = obs.get('heading', road_angle_obs) - road_angle_obs
-                rx = abs(obs_half_L * np.cos(dh)) + abs(obs_half_W * np.sin(dh)) + collision_margin
-                ry = abs(obs_half_L * np.sin(dh)) + abs(obs_half_W * np.cos(dh)) + collision_margin
+                aid = obs.get('agent_id')
+                belief = agent_beliefs.get(aid) if agent_beliefs and aid is not None else None
+                if belief is not None and belief.velocity_error != 0.0:
+                    merged[aid] = (obs, frenet, 'biased', true_obs_by_aid.get(aid))
+                else:
+                    merged[aid] = (obs, frenet, 'normal', None)
+        for aid, obs in true_obs_by_aid.items():
+            if aid not in merged:
+                merged[aid] = (obs, true_frenet or frenet, 'hidden', None)
 
+        # --- Collision avoidance ellipses ---
+        ei = 0  # ellipse pool index
+        if merged and footprint_indices:
+            for aid, (obs, obs_frenet, tag, _) in merged.items():
+                if obs_frenet is None:
+                    continue
+                half_L = obs['length'] / 2.0 + collision_margin
+                half_W = obs['width'] / 2.0 + collision_margin
+                world_pts = obs.get('world_positions')
                 s_arr = obs['s']
-                d_arr = obs['d']
                 n_steps = len(s_arr)
-                ellipse_indices = list(range(0, n_steps,
-                                             self._footprint_interval))
-                if ellipse_indices[-1] != n_steps - 1:
-                    ellipse_indices.append(n_steps - 1)
+                headings = obs.get('headings')
 
-                for idx in ellipse_indices:
-                    # Convert obstacle Frenet position to world
-                    w = frenet.frenet_to_world(float(s_arr[idx]),
-                                               float(d_arr[idx]))
-                    # Get road tangent angle at this s position
-                    _, _, _, road_angle = frenet._interpolate(
-                        float(s_arr[idx]))
+                if tag in ('hidden', 'biased'):
+                    fc = (1, 1, 1, 0)
+                    ec = (0.8, 0.2, 0.2, 0.5)
+                    ls = ':'
+                else:
+                    if obs.get('uses_planned_trajectory', False):
+                        fc = (0, 0.7, 0, 0.12)
+                        ec = (0, 0.5, 0, 0.5)
+                    else:
+                        fc = (1, 0.6, 0, 0.12)
+                        ec = (0.8, 0.4, 0, 0.5)
+                    ls = '--'
 
-                    ellipse = MplEllipse(
-                        xy=(w['x'], w['y']),
-                        width=2 * rx, height=2 * ry,
-                        angle=np.degrees(road_angle),
-                        facecolor=(1.0, 0.6, 0.0, 0.12),
-                        edgecolor=(0.8, 0.4, 0.0, 0.5),
-                        linestyle='--', linewidth=0.8,
-                        zorder=3,
-                    )
-                    ax.add_patch(ellipse)
-                    ax.draw_artist(ellipse)
-                    dynamic.append(ellipse)
+                for idx in footprint_indices:
+                    if idx >= n_steps or ei >= _MAX_ELLIPSES:
+                        break
+                    if world_pts is not None and idx < len(world_pts):
+                        cx, cy = world_pts[idx]
+                    else:
+                        w = obs_frenet.frenet_to_world(
+                            float(s_arr[idx]), float(obs['d'][idx]))
+                        cx, cy = w['x'], w['y']
 
-        # --- Predicted obstacle trajectories ---
-        if obstacles and frenet:
-            for obs in obstacles:
-                world_pts = frenet.frenet_to_world_batch(obs['s'], obs['d'])
-                line, = ax.plot(
-                    world_pts[:, 0], world_pts[:, 1],
-                    color=(0.8, 0.4, 0.0), linestyle='--',
-                    linewidth=1.0, alpha=0.7, zorder=5,
-                )
-                ax.draw_artist(line)
-                dynamic.append(line)
+                    if headings is not None and idx < len(headings):
+                        angle = headings[idx]
+                    else:
+                        _, _, _, angle = obs_frenet._interpolate(float(s_arr[idx]))
 
-        # --- True obstacle positions ---
-        if other_agents:
-            for aid, agent_state in other_agents.items():
-                obs_meta = getattr(agent_state, 'metadata', None)
-                obs_length = obs_meta.length if obs_meta else 4.5
-                obs_width = obs_meta.width if obs_meta else 1.8
-                is_static = (obs_meta is not None
-                             and getattr(obs_meta, 'agent_type', '') == 'static')
+                    e = self._ellipses[ei]
+                    e.set_center((cx, cy))
+                    e.width = 2 * half_L
+                    e.height = 2 * half_W
+                    e.angle = np.degrees(angle)
+                    e.set_facecolor(fc)
+                    e.set_edgecolor(ec)
+                    e.set_linestyle(ls)
+                    e.set_linewidth(0.8)
+                    e.set_visible(True)
+                    ei += 1
+
+        # --- Obstacle trajectory lines ---
+        li = 0  # obs line pool index
+        if merged:
+            for aid, (obs, obs_frenet, tag, true_obs) in merged.items():
+                # For biased agents, draw true trajectory underneath first
+                if tag == 'biased' and true_obs is not None and li < _MAX_OBS_LINES:
+                    true_pts = self._get_world_pts(true_obs, true_frenet or obs_frenet)
+                    if true_pts is not None:
+                        if horizon_len > 0 and len(true_pts) > horizon_len:
+                            true_pts = true_pts[:horizon_len]
+                        l = self._obs_lines[li]
+                        l.set_data(true_pts[:, 0], true_pts[:, 1])
+                        l.set_color((0, 0.7, 0))
+                        l.set_linestyle('--')
+                        l.set_linewidth(1.5)
+                        l.set_alpha(0.5)
+                        l.set_visible(True)
+                        li += 1
+
+                # Main trajectory
+                if li >= _MAX_OBS_LINES:
+                    break
+                world_pts = self._get_world_pts(obs, obs_frenet)
+                if world_pts is None:
+                    continue
+                if horizon_len > 0 and len(world_pts) > horizon_len:
+                    world_pts = world_pts[:horizon_len]
+
+                if tag in ('hidden', 'biased'):
+                    color, ls, lw, alpha = (0.8, 0.2, 0.2), \
+                        (':' if tag == 'hidden' else '-.'), 1.5, 1.0
+                else:
+                    if obs.get('uses_planned_trajectory', False):
+                        color, ls, lw = (0, 0.7, 0), '-', 1.5
+                    else:
+                        color, ls, lw = (0.8, 0.4, 0), '--', 1.0
+                    alpha = 0.7
+
+                l = self._obs_lines[li]
+                l.set_data(world_pts[:, 0], world_pts[:, 1])
+                l.set_color(color)
+                l.set_linestyle(ls)
+                l.set_linewidth(lw)
+                l.set_alpha(alpha)
+                l.set_visible(True)
+                li += 1
+
+        # --- Vehicle bounding boxes ---
+        draw_agents = all_other_agents if all_other_agents else other_agents
+        pi = 0  # patch pool index
+        if draw_agents:
+            for aid, agent_state in draw_agents.items():
+                if pi >= _MAX_VEHICLE_PATCHES:
+                    break
+                meta = getattr(agent_state, 'metadata', None)
+                vl = meta.length if meta else 4.5
+                vw = meta.width if meta else 1.8
+                is_static = (meta is not None
+                             and getattr(meta, 'agent_type', '') == 'static')
+
+                belief = agent_beliefs.get(aid) if agent_beliefs else None
+                has_effect = (belief is not None
+                              and (not belief.visible or belief.velocity_error != 0.0))
 
                 corners = calculate_multiple_bboxes(
                     [agent_state.position[0]], [agent_state.position[1]],
-                    obs_length, obs_width, agent_state.heading,
+                    vl, vw, agent_state.heading,
                 )[0]
 
-                colour = (0.6, 0.6, 0.6, 0.4) if is_static \
-                    else (0.0, 0.8, 0.8, 0.35)
-                edge = (0.4, 0.4, 0.4, 0.8) if is_static \
-                    else (0.0, 0.6, 0.6, 0.8)
+                if is_static:
+                    fc, ec, hatch, lw = (0.6, 0.6, 0.6, 0.4), (0.4, 0.4, 0.4, 0.8), '', 1.0
+                elif not has_effect:
+                    fc, ec, hatch, lw = (0, 0.7, 0, 0.35), (0, 0.5, 0, 0.8), '', 1.0
+                elif not belief.visible:
+                    fc, ec, hatch, lw = (1, 1, 1, 0), (0.8, 0.2, 0.2, 0.8), '///', 1.5
+                else:
+                    fc, ec, hatch, lw = (1, 1, 1, 0), (0.8, 0.2, 0.2, 0.8), '...', 1.5
 
-                patch = MplPolygon(
-                    corners, closed=True,
-                    facecolor=colour, edgecolor=edge,
-                    linewidth=1.0, zorder=6,
-                )
-                ax.add_patch(patch)
-                ax.draw_artist(patch)
-                dynamic.append(patch)
+                p = self._vehicle_patches[pi]
+                p.set_xy(corners)
+                p.set_facecolor(fc)
+                p.set_edgecolor(ec)
+                p.set_hatch(hatch)
+                p.set_linewidth(lw)
+                p.set_visible(True)
+                pi += 1
 
-        # --- Agent history ---
-        if trajectory_cl is not None and len(trajectory_cl) > 1:
-            hist = trajectory_cl.path
-            line, = ax.plot(
-                hist[:, 0], hist[:, 1],
-                'b-', linewidth=2, label='History', zorder=4,
-            )
-            ax.draw_artist(line)
-            dynamic.append(line)
+        # --- True-path ellipse footprints for biased traffic agents ---
+        fi = 0  # true footprint pool index
+        if merged and footprint_indices:
+            for aid, (obs, obs_frenet, tag, true_obs) in merged.items():
+                if tag != 'biased' or true_obs is None:
+                    continue
+                true_pts = self._get_world_pts(true_obs, true_frenet or obs_frenet)
+                if true_pts is None:
+                    continue
+                true_headings = true_obs.get('headings')
+                half_L = true_obs['length'] / 2.0 + collision_margin
+                half_W = true_obs['width'] / 2.0 + collision_margin
+                n_pts = len(true_pts)
+                for idx in footprint_indices:
+                    if idx >= n_pts or fi >= _MAX_TRUE_FOOTPRINTS:
+                        break
+                    cx, cy = true_pts[idx]
+                    angle = true_headings[idx] if true_headings is not None and idx < len(true_headings) else 0.0
+                    e = self._true_footprints[fi]
+                    e.set_center((cx, cy))
+                    e.width = 2 * half_L
+                    e.height = 2 * half_W
+                    e.angle = np.degrees(angle)
+                    e.set_visible(True)
+                    fi += 1
 
-        # --- Current position + footprint ---
-        dot, = ax.plot(
-            state.position[0], state.position[1],
-            'ko', markersize=6, zorder=7,
-        )
-        ax.draw_artist(dot)
-        dynamic.append(dot)
-
+        # --- Ego footprint ---
         cur_corners = calculate_multiple_bboxes(
             [state.position[0]], [state.position[1]],
             self._metadata.length, self._metadata.width, state.heading,
         )[0]
-        cur_patch = MplPolygon(
-            cur_corners, closed=True,
-            facecolor=(0.1, 0.1, 0.1, 0.3),
-            edgecolor='black', linewidth=1.5, zorder=7,
-        )
-        ax.add_patch(cur_patch)
-        ax.draw_artist(cur_patch)
-        dynamic.append(cur_patch)
+        self._ego_patch.set_xy(cur_corners)
+        self._ego_patch.set_visible(True)
 
-        ax.set_title(
-            f"TwoStageOPT  Agent {agent_id}  step={step}")
+        ax.set_title(f"BeliefAgent {agent_id}  step={step}")
 
-        # Blit and flush
+        # Draw all pre-allocated artists and blit
+        self._draw_all()
         self._fig.canvas.blit(ax.bbox)
         self._fig.canvas.flush_events()
 
-        # Clean up dynamic artists
-        for artist in dynamic:
-            artist.remove()
+    @staticmethod
+    def _get_world_pts(obs, obs_frenet):
+        """Extract world-coordinate positions from an obstacle dict."""
+        if 'world_positions' in obs:
+            return obs['world_positions']
+        elif obs_frenet is not None:
+            return obs_frenet.frenet_to_world_batch(obs['s'], obs['d'])
+        return None

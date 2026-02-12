@@ -285,6 +285,7 @@ class CarlaSim:
         actor.destroy()
         self.agents[agent_id].agent.alive = False
         self.agents[agent_id] = None
+        self.__kinematic_states.pop(agent_id, None)
 
     def add_static_object(self,
                           position: tuple,
@@ -564,26 +565,25 @@ class CarlaSim:
                 self.__traffic_manager.remove_agent(agent, self)
                 continue
 
-            controls[agent_id] = control
 
-            if True:
-                # Step bicycle model and teleport CARLA actor
-                action = agent.last_action
-                cur_state = self.__kinematic_states[agent_id]
-                wheelbase = agent.agent.metadata.wheelbase
-                dt = 1.0 / self.__fps
-                new_state = self._bicycle_step(cur_state, action, dt, wheelbase)
-                self.__kinematic_states[agent_id] = new_state
+            # Step bicycle model and teleport CARLA actor
+            action = agent.last_action
+            cur_state = self.__kinematic_states[agent_id]
+            wheelbase = agent.agent.metadata.wheelbase
+            dt = 1.0 / self.__fps
+            new_state = self._bicycle_step(cur_state, action, dt, wheelbase)
+            self.__kinematic_states[agent_id] = new_state
 
-                cur_z = agent.actor.get_transform().location.z
-                new_transform = Transform(
-                    Location(x=new_state.position[0], y=-new_state.position[1], z=cur_z),
-                    Rotation(yaw=np.rad2deg(-new_state.heading))
-                )
-                agent.actor.set_transform(new_transform)
-            else:
-                command = carla.command.ApplyVehicleControl(agent.actor, control)
-                commands.append(command)
+            cur_z = agent.actor.get_transform().location.z
+            new_transform = Transform(
+                Location(x=new_state.position[0], y=-new_state.position[1], z=cur_z),
+                Rotation(yaw=np.rad2deg(-new_state.heading))
+            )
+            agent.actor.set_transform(new_transform)
+
+        #     controls[agent_id] = control
+        #     command = carla.command.ApplyVehicleControl(agent.actor, control)
+        #     commands.append(command)
 
         # self.__client.apply_batch_sync(commands)
 

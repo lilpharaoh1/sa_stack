@@ -94,7 +94,8 @@ class TrafficAgent(MacroAgent):
                                         observation.frame,
                                         self._goal,
                                         observation.scenario_map,
-                                        open_loop=True)
+                                        open_loop=True,
+                                        fps=self.fps)
 
         if len(actions) == 0:
             print("len actions == 0 so failing due to astar")

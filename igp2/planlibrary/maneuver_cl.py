@@ -49,7 +49,7 @@ class ClosedLoopManeuver(Maneuver, abc.ABC):
 class WaypointManeuver(ClosedLoopManeuver, abc.ABC):
     WAYPOINT_MARGIN = 1
     COMPLETION_MARGIN = 0.5
-    LATERAL_ARGS = {'K_P': 1.95, 'K_I': 0.2, 'K_D': 0.0}
+    LATERAL_ARGS = {'K_P': 1.0, 'K_I': 0.2, 'K_D': 0.05}
     LONGITUDINAL_ARGS = {'K_P': 1.0, 'K_I': 0.05, 'K_D': 0.0}
     ACC_ARGS = {'a_a': 5, 'b_a': 5, 'delta': 4., 's_0': 2., 'T_a': 1.5}
 
@@ -69,16 +69,21 @@ class WaypointManeuver(ClosedLoopManeuver, abc.ABC):
         self._controller = PIDController(1 / self.config.fps, self.LATERAL_ARGS, self.LONGITUDINAL_ARGS)
         self._acc = AdaptiveCruiseControl(1 / self.config.fps, **self.ACC_ARGS)
         self._open_loop = False  # When True, skip reactive behaviors (ACC, collision avoidance, yielding)
+        # Scale waypoint margin so the temporal look-ahead stays consistent
+        # across frame rates. At 20 fps with margin=1.0m the PID steers
+        # toward a point ~4 frames ahead; keep that ratio at other rates.
+        self._waypoint_margin = self.WAYPOINT_MARGIN * (20.0 / self.config.fps)
 
     def get_target_waypoint(self, state: AgentState):
         """ Get the index of the target waypoint in the reference trajectory"""
         dist = np.linalg.norm(self.trajectory.path - state.position, axis=1)
         closest_idx = np.argmin(dist)
-        if dist[-1] < self.WAYPOINT_MARGIN:
+        margin = self._waypoint_margin
+        if dist[-1] < margin:
             target_wp_idx = len(self.trajectory.path) - 1
         else:
             far_waypoints_dist = dist[closest_idx:]
-            target_wp_idx = closest_idx + np.argmax(far_waypoints_dist >= self.WAYPOINT_MARGIN)
+            target_wp_idx = closest_idx + np.argmax(far_waypoints_dist >= margin)
         return target_wp_idx, closest_idx
 
     def next_action(self, observation: Observation) -> Action:

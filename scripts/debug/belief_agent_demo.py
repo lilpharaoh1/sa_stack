@@ -16,7 +16,8 @@ import os
 import logging
 import argparse
 import json
-import time
+
+import time as _time
 
 import carla
 import numpy as np
@@ -77,6 +78,103 @@ def generate_random_frame(ego: int,
     return ret
 
 
+class StepDiagnostics:
+    """Collects per-timestep diagnostic data from the BeliefAgent and scene.
+
+    Stores information that will later be used for analysis / belief-conditioned
+    planning.  For now only the goal-reached check is acted upon; everything
+    else is silently recorded.
+    """
+
+    def __init__(self, ego_agent, ego_goal):
+        self.ego_agent = ego_agent
+        self.ego_goal = ego_goal
+        # Accumulated history (one entry per step)
+        self.history: List[Dict] = []
+
+    def check(self, step: int, frame: Dict) -> Dict:
+        """Run all per-step checks and return the diagnostics dict.
+
+        Args:
+            step: Current simulation step index.
+            frame: Current observation frame with all agent states.
+
+        Returns:
+            Dict with the diagnostics for this step. The same dict is also
+            appended to ``self.history``.
+        """
+        ego_id = self.ego_agent.agent_id
+        ego_state = frame.get(ego_id) if frame else None
+
+        human_policy = getattr(self.ego_agent, '_human_policy', None)
+        true_policy = getattr(self.ego_agent, '_true_policy', None)
+
+        # --- Human (belief) policy outputs ---
+        human_rollout = getattr(human_policy, 'last_rollout', None) if human_policy else None
+        human_milp_rollout = getattr(human_policy, 'last_milp_rollout', None) if human_policy else None
+        human_nlp_converged = None
+        if human_policy is not None:
+            human_nlp_converged = getattr(human_policy, '_prev_nlp_states', None) is not None
+        human_obstacles = getattr(human_policy, 'last_obstacles', None) if human_policy else None
+        human_other_agents = getattr(human_policy, 'last_other_agents', None) if human_policy else None
+
+        # --- True (ground-truth) policy outputs ---
+        true_rollout = getattr(true_policy, 'last_rollout', None) if true_policy else None
+        true_milp_rollout = getattr(true_policy, 'last_milp_rollout', None) if true_policy else None
+        true_nlp_converged = None
+        if true_policy is not None:
+            true_nlp_converged = getattr(true_policy, '_prev_nlp_states', None) is not None
+        true_obstacles = getattr(true_policy, 'last_obstacles', None) if true_policy else None
+        true_other_agents = getattr(true_policy, 'last_other_agents', None) if true_policy else None
+
+        # --- Predicted trajectories ---
+        human_trajectories = dict(self.ego_agent._human_agent_trajectories)
+        true_trajectories = dict(self.ego_agent._true_agent_trajectories)
+
+        # --- Dynamic agent states (from frame, excluding ego and static) ---
+        dynamic_agents = {aid: s for aid, s in frame.items()
+                          if aid != ego_id and aid >= 0} if frame else {}
+
+        # --- Static obstacles (negative IDs in frame) ---
+        static_obstacles = {aid: s for aid, s in frame.items()
+                            if aid < 0} if frame else {}
+
+        # --- Goal reached? Based on TRUE policy rollout ---
+        goal_reached = False
+        if self.ego_goal is not None and true_rollout is not None:
+            for pt in true_rollout[:, :2]:
+                if self.ego_goal.reached(pt):
+                    goal_reached = True
+                    break
+
+        record = {
+            "step": step,
+            "ego_position": np.array(ego_state.position) if ego_state else None,
+            "ego_speed": float(ego_state.speed) if ego_state else None,
+            "ego_heading": float(ego_state.heading) if ego_state else None,
+            # Human (belief) policy
+            "human_rollout": human_rollout,
+            "human_milp_rollout": human_milp_rollout,
+            "human_nlp_converged": human_nlp_converged,
+            "human_obstacles": human_obstacles,
+            "human_other_agents": human_other_agents,
+            "human_trajectories": human_trajectories,
+            # True (ground-truth) policy
+            "true_rollout": true_rollout,
+            "true_milp_rollout": true_milp_rollout,
+            "true_nlp_converged": true_nlp_converged,
+            "true_obstacles": true_obstacles,
+            "true_other_agents": true_other_agents,
+            "true_trajectories": true_trajectories,
+            # Scene
+            "dynamic_agents": dynamic_agents,
+            "static_obstacles": static_obstacles,
+            "goal_reached": goal_reached,
+        }
+        self.history.append(record)
+        return record
+
+
 def create_agent(agent_config, frame, fps, scenario_map):
     """Create an agent from its config dict."""
     base = {
@@ -89,9 +187,13 @@ def create_agent(agent_config, frame, fps, scenario_map):
     agent_type = agent_config["type"]
 
     if agent_type == "BeliefAgent":
-        return ip.BeliefAgent(**base, scenario_map=scenario_map)
+        agent_beliefs = agent_config.get("beliefs", None)
+        logger.info("create_agent: BeliefAgent beliefs from config = %s", agent_beliefs)
+        return ip.BeliefAgent(**base, scenario_map=scenario_map,
+                              agent_beliefs=agent_beliefs)
     elif agent_type == "TrafficAgent":
-        return ip.TrafficAgent(**base)
+        open_loop = agent_config.get("open_loop", False)
+        return ip.TrafficAgent(**base, open_loop=open_loop)
     else:
         raise ValueError(f"Unsupported agent type: {agent_type}")
 
@@ -113,6 +215,7 @@ def main():
         config = json.load(f)
 
     fps = config["scenario"].get("fps", 20)
+    print("\n\n\n\n\nUsing fps:", fps)
     ip.Maneuver.MAX_SPEED = config["scenario"].get("max_speed", 10.0)
 
     scenario_xodr = config["scenario"]["map_path"]
@@ -167,15 +270,59 @@ def main():
     logger.info("Starting CARLA simulation (%d steps, ego=%d as BeliefAgent)",
                 args.steps, ego_id)
 
+    ego_agent = agents.get(ego_id)
+    ego_goal = ego_agent.goal if ego_agent is not None else None
+
+    # Tell the ego agent about the other agents so it can predict their trajectories
+    if ego_agent is not None:
+        ego_agent.set_agents(agents)
+
+    # Per-step monitoring
+    diagnostics = StepDiagnostics(ego_agent, ego_goal) if ego_agent is not None else None
+
     for t in range(args.steps):
+        t_step_start = _time.perf_counter()
         obs, acts = carla_sim.step()
+        carla_step_total = _time.perf_counter() - t_step_start
 
-        ego_agent = agents.get(ego_id)
-        if ego_agent is not None and hasattr(ego_agent, "beliefs") and ego_agent.beliefs:
+        current_frame = obs.frame if obs is not None else None
+
+        # Run diagnostics
+        if diagnostics is not None and current_frame is not None:
+            record = diagnostics.check(t, current_frame)
+
+            if record["goal_reached"]:
+                print(f"\n{'='*60}")
+                print(f"  SCENARIO SOLVED at step {t}")
+                print(f"  Ego position: {record['ego_position']}")
+                print(f"  Goal: {ego_goal}")
+                print(f"{'='*60}\n")
+
+                # Remove all agents from CARLA
+                for aid in list(carla_sim.agents.keys()):
+                    if carla_sim.agents[aid] is not None:
+                        carla_sim.remove_agent(aid)
+                break
+
+        # Print per-step timing breakdown
+        if ego_agent is not None and hasattr(ego_agent, 'last_step_timing'):
+            st = ego_agent.last_step_timing
+            if st:
+                agent_total = sum(st.values())
+                carla_overhead = carla_step_total - agent_total
+                parts = "  ".join(f"{k}={v*1000:.1f}ms" for k, v in st.items())
+                print(f"[t={t:3d}] total={carla_step_total*1000:.0f}ms  "
+                      f"carla_overhead={carla_overhead*1000:.0f}ms  {parts}")
+
+        if ego_agent is not None and hasattr(ego_agent, "agent_beliefs") and ego_agent.agent_beliefs:
             if t % 20 == 0:
-                logger.info("t=%d  beliefs=%s", t, ego_agent.beliefs)
+                logger.info("t=%d  beliefs=%s", t,
+                            {aid: (b.visible, b.velocity_error)
+                             for aid, b in ego_agent.agent_beliefs.items()})
 
-        # time.sleep(0.05)
+    else:
+        # Loop completed without reaching goal
+        print(f"\nScenario NOT solved within {args.steps} steps.")
 
     logger.info("Done.")
 
