@@ -850,9 +850,6 @@ class TwoStageOPT:
                             target_speed=self._target_speed)
             return action, [np.array([state.position])], 0
 
-        if self._step_count > 22:
-            time.sleep(3)
-
         # Prepare NLP warm-start from MILP solution
         warm_states, warm_controls = self._milp_to_nlp_warmstart(
             milp_states, frenet_state)

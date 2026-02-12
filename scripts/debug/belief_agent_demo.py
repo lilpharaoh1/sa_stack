@@ -17,6 +17,8 @@ import logging
 import argparse
 import json
 
+import time as _time
+
 import carla
 import numpy as np
 from shapely.geometry import Polygon
@@ -279,7 +281,9 @@ def main():
     diagnostics = StepDiagnostics(ego_agent, ego_goal) if ego_agent is not None else None
 
     for t in range(args.steps):
+        t_step_start = _time.perf_counter()
         obs, acts = carla_sim.step()
+        carla_step_total = _time.perf_counter() - t_step_start
 
         current_frame = obs.frame if obs is not None else None
 
@@ -299,6 +303,16 @@ def main():
                     if carla_sim.agents[aid] is not None:
                         carla_sim.remove_agent(aid)
                 break
+
+        # Print per-step timing breakdown
+        if ego_agent is not None and hasattr(ego_agent, 'last_step_timing'):
+            st = ego_agent.last_step_timing
+            if st:
+                agent_total = sum(st.values())
+                carla_overhead = carla_step_total - agent_total
+                parts = "  ".join(f"{k}={v*1000:.1f}ms" for k, v in st.items())
+                print(f"[t={t:3d}] total={carla_step_total*1000:.0f}ms  "
+                      f"carla_overhead={carla_overhead*1000:.0f}ms  {parts}")
 
         if ego_agent is not None and hasattr(ego_agent, "agent_beliefs") and ego_agent.agent_beliefs:
             if t % 20 == 0:

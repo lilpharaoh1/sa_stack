@@ -10,6 +10,7 @@ Extends Agent directly with:
 """
 
 import logging
+import time as _time
 from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple, Optional
 
@@ -307,6 +308,9 @@ class BeliefAgent(Agent):
             policy_type, fps, scenario_map, **policy_kwargs,
         )
 
+        # Per-step timing breakdown (seconds)
+        self.last_step_timing: Dict[str, float] = {}
+
         # Build the matching plotter
         self._plotter = None
         if scenario_map is not None and plot_interval > 0:
@@ -522,6 +526,7 @@ class BeliefAgent(Agent):
                              if aid != self.agent_id}
 
         # --- Run human (belief) policy ---
+        t0 = _time.perf_counter()
         if isinstance(self._human_policy, TwoStageOPT):
             human_action, human_candidates, human_best = self._human_policy.select_action(
                 ego_state,
@@ -529,8 +534,10 @@ class BeliefAgent(Agent):
                 agent_trajectories=self._human_agent_trajectories or None)
         else:
             human_action, human_candidates, human_best = self._human_policy.select_action(ego_state)
+        human_policy_time = _time.perf_counter() - t0
 
         # --- Run true (ground-truth) policy ---
+        t0 = _time.perf_counter()
         if isinstance(self._true_policy, TwoStageOPT):
             true_action, true_candidates, true_best = self._true_policy.select_action(
                 ego_state,
@@ -538,12 +545,21 @@ class BeliefAgent(Agent):
                 agent_trajectories=self._true_agent_trajectories or None)
         else:
             true_action, true_candidates, true_best = self._true_policy.select_action(ego_state)
+        true_policy_time = _time.perf_counter() - t0
 
         # --- Plot if enabled ---
+        t0 = _time.perf_counter()
         if (self._plotter is not None
                 and self._plot_interval > 0
                 and self._step_count % self._plot_interval == 0):
             self._plot(ego_state, human_candidates, human_best)
+        plot_time = _time.perf_counter() - t0
+
+        self.last_step_timing = {
+            'human_policy': human_policy_time,
+            'true_policy': true_policy_time,
+            'plotting': plot_time,
+        }
 
         return human_action
 
@@ -621,16 +637,27 @@ class BeliefAgent(Agent):
             pass
 
         self._step_count += 1
+        timing: Dict[str, float] = {}
 
         # Predict trajectories for both policies
         if self._other_agents:
+            t0 = _time.perf_counter()
             self._human_agent_trajectories = self._predict_agent_trajectories(
                 observation.frame, use_beliefs=True)
+            timing['human_predict'] = _time.perf_counter() - t0
+
+            t0 = _time.perf_counter()
             self._true_agent_trajectories = self._predict_agent_trajectories(
                 observation.frame, use_beliefs=False)
+            timing['true_predict'] = _time.perf_counter() - t0
 
         self.update_beliefs(observation)
-        return self.policy(observation)
+        action = self.policy(observation)
+
+        # Merge policy/plot timings set by policy()
+        timing.update(self.last_step_timing)
+        self.last_step_timing = timing
+        return action
 
     def reset(self):
         """Reset agent to initialisation defaults."""
@@ -640,5 +667,6 @@ class BeliefAgent(Agent):
         self._human_agent_trajectories = {}
         self._true_agent_trajectories = {}
         self._step_count = 0
+        self.last_step_timing = {}
         self._human_policy.reset()
         self._true_policy.reset()

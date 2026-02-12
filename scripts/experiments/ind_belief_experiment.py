@@ -341,8 +341,22 @@ def main():
     t0 = time.time()
 
     for t in range(args.steps):
+        t_step_start = time.perf_counter()
         obs, acts = carla_sim.step()
+        carla_step_total = time.perf_counter() - t_step_start
+
         current_frame = obs.frame if obs is not None else None
+
+        # Print per-step timing breakdown
+        if ego_agent is not None and hasattr(ego_agent, 'last_step_timing'):
+            st = ego_agent.last_step_timing
+            if st:
+                step_num = getattr(ego_agent, '_step_count', t)
+                agent_total = sum(st.values())
+                carla_overhead = carla_step_total - agent_total
+                parts = "  ".join(f"{k}={v*1000:.1f}ms" for k, v in st.items())
+                print(f"[Step {step_num:4d}] total={carla_step_total*1000:.0f}ms  "
+                      f"carla_overhead={carla_overhead*1000:.0f}ms  {parts}")
 
         # Collect diagnostics
         if ego_agent is not None and current_frame is not None:

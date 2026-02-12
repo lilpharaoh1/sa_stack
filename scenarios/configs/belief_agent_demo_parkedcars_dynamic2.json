@@ -37,9 +37,8 @@
         }
       },
       "beliefs": {
-        "1": {"visible": true, "velocity_error": 0.0},
-        "2": {"visible": false, "velocity_error": 0.0},
-        "3": {"visible": true, "velocity_error": 0.0}
+        "1": {"visible": false, "velocity_error": 0.0},
+        "2": {"visible": true, "velocity_error": 0.0}
       }
     },
     {
@@ -71,33 +70,6 @@
     },
     {
       "id": 2,
-      "type": "TrafficAgent",
-      "spawn": {
-        "box": {
-          "center": [60, -2.5],
-          "length": 3.5,
-          "width": 10.0,
-          "heading": 0.0
-        },
-        "velocity": [
-          5.0,
-          10.0
-        ]
-      },
-      "goal": {
-        "box": {
-          "center": [
-            200.0,
-            -2.5
-          ],
-          "length": 5,
-          "width": 7,
-          "heading": 0.0
-        }
-      }
-    },
-    {
-      "id": 3,
       "type": "TrafficAgent",
       "spawn": {
         "box": {
