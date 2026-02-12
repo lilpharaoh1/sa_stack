@@ -72,6 +72,24 @@ class StepRecord:
     # Completion (based on true policy)
     goal_reached: bool
 
+    # Human policy constraint diagnostics (from TwoStageOPT._analyse_constraints)
+    #   - nlp_ok: whether the NLP solver converged
+    #   - velocity_violated: speed outside [v_min, v_max]
+    #   - acceleration_violated: acceleration outside [a_min, a_max]
+    #   - steering_violated: steering angle exceeds delta_max
+    #   - jerk_violated: jerk exceeds jerk_max
+    #   - steer_rate_violated: steering rate exceeds delta_rate_max
+    #   - road_boundary_violations: number of corner-timestep road violations
+    #   - collision_violations: number of corner-timestep collision violations
+    human_diag_nlp_ok: Optional[bool] = None
+    human_diag_velocity_violated: Optional[bool] = None
+    human_diag_acceleration_violated: Optional[bool] = None
+    human_diag_steering_violated: Optional[bool] = None
+    human_diag_jerk_violated: Optional[bool] = None
+    human_diag_steer_rate_violated: Optional[bool] = None
+    human_diag_road_violations: int = 0
+    human_diag_collision_violations: int = 0
+
 
 @dataclass
 class ExperimentResult:
@@ -89,6 +107,11 @@ class ExperimentResult:
     solved_step: Optional[int] = None
     total_steps: int = 0
     wall_time_seconds: float = 0.0
+
+    # Failure outcome (human policy optimisation failure)
+    failed: bool = False
+    failure_step: Optional[int] = None
+    failure_reason: Optional[str] = None
 
     # Per-step data
     steps: List[StepRecord] = field(default_factory=list)
@@ -210,6 +233,9 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame) -> StepRecord
                 goal_reached = True
                 break
 
+    # Human policy constraint diagnostics
+    human_diag = getattr(human_policy, 'last_diagnostics', None) if human_policy else None
+
     return StepRecord(
         step=step,
         wall_time=time.time() - t0,
@@ -231,6 +257,15 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame) -> StepRecord
         dynamic_agents=dynamic_agents,
         static_obstacles=static_obstacles,
         goal_reached=goal_reached,
+        # Constraint diagnostics from human policy
+        human_diag_nlp_ok=human_diag.get('nlp_ok') if human_diag else None,
+        human_diag_velocity_violated=human_diag.get('velocity_violated') if human_diag else None,
+        human_diag_acceleration_violated=human_diag.get('acceleration_violated') if human_diag else None,
+        human_diag_steering_violated=human_diag.get('steering_violated') if human_diag else None,
+        human_diag_jerk_violated=human_diag.get('jerk_violated') if human_diag else None,
+        human_diag_steer_rate_violated=human_diag.get('steer_rate_violated') if human_diag else None,
+        human_diag_road_violations=len(human_diag.get('road_boundary_violations', [])) if human_diag else 0,
+        human_diag_collision_violations=len(human_diag.get('collision_violations', [])) if human_diag else 0,
     )
 
 
@@ -381,6 +416,42 @@ def main():
                     if carla_sim.agents[aid] is not None:
                         carla_sim.remove_agent(aid)
                 break
+
+            # Stop if human policy optimisation failed
+            if record.human_diag_nlp_ok is not None and not record.human_diag_nlp_ok:
+                result.failed = True
+                result.failure_step = t
+                result.wall_time_seconds = time.time() - t0
+
+                # Build failure reason — one entry per violated constraint type
+                reasons = []
+                if record.human_diag_collision_violations > 0:
+                    reasons.append("collision avoidance infeasible")
+                if record.human_diag_road_violations > 0:
+                    reasons.append("road boundary infeasible")
+                if record.human_diag_velocity_violated:
+                    reasons.append("velocity bounds infeasible")
+                if record.human_diag_acceleration_violated:
+                    reasons.append("acceleration bounds infeasible")
+                if record.human_diag_steering_violated:
+                    reasons.append("steering bounds infeasible")
+                if record.human_diag_jerk_violated:
+                    reasons.append("jerk limits infeasible")
+                if record.human_diag_steer_rate_violated:
+                    reasons.append("steering rate infeasible")
+                result.failure_reason = "; ".join(reasons) if reasons else "NLP infeasible (unknown cause)"
+
+                print(f"\n{'='*60}")
+                print(f"  HUMAN POLICY FAILED at step {t}")
+                print(f"  Reason: {result.failure_reason}")
+                print(f"  Ego position: {record.ego_position}")
+                print(f"  Wall time: {result.wall_time_seconds:.1f}s")
+                print(f"{'='*60}\n")
+
+                for aid in list(carla_sim.agents.keys()):
+                    if carla_sim.agents[aid] is not None:
+                        carla_sim.remove_agent(aid)
+                break
     else:
         result.wall_time_seconds = time.time() - t0
         print(f"\nScenario NOT solved within {args.steps} steps "
@@ -389,8 +460,10 @@ def main():
     # Save results
     filepath = dump_results(result, output_name)
     print(f"\nResults saved: {filepath}")
-    print(f"  solved={result.solved}  steps={result.total_steps}  "
-          f"time={result.wall_time_seconds:.1f}s")
+    print(f"  solved={result.solved}  failed={result.failed}  "
+          f"steps={result.total_steps}  time={result.wall_time_seconds:.1f}s")
+    if result.failure_reason:
+        print(f"  failure_reason: {result.failure_reason}")
 
     logger.info("Done.")
 

@@ -770,6 +770,9 @@ class TwoStageOPT:
         self._ref_start_idx: int = 0
         self._step_count: int = 0
 
+        # Per-step diagnostics (populated in select_action)
+        self._last_diagnostics: Optional[Dict] = None
+
         # Obstacle data (stored for plotter access)
         self._last_obstacles: Optional[List] = None
         self._last_other_agents: Optional[Dict] = None
@@ -886,115 +889,15 @@ class TwoStageOPT:
         # Print concise status
         print(f"[Step {self._step_count:4d}] MILP: OK ({t_milp*1000:.1f}ms) | NLP: {nlp_status} ({t_nlp*1000:.1f}ms)")
 
-
-        # Debug: Print all constraint values
-        H = len(final_states) - 1
-        dt = self._dt
-        nlp = self._nlp
-        half_L = self._ego_length / 2.0
-        half_W = self._ego_width / 2.0
-
-        # Extract state and control trajectories
-        s_traj = final_states[:, 0]
-        d_traj = final_states[:, 1]
-        phi_traj = final_states[:, 2]
-        v_traj = final_states[:, 3]
-        a_traj = final_controls[:, 0]
-        delta_traj = final_controls[:, 1]
-
-        # Compute derived quantities
-        jerk = np.diff(a_traj) / dt  # (H-1,)
-        delta_rate = np.diff(delta_traj) / dt  # (H-1,)
-
-        # Get constraint bounds
-        a_min, a_max = nlp['a_min'], nlp['a_max']
-        delta_max = nlp['delta_max']
-        delta_rate_max = nlp['delta_rate_max']
-        jerk_max = nlp['jerk_max']
-        v_min, v_max = nlp['v_min'], nlp['v_max']
-
-        print(f"  --- Constraint Analysis ---")
-        print(f"  Acceleration: min={np.min(a_traj):.3f}, max={np.max(a_traj):.3f} | bounds=[{a_min:.2f}, {a_max:.2f}]")
-        print(f"  Steering (deg): min={np.degrees(np.min(delta_traj)):.2f}, max={np.degrees(np.max(delta_traj)):.2f} | bound=±{np.degrees(delta_max):.2f}")
-        print(f"  Velocity: min={np.min(v_traj):.3f}, max={np.max(v_traj):.3f} | bounds=[{v_min:.2f}, {v_max:.2f}]")
-        if len(jerk) > 0:
-            print(f"  Jerk: min={np.min(jerk):.3f}, max={np.max(jerk):.3f} | bound=±{jerk_max:.2f}")
-        if len(delta_rate) > 0:
-            print(f"  Steer rate (deg/s): min={np.degrees(np.min(delta_rate)):.2f}, max={np.degrees(np.max(delta_rate)):.2f} | bound=±{np.degrees(delta_rate_max):.2f}")
-
-        # Check road boundary constraints (corner-based)
-        road_violations = []
-        for k in range(H + 1):
-            cos_phi = np.cos(phi_traj[k])
-            sin_phi = np.sin(phi_traj[k])
-            for alpha_l, alpha_w, name in [(1, 1, 'FL'), (1, -1, 'FR'), (-1, 1, 'RL'), (-1, -1, 'RR')]:
-                c_d = d_traj[k] + alpha_l * half_L * sin_phi + alpha_w * half_W * cos_phi
-                margin_left = road_left[k] - c_d
-                margin_right = c_d - road_right[k]
-                if margin_left < 0 or margin_right < 0:
-                    road_violations.append(f"k={k} {name}: d={c_d:.3f}, margins(L={margin_left:.3f}, R={margin_right:.3f})")
-
-        if road_violations:
-            print(f"  Road boundary violations ({len(road_violations)}):")
-            for v in road_violations[:5]:
-                print(f"    {v}")
-        else:
-            print(f"  Road boundary: OK (all corners within bounds)")
-
-        # Check collision constraints (ellipse)
-        if obstacles:
-            collision_info = []
-            for obs_idx, obs in enumerate(obstacles):
-                a_i = obs['length'] / 2.0 + self._collision_margin
-                b_i = obs['width'] / 2.0 + self._collision_margin
-
-                obs_s0 = float(obs['s'][0])
-                _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
-                phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
-                cos_phi_i = np.cos(phi_i)
-                sin_phi_i = np.sin(phi_i)
-
-                min_g = float('inf')
-                min_g_info = ""
-                violations = []  # Track all timesteps with g < 1.0
-
-                for k in range(1, H + 1):
-                    s_obs_k = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
-                    d_obs_k = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
-
-                    cos_phi_k = np.cos(phi_traj[k])
-                    sin_phi_k = np.sin(phi_traj[k])
-
-                    for alpha_l, alpha_w, name in [(1, 1, 'FL'), (1, -1, 'FR'), (-1, 1, 'RL'), (-1, -1, 'RR')]:
-                        c_s = s_traj[k] + alpha_l * half_L * cos_phi_k - alpha_w * half_W * sin_phi_k
-                        c_d = d_traj[k] + alpha_l * half_L * sin_phi_k + alpha_w * half_W * cos_phi_k
-
-                        d_s = c_s - s_obs_k
-                        d_d = c_d - d_obs_k
-
-                        # R(-φ) rotation
-                        d_body_x = cos_phi_i * d_s + sin_phi_i * d_d
-                        d_body_y = -sin_phi_i * d_s + cos_phi_i * d_d
-
-                        g = (d_body_x / a_i)**2 + (d_body_y / b_i)**2
-
-                        if g < min_g:
-                            min_g = g
-                            min_g_info = f"k={k} {name}: g={g:.9f}, corner=({c_s:.2f},{c_d:.2f}), obs=({s_obs_k:.2f},{d_obs_k:.2f})"
-
-                        # Track violations
-                        if g < 1.0:
-                            violations.append(f"k={k} {name}: g={g:.9f}")
-
-                collision_info.append((obs_idx, min_g, min_g_info, violations))
-
-            print(f"  Collision constraints:")
-            for obs_idx, min_g, info, violations in collision_info:
-                status = "VIOLATED" if min_g < 1.0 else "OK"
-                print(f"    Obs{obs_idx}: min_g={min_g:.9f} ({status}) | {info}")
-                if violations:
-                    print(f"      All violations ({len(violations)}): {', '.join(violations[:10])}" +
-                          (f" ... and {len(violations)-10} more" if len(violations) > 10 else ""))
+        # ---------------------------------------------------------------
+        # Constraint analysis — build structured diagnostics dict
+        # ---------------------------------------------------------------
+        diag = self._analyse_constraints(
+            final_states, final_controls, road_left, road_right, obstacles,
+            milp_ok=True, nlp_ok=nlp_ok, nlp_status=nlp_status,
+            t_milp=t_milp, t_nlp=t_nlp,
+        )
+        self._last_diagnostics = diag
 
         self._prev_nlp_states = final_states.copy()
         self._prev_nlp_controls = final_controls.copy()
@@ -1088,18 +991,169 @@ class TwoStageOPT:
         """Planning timestep (seconds)."""
         return self._dt
 
+    @property
+    def last_diagnostics(self) -> Optional[Dict]:
+        """Structured constraint diagnostics from the most recent MPC step."""
+        return self._last_diagnostics
+
     def reset(self):
         """Reset all MPC state."""
         self._prev_milp_states = None
         self._prev_nlp_states = None
         self._prev_nlp_controls = None
         self._last_rollout = None
+        self._last_diagnostics = None
         self._ref_start_idx = 0
         self._nlp_built = False
         self._nlp_solver = None
         self._last_obstacles = None
         self._last_other_agents = None
         self._step_count = 0
+
+    # ------------------------------------------------------------------
+    # Constraint analysis
+    # ------------------------------------------------------------------
+
+    def _analyse_constraints(self, final_states, final_controls,
+                             road_left, road_right, obstacles,
+                             *, milp_ok, nlp_ok, nlp_status,
+                             t_milp, t_nlp) -> Dict:
+        """Analyse constraint satisfaction and return structured diagnostics.
+
+        Returns a dict with grouped constraint violation info.
+        """
+        H = len(final_states) - 1
+        dt = self._dt
+        nlp = self._nlp
+        half_L = self._ego_length / 2.0
+        half_W = self._ego_width / 2.0
+
+        # Extract state and control trajectories
+        s_traj = final_states[:, 0]
+        d_traj = final_states[:, 1]
+        phi_traj = final_states[:, 2]
+        v_traj = final_states[:, 3]
+        a_traj = final_controls[:, 0]
+        delta_traj = final_controls[:, 1]
+
+        # Derived quantities
+        jerk = np.diff(a_traj) / dt   # (H-1,)
+        delta_rate = np.diff(delta_traj) / dt  # (H-1,)
+
+        # Constraint bounds
+        a_min, a_max = nlp['a_min'], nlp['a_max']
+        delta_max = nlp['delta_max']
+        delta_rate_max = nlp['delta_rate_max']
+        jerk_max = nlp['jerk_max']
+        v_min, v_max = nlp['v_min'], nlp['v_max']
+
+        # -- Velocity bounds --
+        vel_violated = bool(np.min(v_traj) < v_min - 1e-6
+                            or np.max(v_traj) > v_max + 1e-6)
+
+        # -- Acceleration bounds --
+        accel_violated = bool(np.min(a_traj) < a_min - 1e-6
+                              or np.max(a_traj) > a_max + 1e-6)
+
+        # -- Steering bounds --
+        steer_violated = bool(np.max(np.abs(delta_traj)) > delta_max + 1e-6)
+
+        # -- Jerk bounds --
+        jerk_violated = (bool(np.max(np.abs(jerk)) > jerk_max + 1e-6)
+                         if len(jerk) > 0 else False)
+
+        # -- Steering rate bounds --
+        steer_rate_violated = (bool(np.max(np.abs(delta_rate)) > delta_rate_max + 1e-6)
+                               if len(delta_rate) > 0 else False)
+
+        # -- Road boundary violations (corner-based) --
+        road_violations = []
+        for k in range(H + 1):
+            cos_phi = np.cos(phi_traj[k])
+            sin_phi = np.sin(phi_traj[k])
+            for alpha_l, alpha_w, name in [(1, 1, 'FL'), (1, -1, 'FR'),
+                                           (-1, 1, 'RL'), (-1, -1, 'RR')]:
+                c_d = (d_traj[k] + alpha_l * half_L * sin_phi
+                       + alpha_w * half_W * cos_phi)
+                margin_left = road_left[k] - c_d
+                margin_right = c_d - road_right[k]
+                if margin_left < -1e-6 or margin_right < -1e-6:
+                    road_violations.append({
+                        'k': k, 'corner': name, 'd': float(c_d),
+                        'margin_left': float(margin_left),
+                        'margin_right': float(margin_right),
+                    })
+
+        # -- Collision constraint violations (ellipse g-value) --
+        collision_violations = []
+        if obstacles:
+            for obs_idx, obs in enumerate(obstacles):
+                a_i = obs['length'] / 2.0 + self._collision_margin
+                b_i = obs['width'] / 2.0 + self._collision_margin
+
+                obs_s0 = float(obs['s'][0])
+                _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
+                phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
+                cos_phi_i = np.cos(phi_i)
+                sin_phi_i = np.sin(phi_i)
+
+                for k in range(1, H + 1):
+                    s_obs_k = float(obs['s'][k]) if k < len(obs['s']) else float(obs['s'][-1])
+                    d_obs_k = float(obs['d'][k]) if k < len(obs['d']) else float(obs['d'][-1])
+                    cos_phi_k = np.cos(phi_traj[k])
+                    sin_phi_k = np.sin(phi_traj[k])
+
+                    for alpha_l, alpha_w, name in [(1, 1, 'FL'), (1, -1, 'FR'),
+                                                   (-1, 1, 'RL'), (-1, -1, 'RR')]:
+                        c_s = (s_traj[k] + alpha_l * half_L * cos_phi_k
+                               - alpha_w * half_W * sin_phi_k)
+                        c_d = (d_traj[k] + alpha_l * half_L * sin_phi_k
+                               + alpha_w * half_W * cos_phi_k)
+                        d_s = c_s - s_obs_k
+                        d_d = c_d - d_obs_k
+                        d_body_x = cos_phi_i * d_s + sin_phi_i * d_d
+                        d_body_y = -sin_phi_i * d_s + cos_phi_i * d_d
+                        g = (d_body_x / a_i)**2 + (d_body_y / b_i)**2
+
+                        if g < 1.0:
+                            collision_violations.append({
+                                'obs_idx': obs_idx, 'k': k, 'corner': name,
+                                'g': float(g),
+                            })
+
+        any_violated = (not nlp_ok or vel_violated or accel_violated
+                        or steer_violated or jerk_violated
+                        or steer_rate_violated
+                        or len(road_violations) > 0
+                        or len(collision_violations) > 0)
+
+        return {
+            # Solver status
+            'step': self._step_count,
+            'milp_ok': milp_ok,
+            'nlp_ok': nlp_ok,
+            'nlp_status': nlp_status,
+            't_milp': t_milp,
+            't_nlp': t_nlp,
+
+            # Input / state bound violations
+            'velocity_violated': vel_violated,
+            'acceleration_violated': accel_violated,
+            'steering_violated': steer_violated,
+            'jerk_violated': jerk_violated,
+            'steer_rate_violated': steer_rate_violated,
+
+            # Spatial violations
+            'road_boundary_violations': road_violations,
+            'collision_violations': collision_violations,
+
+            # Summary
+            'any_violated': any_violated,
+
+            # Ranges (for logging)
+            'v_range': (float(np.min(v_traj)), float(np.max(v_traj))),
+            'a_range': (float(np.min(a_traj)), float(np.max(a_traj))),
+        }
 
     # ------------------------------------------------------------------
     # Frenet state conversion
