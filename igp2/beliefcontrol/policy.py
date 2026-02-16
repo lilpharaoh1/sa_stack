@@ -592,8 +592,8 @@ class TwoStageOPT:
     """
 
     # Paper default parameters
-    DEFAULT_HORIZON = 20
-    DEFAULT_DT = 0.2
+    DEFAULT_HORIZON = 40
+    DEFAULT_DT = 0.1
     DEFAULT_BIG_M = 1000.0
     N_OBS_MAX = 10  # pre-allocated obstacle slots in NLP
 
@@ -633,24 +633,61 @@ class TwoStageOPT:
     #     'w_delta': 2.0,       # Weight for steering angle norm
     # }
 
-    # MILP default parameters (point-mass model with [s, d, vs, vd] state)
+    # # MILP default parameters (point-mass model with [s, d, vs, vd] state)
+    # MILP_DEFAULTS = {
+    #     'a_s_min': -3.0,      # Longitudinal acceleration min (m/s^2)
+    #     'a_s_max': 3.0,       # Longitudinal acceleration max (m/s^2)
+    #     'a_d_min': -3.0,      # Lateral acceleration min (m/s^2)
+    #     'a_d_max': 3.0,       # Lateral acceleration max (m/s^2)
+    #     'jerk_s_max': 100.0,    # Longitudinal jerk max (m/s^3)
+    #     'jerk_d_max': 100.0,    # Lateral jerk max (m/s^3)
+    #     'vs_min': 0.1,        # Longitudinal velocity min (m/s)
+    #     'vs_max': 8.0,       # Longitudinal velocity max (m/s)
+    #     'vd_min': -8.0,       # Lateral velocity min (m/s)
+    #     'vd_max': 8.0,        # Lateral velocity max (m/s)
+    #     'rho': 1.5,           # Kinematic feasibility ratio (vs >= rho * |vd|)
+    #     'w_s': 0.9,           # Weight for longitudinal position tracking
+    #     'w_d': 10.0,          # Weight for lateral position tracking
+    #     'w_v': 0.01,           # Weight for velocity tracking
+    #     'w_a_s': 0.5,        # Weight for longitudinal acceleration
+    #     'w_a_d': 0.5,        # Weight for lateral acceleration
+    # }
+
+    # # NLP default parameters (bicycle model with [s, d, phi, v] state)
+    # NLP_DEFAULTS = {
+    #     'a_min': -3.0,        # Acceleration min (m/s^2)
+    #     'a_max': 3.0,         # Acceleration max (m/s^2)
+    #     'delta_max': 0.45,    # Max steering angle magnitude (rad)
+    #     'delta_rate_max': 100.0,  # Max steering rate (rad/s)
+    #     'jerk_max': 100.0,      # Max jerk (m/s^3)
+    #     'v_min': 0.1,         # Velocity min (m/s)
+    #     'v_max': 8.0,        # Velocity max (m/s)
+    #     'w_s': 0.1,           # Weight for longitudinal position tracking
+    #     'w_d': 10.0,           # Weight for lateral position tracking
+    #     'w_v': 0.01,           # Weight for velocity tracking
+    #     'w_a': 1.0,           # Weight for acceleration norm
+    #     'w_delta': 2.0,       # Weight for steering angle norm
+    #     'w_phi': 2.0,         # Weight for heading alignment with road
+    # }
+
+        # MILP default parameters (point-mass model with [s, d, vs, vd] state)
     MILP_DEFAULTS = {
         'a_s_min': -3.0,      # Longitudinal acceleration min (m/s^2)
         'a_s_max': 3.0,       # Longitudinal acceleration max (m/s^2)
         'a_d_min': -3.0,      # Lateral acceleration min (m/s^2)
         'a_d_max': 3.0,       # Lateral acceleration max (m/s^2)
-        'jerk_s_max': 2.0,    # Longitudinal jerk max (m/s^3)
-        'jerk_d_max': 2.0,    # Lateral jerk max (m/s^3)
-        'vs_min': 0.0,        # Longitudinal velocity min (m/s)
-        'vs_max': 8.0,       # Longitudinal velocity max (m/s)
-        'vd_min': -8.0,       # Lateral velocity min (m/s)
-        'vd_max': 8.0,        # Lateral velocity max (m/s)
+        'jerk_s_max': 100.0,    # Longitudinal jerk max (m/s^3)
+        'jerk_d_max': 100.0,    # Lateral jerk max (m/s^3)
+        'vs_min': 0.01,        # Longitudinal velocity min (m/s)
+        'vs_max': 10.0,       # Longitudinal velocity max (m/s)
+        'vd_min': -10.0,       # Lateral velocity min (m/s)
+        'vd_max': 10.0,        # Lateral velocity max (m/s)
         'rho': 1.5,           # Kinematic feasibility ratio (vs >= rho * |vd|)
         'w_s': 0.9,           # Weight for longitudinal position tracking
         'w_d': 10.0,          # Weight for lateral position tracking
-        'w_v': 0.1,           # Weight for velocity tracking
-        'w_a_s': 0.4,        # Weight for longitudinal acceleration
-        'w_a_d': 0.4,        # Weight for lateral acceleration
+        'w_v': 0.01,           # Weight for velocity tracking
+        'w_a_s': 0.5,        # Weight for longitudinal acceleration
+        'w_a_d': 0.5,        # Weight for lateral acceleration
     }
 
     # NLP default parameters (bicycle model with [s, d, phi, v] state)
@@ -659,14 +696,15 @@ class TwoStageOPT:
         'a_max': 3.0,         # Acceleration max (m/s^2)
         'delta_max': 0.45,    # Max steering angle magnitude (rad)
         'delta_rate_max': 1.0,  # Max steering rate (rad/s)
-        'jerk_max': 2.0,      # Max jerk (m/s^3)
-        'v_min': 0.0,         # Velocity min (m/s)
-        'v_max': 8.0,        # Velocity max (m/s)
-        'w_s': 0.9,           # Weight for longitudinal position tracking
+        'jerk_max': 100.0,      # Max jerk (m/s^3)
+        'v_min': 0.01,         # Velocity min (m/s)
+        'v_max': 10.0,        # Velocity max (m/s)
+        'w_s': 0.1,           # Weight for longitudinal position tracking
         'w_d': 10.0,           # Weight for lateral position tracking
-        'w_v': 0.1,           # Weight for velocity tracking
+        'w_v': 0.01,           # Weight for velocity tracking
         'w_a': 1.0,           # Weight for acceleration norm
         'w_delta': 2.0,       # Weight for steering angle norm
+        'w_phi': 2.0,         # Weight for heading alignment with road
     }
 
     def __init__(self,
@@ -1053,22 +1091,22 @@ class TwoStageOPT:
         v_min, v_max = nlp['v_min'], nlp['v_max']
 
         # -- Velocity bounds --
-        vel_violated = bool(np.min(v_traj) < v_min - 1e-6
-                            or np.max(v_traj) > v_max + 1e-6)
+        vel_violated = bool(np.min(v_traj) < v_min - 1e-3
+                            or np.max(v_traj) > v_max + 1e-3)
 
         # -- Acceleration bounds --
-        accel_violated = bool(np.min(a_traj) < a_min - 1e-6
-                              or np.max(a_traj) > a_max + 1e-6)
+        accel_violated = bool(np.min(a_traj) < a_min - 1e-3
+                              or np.max(a_traj) > a_max + 1e-3)
 
         # -- Steering bounds --
-        steer_violated = bool(np.max(np.abs(delta_traj)) > delta_max + 1e-6)
+        steer_violated = bool(np.max(np.abs(delta_traj)) > delta_max + 1e-3)
 
         # -- Jerk bounds --
-        jerk_violated = (bool(np.max(np.abs(jerk)) > jerk_max + 1e-6)
+        jerk_violated = (bool(np.max(np.abs(jerk)) > jerk_max + 1e-3)
                          if len(jerk) > 0 else False)
 
         # -- Steering rate bounds --
-        steer_rate_violated = (bool(np.max(np.abs(delta_rate)) > delta_rate_max + 1e-6)
+        steer_rate_violated = (bool(np.max(np.abs(delta_rate)) > delta_rate_max + 1e-3)
                                if len(delta_rate) > 0 else False)
 
         # -- Road boundary violations (corner-based) --
@@ -1082,7 +1120,7 @@ class TwoStageOPT:
                        + alpha_w * half_W * cos_phi)
                 margin_left = road_left[k] - c_d
                 margin_right = c_d - road_right[k]
-                if margin_left < -1e-6 or margin_right < -1e-6:
+                if margin_left < -1e-3 or margin_right < -1e-3:
                     road_violations.append({
                         'k': k, 'corner': name, 'd': float(c_d),
                         'margin_left': float(margin_left),
@@ -1120,7 +1158,7 @@ class TwoStageOPT:
                         d_body_y = -sin_phi_i * d_s + cos_phi_i * d_d
                         g = (d_body_x / a_i)**2 + (d_body_y / b_i)**2
 
-                        if g < 1.0:
+                        if g < 1.0 - 1e-3:
                             collision_violations.append({
                                 'obs_idx': obs_idx, 'k': k, 'corner': name,
                                 'g': float(g),
@@ -1324,7 +1362,7 @@ class TwoStageOPT:
             for k in range(1, H + 1):
                 dx = world_positions[k, 0] - world_positions[k - 1, 0]
                 dy = world_positions[k, 1] - world_positions[k - 1, 1]
-                if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                if abs(dx) > 1e-3 or abs(dy) > 1e-3:
                     headings[k] = np.arctan2(dy, dx)
                 else:
                     # No movement - use previous heading
@@ -1498,8 +1536,12 @@ class TwoStageOPT:
 
             # ==================== COST FUNCTION ====================
             cost = 0.0
+            _eps = 1e-6  # Smoothing parameter for L1 approximation
 
-            # L2 tracking cost (smoother than L1 for NLP)
+            # Smooth L1 tracking cost: sqrt(x^2 + eps) ≈ |x|
+            def smooth_abs(x):
+                return ca.sqrt(x ** 2 + _eps)
+
             for k in range(H + 1):
                 ref_s = min(s0 + v_goal * k * dt, s_goal)
                 ref_d = 0.0
@@ -1509,8 +1551,8 @@ class TwoStageOPT:
 
             # Control effort
             for k in range(H):
-                cost += w_a_s * a_s[k]
-                cost += w_a_d * a_d[k]
+                cost += w_a_s * a_s[k] ** 2
+                cost += w_a_d * a_d[k] ** 2
 
             # ==================== COLLISION AVOIDANCE ====================
             # Smooth penalty-based formulation that allows passing on ANY side
@@ -1586,31 +1628,57 @@ class TwoStageOPT:
             # ==================== SOLVER OPTIONS ====================
             p_opts = {'expand': True, 'print_time': False}
             s_opts = {
-                'max_iter': 500,
-                'tol': 1e-4,
+                'max_iter': 1000,
+                # Relax constraint tolerance
+                'constr_viol_tol': 1e-3,           # Allow small violations
+                'acceptable_constr_viol_tol': 1e-3, # Accept slightly larger violations
+                'acceptable_tol': 1e-3,
+                'acceptable_iter': 5,                
+                # Optional: also relax optimality tolerance
+                'tol': 1e-3,
                 'print_level': 0,
                 'sb': 'yes',
             }
             opti.solver('ipopt', p_opts, s_opts)
 
             # ==================== INITIAL GUESS ====================
-            # Simple straight-line trajectory at target speed
-            for k in range(H + 1):
-                # opti.set_initial(s[k], s0)
-                # opti.set_initial(d[k], d0)
-                # opti.set_initial(vs[k], 0.0)
-                # opti.set_initial(vd[k], 0)
-                # opti.set_initial(s[k], s0 + 0.33 * v_goal * k * dt)
-                # opti.set_initial(d[k], d0)
-                # opti.set_initial(vs[k], 0.33 * v_goal)
-                # opti.set_initial(vd[k], 0)
-                opti.set_initial(s[k], s0 + v_goal * k * dt)
-                opti.set_initial(d[k], d0)
-                opti.set_initial(vs[k], v_goal)
-                opti.set_initial(vd[k], 0)
-            for k in range(H):
-                opti.set_initial(a_s[k], 0)
-                opti.set_initial(a_d[k], 0)
+            for k in range(H + 1):                                                                                                                                                              
+                opti.set_initial(s[k], s0)                                                                                                                                                    
+                opti.set_initial(d[k], d0)                                                                                                                                                    
+                opti.set_initial(vs[k], 0.0)                                                                                                                                                  
+                opti.set_initial(vd[k], 0)                                                                                                                                                    
+                # opti.set_initial(s[k], s0 + vs0 * k * dt)                                                                                                                                       
+                # opti.set_initial(d[k], d0)                                                                                                                                                      
+                # opti.set_initial(vs[k], vs0)                                                                                                                                                    
+                # opti.set_initial(vd[k], vd0)                                                                                                                                                    
+                # opti.set_initial(s[k], s0 + 0.33 * v_goal * k * dt)                                                                                                                           
+                # opti.set_initial(d[k], d0)                                                                                                                                                    
+                # opti.set_initial(vs[k], 0.33 * v_goal)                                                                                                                                        
+                # opti.set_initial(vd[k], 0)                                                                                                                                                    
+                # opti.set_initial(s[k], s0 + v_goal * k * dt)                                                                                                                                  
+                # opti.set_initial(d[k], d0)                                                                                                                                                    
+                # opti.set_initial(vs[k], v_goal)                                                                                                                                               
+                # opti.set_initial(vd[k], 0)                                                                                                                                                    
+                for k in range(H):                                                                                                                                                                  
+                    opti.set_initial(a_s[k], 0)                                                                                                                                                     
+                    opti.set_initial(a_d[k], 0) 
+            # # Decelerate from current velocity to zero as fast as control bounds allow
+            # gs_s, gs_d, gs_vs, gs_vd = s0, d0, vs0, vd0
+            # for k in range(H + 1):
+            #     opti.set_initial(s[k], gs_s)
+            #     opti.set_initial(d[k], gs_d)
+            #     opti.set_initial(vs[k], gs_vs)
+            #     opti.set_initial(vd[k], gs_vd)
+            #     if k < H:
+            #         # Max deceleration toward zero for each component
+            #         gs_a_s = max(a_s_min, -gs_vs / dt) if gs_vs > 0 else min(a_s_max, -gs_vs / dt) if gs_vs < 0 else 0.0
+            #         gs_a_d = max(a_d_min, -gs_vd / dt) if gs_vd > 0 else min(a_d_max, -gs_vd / dt) if gs_vd < 0 else 0.0
+            #         opti.set_initial(a_s[k], gs_a_s)
+            #         opti.set_initial(a_d[k], gs_a_d)
+            #         gs_vs = gs_vs + gs_a_s * dt
+            #         gs_vd = gs_vd + gs_a_d * dt
+            #         gs_s = gs_s + gs_vs * dt
+            #         gs_d = gs_d + gs_vd * dt
 
             # ==================== SOLVE ====================
             sol = opti.solve()
@@ -1625,6 +1693,7 @@ class TwoStageOPT:
             return milp_states
 
         except Exception as e:
+            print("MILP failed", e)
             logger.debug(f"Stage1 solver failed: {e}")
 
             # Diagnose constraint violations
@@ -1795,6 +1864,7 @@ class TwoStageOPT:
         v_min, v_max = nlp['v_min'], nlp['v_max']
         w_s, w_d, w_v = nlp['w_s'], nlp['w_d'], nlp['w_v']
         w_a, w_delta = nlp['w_a'], nlp['w_delta']
+        w_phi = nlp['w_phi']
 
         try:
             opti = ca.Opti()
@@ -1818,6 +1888,7 @@ class TwoStageOPT:
                 ref_s = min(s0 + v_goal * k * dt, s_max)
                 cost += w_s * (S[0, k] - ref_s)**2
                 cost += w_d * S[1, k]**2
+                cost += w_phi * S[2, k]**2
                 cost += w_v * (S[3, k] - v_goal)**2
             for k in range(H):
                 cost += w_a * U[0, k]**2
@@ -1965,14 +2036,13 @@ class TwoStageOPT:
             # --- Solver options ---
             p_opts = {'expand': True, 'print_time': False}
             s_opts = {
-                'max_iter': 5000,
+                'max_iter': 10000,
                 'warm_start_init_point': 'yes',
                 # Relax constraint tolerance
                 'constr_viol_tol': 1e-3,           # Allow small violations
                 'acceptable_constr_viol_tol': 1e-3, # Accept slightly larger violations
                 'acceptable_tol': 1e-3,
-                'acceptable_iter': 5,
-                
+                'acceptable_iter': 5,                
                 # Optional: also relax optimality tolerance
                 'tol': 1e-3,
                 'print_level': 0,
@@ -2140,7 +2210,7 @@ class TwoStageOPT:
                                     min_g_overall = g_val
                                     min_g_info = f"Obs{obs_idx} k={k} {name}: g={g_val}, corner=({c_s:.2f},{c_d:.2f}), obs=({s_obs:.2f},{d_obs:.2f})"
 
-                    status = "VIOLATED" if min_g_overall < 1.0 else "OK"
+                    status = "VIOLATED" if min_g_overall < 1.0 - 1e-3 else "OK"
                     print(f"    Collision (min_g): {min_g_overall} ({status}) | {min_g_info}")
 
                 if violations:

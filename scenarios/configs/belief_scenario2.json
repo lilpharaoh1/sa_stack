@@ -2,7 +2,7 @@
   "scenario": {
     "map_path": "scenarios/maps/Town01.xodr",
     "max_speed": 10.0,
-    "fps": 5,
+    "fps": 10,
     "seed": 21,
     "max_steps": 1000
   },
@@ -75,7 +75,7 @@
       "open_loop": true,
       "spawn": {
         "box": {
-          "center": [-2.0, -210.0],
+          "center": [-2.0, -200.0],
           "length": 3.5,
           "width": 10.0,
           "heading": 0.0
