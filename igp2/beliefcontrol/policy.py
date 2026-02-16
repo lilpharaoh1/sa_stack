@@ -663,7 +663,7 @@ class TwoStageOPT:
         'v_min': 0.0,         # Velocity min (m/s)
         'v_max': 8.0,        # Velocity max (m/s)
         'w_s': 0.9,           # Weight for longitudinal position tracking
-        'w_d': 500.0,           # Weight for lateral position tracking
+        'w_d': 10.0,           # Weight for lateral position tracking
         'w_v': 0.1,           # Weight for velocity tracking
         'w_a': 1.0,           # Weight for acceleration norm
         'w_delta': 2.0,       # Weight for steering angle norm
@@ -862,7 +862,7 @@ class TwoStageOPT:
 
         # --- Stage 2: NLP ---
         t_nlp_start = time.time()
-        nlp_states, nlp_controls, nlp_ok = self._solve_nlp(
+        nlp_states, nlp_controls, nlp_ok, nlp_debug = self._solve_nlp(
             frenet_state, warm_states, warm_controls,
             road_left, road_right, obstacles)
         t_nlp = time.time() - t_nlp_start
@@ -891,9 +891,14 @@ class TwoStageOPT:
 
         # ---------------------------------------------------------------
         # Constraint analysis — build structured diagnostics dict
+        # When NLP failed, analyse the failed iterate (not the fallback)
         # ---------------------------------------------------------------
+        if not nlp_ok and nlp_debug is not None and nlp_debug[0] is not None:
+            diag_states, diag_controls = nlp_debug
+        else:
+            diag_states, diag_controls = final_states, final_controls
         diag = self._analyse_constraints(
-            final_states, final_controls, road_left, road_right, obstacles,
+            diag_states, diag_controls, road_left, road_right, obstacles,
             milp_ok=True, nlp_ok=nlp_ok, nlp_status=nlp_status,
             t_milp=t_milp, t_nlp=t_nlp,
         )
@@ -1529,7 +1534,7 @@ class TwoStageOPT:
                     ca.exp(beta * (e - max_val))
                 )
 
-            collision_penalty_weight = 1000.0  # Large weight for collision penalty
+            collision_penalty_weight = 10000.0  # Large weight for collision penalty
             safety_margin = 0.1  # Small positive margin for robustness
 
             for obs_idx in range(N_obs):
@@ -1591,6 +1596,14 @@ class TwoStageOPT:
             # ==================== INITIAL GUESS ====================
             # Simple straight-line trajectory at target speed
             for k in range(H + 1):
+                # opti.set_initial(s[k], s0)
+                # opti.set_initial(d[k], d0)
+                # opti.set_initial(vs[k], 0.0)
+                # opti.set_initial(vd[k], 0)
+                # opti.set_initial(s[k], s0 + 0.33 * v_goal * k * dt)
+                # opti.set_initial(d[k], d0)
+                # opti.set_initial(vs[k], 0.33 * v_goal)
+                # opti.set_initial(vd[k], 0)
                 opti.set_initial(s[k], s0 + v_goal * k * dt)
                 opti.set_initial(d[k], d0)
                 opti.set_initial(vs[k], v_goal)
@@ -1952,9 +1965,16 @@ class TwoStageOPT:
             # --- Solver options ---
             p_opts = {'expand': True, 'print_time': False}
             s_opts = {
-                'max_iter': 500,
+                'max_iter': 5000,
                 'warm_start_init_point': 'yes',
-                'tol': 1e-4,
+                # Relax constraint tolerance
+                'constr_viol_tol': 1e-3,           # Allow small violations
+                'acceptable_constr_viol_tol': 1e-3, # Accept slightly larger violations
+                'acceptable_tol': 1e-3,
+                'acceptable_iter': 5,
+                
+                # Optional: also relax optimality tolerance
+                'tol': 1e-3,
                 'print_level': 0,
                 'sb': 'yes',
             }
@@ -1966,7 +1986,7 @@ class TwoStageOPT:
             nlp_states = sol.value(S).T   # (H+1, 4)
             nlp_controls = sol.value(U).T  # (H, 2)
 
-            return nlp_states, nlp_controls, True
+            return nlp_states, nlp_controls, True, None
 
         except Exception as e:
             print("NLP solver failed: %s", e)
@@ -2155,6 +2175,7 @@ class TwoStageOPT:
 
             except Exception as debug_e:
                 print(f"    (Could not extract debug values: {debug_e})")
+                S_dbg, U_dbg = None, None
 
-            return warm_states, warm_controls, False
+            return warm_states, warm_controls, False, (S_dbg, U_dbg)
 

@@ -386,10 +386,11 @@ class CarlaSim:
         """
         spawned = []
         for obj in static_objects:
-            position = tuple(obj['position'])
+            pos = obj['position']
+            position = tuple(pos[:2])
             heading = obj.get('heading', 0.0)
             blueprint = obj.get('blueprint', None)
-            z_offset = obj.get('z_offset', 0.1)
+            z_offset = pos[2] if len(pos) >= 3 else obj.get('z_offset', 0.1)
             length = obj.get('length', None)
             width = obj.get('width', None)
 

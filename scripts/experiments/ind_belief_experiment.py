@@ -72,7 +72,7 @@ class StepRecord:
     # Completion (based on true policy)
     goal_reached: bool
 
-    # Human policy constraint diagnostics (from TwoStageOPT._analyse_constraints)
+    # True policy constraint diagnostics (from TwoStageOPT._analyse_constraints)
     #   - nlp_ok: whether the NLP solver converged
     #   - velocity_violated: speed outside [v_min, v_max]
     #   - acceleration_violated: acceleration outside [a_min, a_max]
@@ -81,14 +81,14 @@ class StepRecord:
     #   - steer_rate_violated: steering rate exceeds delta_rate_max
     #   - road_boundary_violations: number of corner-timestep road violations
     #   - collision_violations: number of corner-timestep collision violations
-    human_diag_nlp_ok: Optional[bool] = None
-    human_diag_velocity_violated: Optional[bool] = None
-    human_diag_acceleration_violated: Optional[bool] = None
-    human_diag_steering_violated: Optional[bool] = None
-    human_diag_jerk_violated: Optional[bool] = None
-    human_diag_steer_rate_violated: Optional[bool] = None
-    human_diag_road_violations: int = 0
-    human_diag_collision_violations: int = 0
+    true_diag_nlp_ok: Optional[bool] = None
+    true_diag_velocity_violated: Optional[bool] = None
+    true_diag_acceleration_violated: Optional[bool] = None
+    true_diag_steering_violated: Optional[bool] = None
+    true_diag_jerk_violated: Optional[bool] = None
+    true_diag_steer_rate_violated: Optional[bool] = None
+    true_diag_road_violations: int = 0
+    true_diag_collision_violations: int = 0
 
 
 @dataclass
@@ -233,8 +233,8 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame) -> StepRecord
                 goal_reached = True
                 break
 
-    # Human policy constraint diagnostics
-    human_diag = getattr(human_policy, 'last_diagnostics', None) if human_policy else None
+    # True policy constraint diagnostics
+    true_diag = getattr(true_policy, 'last_diagnostics', None) if true_policy else None
 
     return StepRecord(
         step=step,
@@ -257,15 +257,15 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame) -> StepRecord
         dynamic_agents=dynamic_agents,
         static_obstacles=static_obstacles,
         goal_reached=goal_reached,
-        # Constraint diagnostics from human policy
-        human_diag_nlp_ok=human_diag.get('nlp_ok') if human_diag else None,
-        human_diag_velocity_violated=human_diag.get('velocity_violated') if human_diag else None,
-        human_diag_acceleration_violated=human_diag.get('acceleration_violated') if human_diag else None,
-        human_diag_steering_violated=human_diag.get('steering_violated') if human_diag else None,
-        human_diag_jerk_violated=human_diag.get('jerk_violated') if human_diag else None,
-        human_diag_steer_rate_violated=human_diag.get('steer_rate_violated') if human_diag else None,
-        human_diag_road_violations=len(human_diag.get('road_boundary_violations', [])) if human_diag else 0,
-        human_diag_collision_violations=len(human_diag.get('collision_violations', [])) if human_diag else 0,
+        # Constraint diagnostics from true policy
+        true_diag_nlp_ok=true_diag.get('nlp_ok') if true_diag else None,
+        true_diag_velocity_violated=true_diag.get('velocity_violated') if true_diag else None,
+        true_diag_acceleration_violated=true_diag.get('acceleration_violated') if true_diag else None,
+        true_diag_steering_violated=true_diag.get('steering_violated') if true_diag else None,
+        true_diag_jerk_violated=true_diag.get('jerk_violated') if true_diag else None,
+        true_diag_steer_rate_violated=true_diag.get('steer_rate_violated') if true_diag else None,
+        true_diag_road_violations=len(true_diag.get('road_boundary_violations', [])) if true_diag else 0,
+        true_diag_collision_violations=len(true_diag.get('collision_violations', [])) if true_diag else 0,
     )
 
 
@@ -417,32 +417,32 @@ def main():
                         carla_sim.remove_agent(aid)
                 break
 
-            # Stop if human policy optimisation failed
-            if record.human_diag_nlp_ok is not None and not record.human_diag_nlp_ok:
+            # Stop if true policy optimisation failed
+            if record.true_diag_nlp_ok is not None and not record.true_diag_nlp_ok:
                 result.failed = True
                 result.failure_step = t
                 result.wall_time_seconds = time.time() - t0
 
                 # Build failure reason — one entry per violated constraint type
                 reasons = []
-                if record.human_diag_collision_violations > 0:
+                if record.true_diag_collision_violations > 0:
                     reasons.append("collision avoidance infeasible")
-                if record.human_diag_road_violations > 0:
+                if record.true_diag_road_violations > 0:
                     reasons.append("road boundary infeasible")
-                if record.human_diag_velocity_violated:
+                if record.true_diag_velocity_violated:
                     reasons.append("velocity bounds infeasible")
-                if record.human_diag_acceleration_violated:
+                if record.true_diag_acceleration_violated:
                     reasons.append("acceleration bounds infeasible")
-                if record.human_diag_steering_violated:
+                if record.true_diag_steering_violated:
                     reasons.append("steering bounds infeasible")
-                if record.human_diag_jerk_violated:
+                if record.true_diag_jerk_violated:
                     reasons.append("jerk limits infeasible")
-                if record.human_diag_steer_rate_violated:
+                if record.true_diag_steer_rate_violated:
                     reasons.append("steering rate infeasible")
                 result.failure_reason = "; ".join(reasons) if reasons else "NLP infeasible (unknown cause)"
 
                 print(f"\n{'='*60}")
-                print(f"  HUMAN POLICY FAILED at step {t}")
+                print(f"  TRUE POLICY FAILED at step {t}")
                 print(f"  Reason: {result.failure_reason}")
                 print(f"  Ego position: {record.ego_position}")
                 print(f"  Wall time: {result.wall_time_seconds:.1f}s")
