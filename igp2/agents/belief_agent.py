@@ -275,7 +275,7 @@ class BeliefAgent(Agent):
                  agent_beliefs: Dict[int, Dict[str, Any]] = None,
                  policy_type: str = "two_stage_opt",
                  plot_interval: int = 1,
-                 human: bool = False,
+                 human: bool = True,
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
@@ -577,44 +577,49 @@ class BeliefAgent(Agent):
     def _plot(self, ego_state, candidates, best_idx):
         """Dispatch to the correct plotter depending on policy type."""
         if isinstance(self._plotter, OptimisationPlotter):
-            # Use human policy data if enabled, otherwise true policy for primary display
-            primary_policy = self._human_policy if self._human_enabled else self._true_policy
-            primary_rollout = getattr(primary_policy, 'last_rollout', None)
-            primary_milp = getattr(primary_policy, 'last_milp_rollout', None)
-            primary_traj = candidates[best_idx] if candidates else None
-
-            # True policy data
+            # True policy data (always available)
             true_rollout = getattr(self._true_policy, 'last_rollout', None)
             true_milp = getattr(self._true_policy, 'last_milp_rollout', None)
-
-            # Retrieve obstacle data from primary policy for visualisation
-            primary_other_agents = getattr(primary_policy, 'last_other_agents', None)
-            obstacles = getattr(primary_policy, 'last_obstacles', None)
-            frenet = getattr(primary_policy, 'frenet_frame', None)
-            collision_margin = getattr(primary_policy, 'collision_margin', 0.5)
-            ego_length = getattr(primary_policy, 'ego_length', 4.5)
-            ego_width = getattr(primary_policy, 'ego_width', 1.8)
-
-            # All agents (visible + hidden) from true policy
-            all_other_agents = getattr(self._true_policy, 'last_other_agents', None)
-
-            # True policy obstacle predictions (for drawing hidden/biased agents)
+            true_other_agents = getattr(self._true_policy, 'last_other_agents', None)
             true_obstacles = getattr(self._true_policy, 'last_obstacles', None)
             true_frenet = getattr(self._true_policy, 'frenet_frame', None)
 
+            if self._human_enabled:
+                # Human (belief) policy data
+                human_rollout = getattr(self._human_policy, 'last_rollout', None)
+                human_milp = getattr(self._human_policy, 'last_milp_rollout', None)
+                human_traj = candidates[best_idx] if candidates else None
+                human_other_agents = getattr(self._human_policy, 'last_other_agents', None)
+                obstacles = getattr(self._human_policy, 'last_obstacles', None)
+                frenet = getattr(self._human_policy, 'frenet_frame', None)
+                collision_margin = getattr(self._human_policy, 'collision_margin', 0.5)
+                ego_length = getattr(self._human_policy, 'ego_length', 4.5)
+                ego_width = getattr(self._human_policy, 'ego_width', 1.8)
+            else:
+                # No human policy — leave human slots empty
+                human_rollout = None
+                human_milp = None
+                human_traj = None
+                human_other_agents = None
+                obstacles = true_obstacles
+                frenet = true_frenet
+                collision_margin = getattr(self._true_policy, 'collision_margin', 0.5)
+                ego_length = getattr(self._true_policy, 'ego_length', 4.5)
+                ego_width = getattr(self._true_policy, 'ego_width', 1.8)
+
             self._plotter.update(
-                ego_state, primary_traj, primary_rollout,
+                ego_state, human_traj, human_rollout,
                 self._trajectory_cl, self.agent_id, self._step_count,
-                milp_trajectory=primary_milp,
-                other_agents=primary_other_agents,
+                milp_trajectory=human_milp,
+                other_agents=human_other_agents,
                 obstacles=obstacles,
                 frenet=frenet,
                 ego_length=ego_length,
                 ego_width=ego_width,
                 collision_margin=collision_margin,
-                true_rollout=true_rollout if self._human_enabled else None,
-                true_milp_trajectory=true_milp if self._human_enabled else None,
-                all_other_agents=all_other_agents,
+                true_rollout=true_rollout,
+                true_milp_trajectory=true_milp,
+                all_other_agents=true_other_agents,
                 agent_beliefs=self._agent_beliefs,
                 true_obstacles=true_obstacles,
                 true_frenet=true_frenet,

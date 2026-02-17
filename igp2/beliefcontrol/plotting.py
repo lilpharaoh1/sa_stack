@@ -201,7 +201,7 @@ class OptimisationPlotter:
         legend_handles = [
             Line2D([0], [0], color='r', linewidth=2, label='Human NLP'),
             Line2D([0], [0], color=(0.0, 0.7, 0.0), linewidth=2, label='True NLP'),
-            Line2D([0], [0], color='c', linewidth=1.5, linestyle='--', label='Human MILP'),
+            Line2D([0], [0], color='r', linewidth=1.5, linestyle='--', label='Human MILP'),
             Line2D([0], [0], color=(0.0, 0.7, 0.0), linewidth=1.5, linestyle='--',
                    label='True MILP'),
             Line2D([0], [0], color='g', linewidth=2, label='Reference'),
@@ -224,7 +224,7 @@ class OptimisationPlotter:
         # --- Pre-allocate fixed line artists ---
         empty = ([], [])
         self._lines = {
-            'human_milp': ax.plot(*empty, 'c--', linewidth=1.5, zorder=4)[0],
+            'human_milp': ax.plot(*empty, color='r', ls='--', linewidth=1.5, zorder=4)[0],
             'human_nlp':  ax.plot(*empty, 'r-', linewidth=2, zorder=5)[0],
             'true_milp':  ax.plot(*empty, color=(0, 0.7, 0), ls='--', lw=1.5, zorder=4)[0],
             'true_nlp':   ax.plot(*empty, color=(0, 0.7, 0), ls='-', lw=2, zorder=5)[0],

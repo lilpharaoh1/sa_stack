@@ -695,7 +695,7 @@ class TwoStageOPT:
         'a_min': -3.0,        # Acceleration min (m/s^2)
         'a_max': 3.0,         # Acceleration max (m/s^2)
         'delta_max': 0.45,    # Max steering angle magnitude (rad)
-        'delta_rate_max': 1.0,  # Max steering rate (rad/s)
+        'delta_rate_max': 0.18,  # Max steering rate (rad/s)
         'jerk_max': 100.0,      # Max jerk (m/s^3)
         'v_min': 0.01,         # Velocity min (m/s)
         'v_max': 10.0,        # Velocity max (m/s)
