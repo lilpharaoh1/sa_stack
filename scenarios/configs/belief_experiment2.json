@@ -11,10 +11,10 @@
     "type": "BeliefAgent",
     "spawn": {
       "box": {
-        "center": [2.0, -270.0],
+        "center": [2.0, -280.0],
         "length": 10,
         "width": 3.5,
-        "heading": 0.0
+        "heading": 1.57
       },
       "velocity": [5.0, 10.0]
     },
@@ -23,30 +23,30 @@
         "center": [2.0, -200.0],
         "length": 5,
         "width": 7,
-        "heading": 0.0
+        "heading": 1.57
       }
     },
-    "human": true
+    "human": false
   },
   "dynamic_groups": [
     {
       "agent_type": "TrafficAgent",
-      "count": [1, 1],
+      "count": [1, 2],
       "spawn": {
         "box": {
-          "center": [-2.0, -220.0],
-          "length": 3.5,
-          "width": 10.0,
-          "heading": 0.0
+          "center": [-2.0, -225.0],
+          "length": 20.0,
+          "width": 3.5,
+          "heading": 1.57
         },
         "velocity": [5.0, 10.0]
       },
       "goal": {
         "box": {
           "center": [-2.0, -300.0],
-          "length": 5,
-          "width": 7,
-          "heading": 0.0
+          "length": 7,
+          "width": 5,
+          "heading": 1.57
         }
       },
       "open_loop": true,
@@ -54,22 +54,22 @@
     },
     {
       "agent_type": "TrafficAgent",
-      "count": [1, 1],
+      "count": [1, 2],
       "spawn": {
         "box": {
-          "center": [-2.0, -200.0],
-          "length": 3.5,
-          "width": 10.0,
-          "heading": 0.0
+          "center": [-2.0, -210.0],
+          "length": 15.0,
+          "width": 3.5,
+          "heading": 1.57
         },
         "velocity": [5.0, 10.0]
       },
       "goal": {
         "box": {
           "center": [-2.0, -300.0],
-          "length": 5,
-          "width": 7,
-          "heading": 0.0
+          "length": 7,
+          "width": 5,
+          "heading": 1.57
         }
       },
       "open_loop": true,
@@ -78,13 +78,26 @@
   ],
   "static_groups": [
     {
-      "count": [2, 2],
+      "count": [1, 1],
       "spawn": {
         "box": {
-          "center": [3.2, -242.5],
-          "length": 3.5,
-          "width": 10.0,
-          "heading": 0.0
+          "center": [2.5, -245.0],
+          "length": 7.0,
+          "width": 1.0,
+          "heading": 1.57
+        }
+      },
+      "z_offset": 0.25,
+      "blueprint": "vehicle.audi.a2"
+    },
+    {
+      "count": [1, 1],
+      "spawn": {
+        "box": {
+          "center": [2.5, -240.0],
+          "length": 7.0,
+          "width": 1.0,
+          "heading": 1.57
         }
       },
       "z_offset": 0.25,

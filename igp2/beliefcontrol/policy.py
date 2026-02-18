@@ -678,7 +678,7 @@ class TwoStageOPT:
         'a_d_max': 3.0,       # Lateral acceleration max (m/s^2)
         'jerk_s_max': 100.0,    # Longitudinal jerk max (m/s^3)
         'jerk_d_max': 100.0,    # Lateral jerk max (m/s^3)
-        'vs_min': 0.01,        # Longitudinal velocity min (m/s)
+        'vs_min': 0.0,        # Longitudinal velocity min (m/s)
         'vs_max': 10.0,       # Longitudinal velocity max (m/s)
         'vd_min': -10.0,       # Lateral velocity min (m/s)
         'vd_max': 10.0,        # Lateral velocity max (m/s)
@@ -697,7 +697,7 @@ class TwoStageOPT:
         'delta_max': 0.45,    # Max steering angle magnitude (rad)
         'delta_rate_max': 0.18,  # Max steering rate (rad/s)
         'jerk_max': 100.0,      # Max jerk (m/s^3)
-        'v_min': 0.01,         # Velocity min (m/s)
+        'v_min': 0.0,         # Velocity min (m/s)
         'v_max': 10.0,        # Velocity max (m/s)
         'w_s': 0.1,           # Weight for longitudinal position tracking
         'w_d': 10.0,           # Weight for lateral position tracking
@@ -1642,27 +1642,53 @@ class TwoStageOPT:
             opti.solver('ipopt', p_opts, s_opts)
 
             # ==================== INITIAL GUESS ====================
-            for k in range(H + 1):                                                                                                                                                              
-                opti.set_initial(s[k], s0)                                                                                                                                                    
-                opti.set_initial(d[k], d0)                                                                                                                                                    
-                opti.set_initial(vs[k], 0.0)                                                                                                                                                  
-                opti.set_initial(vd[k], 0)                                                                                                                                                    
-                # opti.set_initial(s[k], s0 + vs0 * k * dt)                                                                                                                                       
-                # opti.set_initial(d[k], d0)                                                                                                                                                      
-                # opti.set_initial(vs[k], vs0)                                                                                                                                                    
-                # opti.set_initial(vd[k], vd0)                                                                                                                                                    
-                # opti.set_initial(s[k], s0 + 0.33 * v_goal * k * dt)                                                                                                                           
-                # opti.set_initial(d[k], d0)                                                                                                                                                    
-                # opti.set_initial(vs[k], 0.33 * v_goal)                                                                                                                                        
-                # opti.set_initial(vd[k], 0)                                                                                                                                                    
-                # opti.set_initial(s[k], s0 + v_goal * k * dt)                                                                                                                                  
-                # opti.set_initial(d[k], d0)                                                                                                                                                    
-                # opti.set_initial(vs[k], v_goal)                                                                                                                                               
-                # opti.set_initial(vd[k], 0)                                                                                                                                                    
-                for k in range(H):                                                                                                                                                                  
-                    opti.set_initial(a_s[k], 0)                                                                                                                                                     
-                    opti.set_initial(a_d[k], 0) 
-            # # Decelerate from current velocity to zero as fast as control bounds allow
+            # Use previous NLP solution (shifted by 1 step) if available
+            if False: # self._prev_nlp_states is not None:
+                prev = self._prev_nlp_states  # (H+1, 4) [s, d, phi, v]
+                # Shift forward by 1 step; repeat last entry for the new final step
+                shifted = np.vstack([prev[1:], prev[-1:]])
+                gs_s = shifted[:, 0]
+                gs_d = shifted[:, 1]
+                gs_vs = shifted[:, 3] * np.cos(shifted[:, 2])
+                gs_vd = shifted[:, 3] * np.sin(shifted[:, 2])
+                for k in range(H + 1):
+                    opti.set_initial(s[k], gs_s[k])
+                    opti.set_initial(d[k], gs_d[k])
+                    opti.set_initial(vs[k], gs_vs[k])
+                    opti.set_initial(vd[k], gs_vd[k])
+                for k in range(H):
+                    opti.set_initial(a_s[k], (gs_vs[min(k+1, H)] - gs_vs[k]) / dt)
+                    opti.set_initial(a_d[k], (gs_vd[min(k+1, H)] - gs_vd[k]) / dt)
+            else:
+                # # Fallback: stationary at current position
+                # for k in range(H + 1):
+                #     opti.set_initial(s[k], s0)
+                #     opti.set_initial(d[k], d0)
+                #     opti.set_initial(vs[k], 0.0)
+                #     opti.set_initial(vd[k], 0.0)
+                # for k in range(H):
+                #     opti.set_initial(a_s[k], 0.0)
+                #     opti.set_initial(a_d[k], 0.0)
+                # # Fallback: Full goal speed:
+                # for k in range(H + 1):
+                #     opti.set_initial(s[k], s0 + v_goal * k * dt)
+                #     opti.set_initial(d[k], d0)
+                #     opti.set_initial(vs[k], v_goal)
+                #     opti.set_initial(vd[k], 0)
+                # for k in range(H):
+                #     opti.set_initial(a_s[k], 0)
+                #     opti.set_initial(a_d[k], 0)
+                # Fallback: Fraction of goal speed:
+                for k in range(H + 1):
+                    opti.set_initial(s[k], s0 + 0.5 * v_goal * k * dt)
+                    opti.set_initial(d[k], d0)
+                    opti.set_initial(vs[k], 0.5 * v_goal)
+                    opti.set_initial(vd[k], 0)
+                for k in range(H):
+                    opti.set_initial(a_s[k], 0)
+                    opti.set_initial(a_d[k], 0)
+
+            # # Decelerate from current velocity to zero:
             # gs_s, gs_d, gs_vs, gs_vd = s0, d0, vs0, vd0
             # for k in range(H + 1):
             #     opti.set_initial(s[k], gs_s)
@@ -1670,7 +1696,6 @@ class TwoStageOPT:
             #     opti.set_initial(vs[k], gs_vs)
             #     opti.set_initial(vd[k], gs_vd)
             #     if k < H:
-            #         # Max deceleration toward zero for each component
             #         gs_a_s = max(a_s_min, -gs_vs / dt) if gs_vs > 0 else min(a_s_max, -gs_vs / dt) if gs_vs < 0 else 0.0
             #         gs_a_d = max(a_d_min, -gs_vd / dt) if gs_vd > 0 else min(a_d_max, -gs_vd / dt) if gs_vd < 0 else 0.0
             #         opti.set_initial(a_s[k], gs_a_s)

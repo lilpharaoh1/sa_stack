@@ -1,50 +1,37 @@
 {
   "scenario": {
     "map_path": "scenarios/maps/Town01.xodr",
+    "map_name": "Town01",
     "max_speed": 10.0,
     "fps": 5,
-    "seed": 21,
-    "max_steps": 1000
+    "max_steps": 1000,
+    "plot_interval": true
   },
-  "agents": [
-    {
-      "id": 0,
-      "type": "BeliefAgent",
-      "spawn": {
-        "box": {
-          "center": [
-            92.4,
-            -32.1
-          ],
-          "length": 10,
-          "width": 3.5,
-          "heading": 0.0
-        },
-        "velocity": [
-          5.0,
-          10.0
-        ]
+  "ego": {
+    "type": "BeliefAgent",
+    "spawn": {
+      "box": {
+        "center": [92.4, -32.1],
+        "length": 10,
+        "width": 3.5,
+        "heading": 0.0
       },
-      "goal": {
-        "box": {
-          "center": [
-            20.0,
-            1.5
-          ],
-          "length": 5,
-          "width": 7,
-          "heading": 0.0
-        }
-      },
-      "beliefs": {
-        "1": {"visible": false, "velocity_error": 0.0},
-        "2": {"visible": true, "velocity_error": 0.0}
+      "velocity": [5.0, 10.0]
+    },
+    "goal": {
+      "box": {
+        "center": [20.0, 1.5],
+        "length": 5,
+        "width": 7,
+        "heading": 0.0
       }
     },
+    "human": true
+  },
+  "dynamic_groups": [
     {
-      "id": 1,
-      "type": "TrafficAgent",
-      "open_loop": true,
+      "agent_type": "TrafficAgent",
+      "count": [1, 1],
       "spawn": {
         "box": {
           "center": [40, -2.5],
@@ -52,27 +39,22 @@
           "width": 10.0,
           "heading": 0.0
         },
-        "velocity": [
-          5.0,
-          10.0
-        ]
+        "velocity": [5.0, 10.0]
       },
       "goal": {
         "box": {
-          "center": [
-            200.0,
-            -2.5
-          ],
+          "center": [200.0, -2.5],
           "length": 5,
           "width": 7,
           "heading": 0.0
         }
-      }
+      },
+      "open_loop": true,
+      "belief": {"visible": false, "velocity_error": 0.0}
     },
     {
-      "id": 2,
-      "type": "TrafficAgent",
-      "open_loop": true,
+      "agent_type": "TrafficAgent",
+      "count": [1, 1],
       "spawn": {
         "box": {
           "center": [140.0, 1.5],
@@ -80,26 +62,33 @@
           "width": 10.0,
           "heading": 0.0
         },
-        "velocity": [
-          5.0,
-          10.0
-        ]
+        "velocity": [5.0, 10.0]
       },
       "goal": {
         "box": {
-          "center": [
-            20.0,
-            1.5
-          ],
+          "center": [20.0, 1.5],
           "length": 5,
           "width": 7,
           "heading": 0.0
         }
-      }
+      },
+      "open_loop": true,
+      "belief": {"visible": true, "velocity_error": 0.0}
     }
   ],
-    "static_objects": [
-      {"position": [70.0, -4.5, 0.1], "heading": 0.0, "blueprint": "vehicle.audi.a2"},
-      {"position": [82.0, -4.5, 0.1], "heading": 0.0, "blueprint": "vehicle.audi.a2"}
-    ]
+  "static_groups": [
+    {
+      "count": [2, 2],
+      "spawn": {
+        "box": {
+          "center": [76.0, -4.5],
+          "length": 20.0,
+          "width": 3.5,
+          "heading": 0.0
+        }
+      },
+      "z_offset": 0.1,
+      "blueprint": "vehicle.audi.a2"
+    }
+  ]
 }

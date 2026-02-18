@@ -260,7 +260,7 @@ class BeliefAgent(Agent):
             Applied when ``set_agents()`` is called.  Defaults to empty.
         policy_type: Which control policy to use. One of
             ``"sample_based"`` or ``"two_stage_opt"``.
-        plot_interval: Plot every N steps (0 to disable plotting).
+        plot_interval: Whether to enable live plotting.
         **policy_kwargs: Additional keyword arguments forwarded to the
             policy constructor (e.g. ``horizon``, ``n_samples``,
             ``target_speed``, ``w_ref``, etc.).
@@ -274,7 +274,7 @@ class BeliefAgent(Agent):
                  scenario_map: Map = None,
                  agent_beliefs: Dict[int, Dict[str, Any]] = None,
                  policy_type: str = "two_stage_opt",
-                 plot_interval: int = 1,
+                 plot_interval: bool = True,
                  human: bool = True,
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
@@ -317,7 +317,7 @@ class BeliefAgent(Agent):
 
         # Build the matching plotter
         self._plotter = None
-        if scenario_map is not None and plot_interval > 0:
+        if scenario_map is not None and plot_interval:
             self._plotter = self._build_plotter(
                 policy_type, scenario_map, goal,
             )
@@ -438,11 +438,6 @@ class BeliefAgent(Agent):
                 cfg = self._agent_beliefs_config.get(str(aid), {})
             self._agent_beliefs[aid] = AgentBelief(**cfg)
 
-        logger.info("BeliefAgent %d: beliefs for %d agents: %s",
-                     self.agent_id, len(self._agent_beliefs),
-                     {aid: (b.visible, b.velocity_error)
-                      for aid, b in self._agent_beliefs.items()})
-
     def _predict_agent_trajectories(self, frame: Dict[int, AgentState],
                                      use_beliefs: bool = True) -> Dict[int, np.ndarray]:
         """Forward-simulate other agents to predict their trajectories.
@@ -521,10 +516,6 @@ class BeliefAgent(Agent):
                 continue
             human_other_agents[aid] = s
 
-        if hidden_agents and self._step_count % 20 == 1:
-            logger.info("BeliefAgent %d: hiding agents %s from human policy",
-                        self.agent_id, hidden_agents)
-
         # True: all other agents (no belief filtering)
         true_other_agents = {aid: s for aid, s in observation.frame.items()
                              if aid != self.agent_id}
@@ -556,9 +547,7 @@ class BeliefAgent(Agent):
 
         # --- Plot if enabled ---
         t0 = _time.perf_counter()
-        if (self._plotter is not None
-                and self._plot_interval > 0
-                and self._step_count % self._plot_interval == 0):
+        if self._plotter is not None and self._plot_interval:
             if self._human_enabled:
                 self._plot(ego_state, human_candidates, human_best)
             else:

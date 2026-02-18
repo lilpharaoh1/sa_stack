@@ -427,6 +427,7 @@ class CarlaSim:
             except Exception as e:
                 logger.warning(f"Failed to destroy static object: {e}")
         self.__static_objects.clear()
+        self.__next_static_id = -1
         logger.info("Cleared all static objects.")
 
     @property
