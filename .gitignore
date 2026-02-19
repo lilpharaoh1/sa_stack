@@ -138,6 +138,7 @@ scripts/experiments/data/evaluation_set/
 
 Playground.ipynb
 scripts/experiments/data/*/
+scripts/experiments/frames/
 *.pkl
 
 docs/build/
