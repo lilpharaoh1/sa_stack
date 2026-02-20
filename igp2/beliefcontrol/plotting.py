@@ -627,6 +627,7 @@ class OptimisationPlotter:
 
 # Max candidate paths to pre-allocate in InferencePlotter (2^5 = 32)
 _MAX_INFERENCE_LINES = 32
+_MAX_INFERENCE_VEHICLES = 10
 
 
 class InferencePlotter:
@@ -650,11 +651,15 @@ class InferencePlotter:
                  scenario_map: Map,
                  reference_waypoints: np.ndarray,
                  frenet: 'FrenetFrame',
-                 dt: float = 0.1):
+                 dt: float = 0.1,
+                 ego_length: float = 4.5,
+                 ego_width: float = 1.8):
         self._scenario_map = scenario_map
         self._reference_waypoints = reference_waypoints
         self._frenet = frenet
         self._dt = dt
+        self._ego_length = ego_length
+        self._ego_width = ego_width
 
         self._fig: Optional[plt.Figure] = None
         self._ax: Optional[plt.Axes] = None
@@ -672,6 +677,11 @@ class InferencePlotter:
         self._vel_candidate_lines: List[Line2D] = []
         self._vel_candidate_future_lines: List[Line2D] = []
         self._vel_window_line: Optional[Line2D] = None
+
+        # Pre-allocated vehicle patches + labels (other agents)
+        self._vehicle_patches: List[MplPolygon] = []
+        self._vehicle_labels: List[plt.Text] = []
+        self._ego_patch: Optional[MplPolygon] = None
 
     def _init(self):
         """Create figure, draw static content, pre-allocate artists."""
@@ -727,6 +737,30 @@ class InferencePlotter:
                                   edgecolor='none'))
             self._cost_labels.append(t)
 
+        # --- Pre-allocate vehicle patches for other agents ---
+        dummy = np.zeros((4, 2))
+        self._vehicle_patches = []
+        self._vehicle_labels = []
+        for _ in range(_MAX_INFERENCE_VEHICLES):
+            p = MplPolygon(dummy, closed=True, visible=False,
+                           linewidth=1.5, zorder=7)
+            ax.add_patch(p)
+            self._vehicle_patches.append(p)
+
+            t = ax.text(0, 0, '', fontsize=7, ha='center', va='bottom',
+                        fontweight='bold', visible=False, zorder=9,
+                        bbox=dict(boxstyle='round,pad=0.15',
+                                  facecolor='white', alpha=0.8,
+                                  edgecolor='none'))
+            self._vehicle_labels.append(t)
+
+        # --- Ego vehicle patch ---
+        self._ego_patch = MplPolygon(
+            dummy, closed=True, visible=False,
+            facecolor=(0.1, 0.1, 0.1, 0.3), edgecolor='black',
+            linewidth=1.5, zorder=7)
+        ax.add_patch(self._ego_patch)
+
         ax.set_aspect('equal')
 
         # --- Velocity panel ---
@@ -769,6 +803,14 @@ class InferencePlotter:
         for t in self._cost_labels:
             t.set_visible(False)
 
+        # Vehicle patches + labels
+        for p in self._vehicle_patches:
+            p.set_visible(False)
+        for t in self._vehicle_labels:
+            t.set_visible(False)
+        if self._ego_patch is not None:
+            self._ego_patch.set_visible(False)
+
         # Velocity panel
         self._vel_observed_line.set_data([], [])
         for l in self._vel_candidate_lines:
@@ -796,6 +838,16 @@ class InferencePlotter:
             if t.get_visible():
                 ax.draw_artist(t)
 
+        # Vehicle patches + labels
+        for p in self._vehicle_patches:
+            if p.get_visible():
+                ax.draw_artist(p)
+        for t in self._vehicle_labels:
+            if t.get_visible():
+                ax.draw_artist(t)
+        if self._ego_patch is not None and self._ego_patch.get_visible():
+            ax.draw_artist(self._ego_patch)
+
         # Velocity panel
         vel_ax.draw_artist(self._vel_observed_line)
         for l in self._vel_candidate_future_lines:
@@ -808,7 +860,9 @@ class InferencePlotter:
             vel_ax.draw_artist(self._vel_window_line)
 
     def update(self, observed_sd: np.ndarray, results: list,
-               ego_position: np.ndarray, step: int):
+               ego_position: np.ndarray, step: int,
+               other_agent_states=None, marginals=None,
+               ego_heading: float = 0.0):
         """Redraw the inference debug plot.
 
         Args:
@@ -816,6 +870,9 @@ class InferencePlotter:
             results: List of InferenceResult, sorted by cost.
             ego_position: Current ego world position [x, y] for view centring.
             step: Simulation step number.
+            other_agent_states: Dict mapping agent_id -> AgentState.
+            marginals: Dict mapping agent_id -> P(h_i | τ_obs).
+            ego_heading: Ego world heading in radians.
         """
         if self._fig is None or not plt.fignum_exists(self._fig.number):
             self._init()
@@ -834,8 +891,8 @@ class InferencePlotter:
         n_observed = len(observed_sd)
         dt = self._dt
 
-        # --- Observed path (map + velocity) ---
-        if n_observed > 0:
+        # --- Observed path (map + velocity) — only when comparing ---
+        if n_observed > 0 and results:
             obs_world = self._frenet.frenet_to_world_batch(
                 observed_sd[:, 0], observed_sd[:, 1])
             self._observed_line.set_data(obs_world[:, 0], obs_world[:, 1])
@@ -860,7 +917,6 @@ class InferencePlotter:
 
             l = self._candidate_lines[i]
             lf = self._candidate_future_lines[i]
-            t = self._cost_labels[i]
             vl = self._vel_candidate_lines[i]
             vlf = self._vel_candidate_future_lines[i]
 
@@ -879,17 +935,11 @@ class InferencePlotter:
                     lw = 2.5
                     alpha = 1.0
                     l.set_zorder(5)
-                    t.set_fontweight('bold')
-                    t.set_fontsize(7)
-                    t.set_color((0.0, 0.5, 0.0))
                 else:
                     color = (0.8, 0.4, 0.0)
                     lw = 1.2
-                    alpha = 0.6
+                    alpha = 0.9
                     l.set_zorder(4)
-                    t.set_fontweight('normal')
-                    t.set_fontsize(6)
-                    t.set_color((0.5, 0.3, 0.0))
 
                 l.set_color(color)
                 l.set_linewidth(lw)
@@ -904,8 +954,8 @@ class InferencePlotter:
                     lf.set_data(future_world[:, 0], future_world[:, 1])
                     lf.set_color(color)
                     lf.set_linewidth(lw)
-                    lf.set_linestyle('--')
-                    lf.set_alpha(0.2)
+                    lf.set_linestyle('-')
+                    lf.set_alpha(0.5)
                     lf.set_visible(True)
 
                 # --- Velocity: compared portion ---
@@ -933,36 +983,14 @@ class InferencePlotter:
                         vlf.set_data(future_time, future_speed)
                         vlf.set_color(color)
                         vlf.set_linewidth(lw)
-                        vlf.set_linestyle('--')
-                        vlf.set_alpha(0.2)
+                        vlf.set_linestyle('-')
+                        vlf.set_alpha(0.5)
                         vlf.set_visible(True)
 
                         max_time = max(max_time,
                                        float(len(r.planned_vel) * dt))
                         max_speed = max(max_speed,
                                         float(np.max(future_speed)))
-
-                # --- Cost label at end of compared portion ---
-                end_x, end_y = plan_world[-1]
-                cfg_str = ",".join(
-                    f"{aid}:{'V' if vis else 'H'}"
-                    for aid, vis in sorted(r.config.items())
-                )
-                t.set_position((end_x + 0.5, end_y + 0.5 + i * 1.5))
-                t.set_text(f"{{{cfg_str}}} p={r.pos_cost:.2f} v={r.vel_cost:.2f}")
-                t.set_visible(True)
-            else:
-                t.set_position((ego_position[0] + margin * 0.5,
-                                ego_position[1] + margin * 0.4 - i * 1.5))
-                cfg_str = ",".join(
-                    f"{aid}:{'V' if vis else 'H'}"
-                    for aid, vis in sorted(r.config.items())
-                )
-                t.set_text(f"{{{cfg_str}}} FAILED")
-                t.set_color((0.7, 0.0, 0.0))
-                t.set_fontweight('normal')
-                t.set_fontsize(6)
-                t.set_visible(True)
 
             l.set_visible(True)
 
@@ -975,6 +1003,63 @@ class InferencePlotter:
             window_t = (n_observed - 1) * dt
             self._vel_window_line.set_xdata([window_t, window_t])
             self._vel_window_line.set_visible(True)
+
+        # --- Other agent vehicles (coloured by P(h_i | τ_obs) on coolwarm) ---
+        cmap = plt.cm.coolwarm
+        pi = 0
+        if other_agent_states:
+            if marginals is None:
+                marginals = {}
+            for aid, agent_state in other_agent_states.items():
+                if pi >= _MAX_INFERENCE_VEHICLES:
+                    break
+                meta = getattr(agent_state, 'metadata', None)
+                vl = meta.length if meta else 4.5
+                vw = meta.width if meta else 1.8
+
+                corners = calculate_multiple_bboxes(
+                    [agent_state.position[0]], [agent_state.position[1]],
+                    vl, vw, agent_state.heading,
+                )[0]
+
+                p = self._vehicle_patches[pi]
+                p.set_xy(corners)
+
+                if aid < 0:
+                    # Static obstacles: ego-grey with alpha
+                    p.set_facecolor((0.1, 0.1, 0.1, 0.6))
+                    p.set_edgecolor((0.0, 0.0, 0.0, 0.8))
+                else:
+                    # Dynamic agents: coolwarm by P(h_i | τ_obs)
+                    p_hidden = marginals.get(aid, 0.5)
+                    color = cmap(p_hidden)
+                    p.set_facecolor((*color[:3], 0.5))
+                    p.set_edgecolor((*color[:3], 0.9))
+
+                p.set_linewidth(1.5)
+                p.set_visible(True)
+
+                t = self._vehicle_labels[pi]
+                t.set_position((agent_state.position[0],
+                                agent_state.position[1] + vw / 2 + 1.5))
+                if aid < 0:
+                    t.set_text("")  # no label for static obstacles
+                elif aid in marginals:
+                    t.set_text(f"Agent {aid}\nP(h|τ)={marginals[aid]:.2f}")
+                else:
+                    t.set_text(f"Agent {aid}")
+                t.set_color((0.15, 0.15, 0.15))
+                t.set_visible(True)
+
+                pi += 1
+
+        # --- Ego vehicle (grey, matching OptimisationPlotter style) ---
+        ego_corners = calculate_multiple_bboxes(
+            [ego_position[0]], [ego_position[1]],
+            self._ego_length, self._ego_width, ego_heading,
+        )[0]
+        self._ego_patch.set_xy(ego_corners)
+        self._ego_patch.set_visible(True)
 
         # --- Title ---
         n_configs = len(results)

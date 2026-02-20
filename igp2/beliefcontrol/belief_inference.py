@@ -129,7 +129,8 @@ class BeliefInference:
         if plot and self._frenet is not None:
             self._plotter = InferencePlotter(
                 scenario_map, policy._reference_waypoints, self._frenet,
-                dt=self._dt)
+                dt=self._dt,
+                ego_length=self._ego_length, ego_width=self._ego_width)
 
     def reset(self):
         """Clear history and results."""
@@ -263,16 +264,24 @@ class BeliefInference:
             # Sort by position cost
             results.sort(key=lambda r: r.pos_cost)
 
-            # Print results
-            self._print_results(results, step_count, relevant_aids, t_elapsed,
-                                self._warmup_steps)
+            # Print results and get marginal posteriors
+            marginals = self._print_results(results, step_count, relevant_aids,
+                                            t_elapsed, self._warmup_steps)
 
         self._last_results = results
         self._last_observed_sd = observed_sd
 
         # 6. Update debug plot (always, even with no candidates)
         if self._plotter is not None and ego_position is not None:
-            self._plotter.update(observed_sd, results, ego_position, step_count)
+            # Compute ego world heading from Frenet state
+            w = self._frenet.frenet_to_world(
+                frenet_state[0], frenet_state[1], heading=frenet_state[2])
+            ego_heading = w['heading']
+            self._plotter.update(
+                observed_sd, results, ego_position, step_count,
+                other_agent_states=other_agent_states,
+                marginals=marginals if relevant_aids else {},
+                ego_heading=ego_heading)
 
     def _find_relevant_agents(self, ego_s: float,
                               other_agent_states: Dict[int, AgentState]
@@ -465,8 +474,12 @@ class BeliefInference:
 
     def _print_results(self, results: List[InferenceResult],
                        step_count: int, relevant_aids: List[int],
-                       elapsed: float, window_steps: int):
-        """Pretty-print inference results table sorted by cost."""
+                       elapsed: float, window_steps: int) -> Dict[int, float]:
+        """Pretty-print inference results table sorted by cost.
+
+        Returns:
+            Marginal posteriors {agent_id: P(h_i | τ_obs)} for each agent.
+        """
         n_configs = len(results)
         aids_str = ", ".join(str(a) for a in relevant_aids)
 
@@ -519,8 +532,8 @@ class BeliefInference:
                   f"P(b|τ)={boltzmann_probs[i]:.3f}  [{status}]{marker}")
 
         # Marginal posterior: P(h_i | τ_obs) = Σ_{b : i hidden in b} P(b | τ_obs)
+        marginals = {}
         if results and len(boltzmann_probs) > 0:
-            marginals = {}
             for i, r in enumerate(results):
                 for aid, vis in r.config.items():
                     if aid not in marginals:
@@ -529,6 +542,7 @@ class BeliefInference:
                         marginals[aid] += boltzmann_probs[i]
             print(f"  P(h_i|τ): " + ", ".join(
                 f"{aid}={marginals[aid]:.3f}" for aid in sorted(marginals)))
+        return marginals
 
     @property
     def last_results(self) -> Optional[List[InferenceResult]]:
