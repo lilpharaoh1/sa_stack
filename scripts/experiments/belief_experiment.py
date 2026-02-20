@@ -60,6 +60,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--preview", action="store_true",
                         help="Show spawn preview plot for the first sample before running")
+    parser.add_argument("--intervention-type", type=str, default="none",
+                        choices=["none", "agency_only", "combined", "warmstart_only"],
+                        help="Intervention scheme for the ego agent (default: none)")
     return parser.parse_args()
 
 
@@ -230,6 +233,7 @@ def main():
             plot_interval=plot_interval,
             seed=sample_seed,
             scenario_name=args.map,
+            intervention_type=args.intervention_type,
         )
         results.append(result)
 

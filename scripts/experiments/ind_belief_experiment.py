@@ -151,6 +151,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--no-plot", action="store_true",
                         help="Disable the BeliefAgent plotter")
+    parser.add_argument("--intervention-type", type=str, default="none",
+                        choices=["none", "agency_only", "combined", "warmstart_only"],
+                        help="Intervention scheme for the ego agent (default: none)")
     return parser.parse_args()
 
 
@@ -208,10 +211,12 @@ def create_agent(agent_config, frame, fps, scenario_map, plot_interval=True):
     if agent_type == "BeliefAgent":
         agent_beliefs = agent_config.get("beliefs", None)
         human = agent_config.get("human", True)
+        intervention_type = agent_config.get("intervention_type", "none")
         return ip.BeliefAgent(**base, scenario_map=scenario_map,
                               plot_interval=plot_interval,
                               agent_beliefs=agent_beliefs,
-                              human=human)
+                              human=human,
+                              intervention_type=intervention_type)
     elif agent_type == "TrafficAgent":
         open_loop = agent_config.get("open_loop", False)
         return ip.TrafficAgent(**base, open_loop=open_loop)
@@ -632,6 +637,8 @@ def expand_new_config(config: dict,
     }
     if "human" in ego_cfg:
         ego_agent["human"] = ego_cfg["human"]
+    if "intervention_type" in ego_cfg:
+        ego_agent["intervention_type"] = ego_cfg["intervention_type"]
 
     agents = [ego_agent]
     beliefs = {}
@@ -803,6 +810,7 @@ def run_single_experiment(config: dict,
                           plot_interval: bool = True,
                           seed: int = 21,
                           scenario_name: str = "experiment",
+                          intervention_type: str = "none",
                           ) -> ExperimentResult:
     """Run a single experiment episode.
 
@@ -811,6 +819,9 @@ def run_single_experiment(config: dict,
     is responsible for removing agents and static objects afterwards.
     """
     ego_id = config["agents"][0]["id"]
+
+    # Inject intervention_type into the ego agent config so create_agent picks it up
+    config["agents"][0]["intervention_type"] = intervention_type
 
     agents = {}
     for agent_config in config["agents"]:
@@ -1010,6 +1021,7 @@ def main():
         plot_interval=plot_interval,
         seed=args.seed,
         scenario_name=args.map,
+        intervention_type=args.intervention_type,
     )
 
     output_name = args.output if args.output else f"{args.map}_{args.seed}"

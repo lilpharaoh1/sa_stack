@@ -278,6 +278,7 @@ class BeliefAgent(Agent):
                  policy_type: str = "two_stage_opt",
                  plot_interval: bool = True,
                  human: bool = True,
+                 intervention_type: str = 'none',
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
@@ -330,7 +331,8 @@ class BeliefAgent(Agent):
                 isinstance(self._human_policy, TwoStagePolicy) and
                 scenario_map is not None):
             self._belief_inference = BeliefInference(
-                self._human_policy, scenario_map)
+                self._human_policy, scenario_map,
+                intervention_type=intervention_type)
 
     def _build_policy(self, policy_type, fps, scenario_map, **kwargs):
         """Instantiate the control policy based on ``policy_type``."""
@@ -687,6 +689,17 @@ class BeliefAgent(Agent):
                         frenet_state, other_states, self._step_count,
                         ego_position=np.array(ego_state.position))
                     timing['belief_inference'] = _time.perf_counter() - t0
+
+                    # Override action with intervention if a hidden agent was
+                    # detected and the intervention NLP succeeded.
+                    interv = self._belief_inference.last_intervention
+                    if interv is not None and interv['success']:
+                        opt_controls = interv['opt_controls']
+                        action = Action(
+                            acceleration=float(opt_controls[0, 0]),
+                            steer_angle=float(opt_controls[0, 1]),
+                            target_speed=self._human_policy._target_speed,
+                        )
 
         # Merge policy/plot timings set by policy()
         timing.update(self.last_step_timing)

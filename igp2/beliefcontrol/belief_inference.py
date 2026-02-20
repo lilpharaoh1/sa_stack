@@ -18,7 +18,8 @@ from igp2.core.agentstate import AgentState
 from igp2.beliefcontrol.frenet import FrenetFrame
 from igp2.beliefcontrol.first_stage import FirstStagePlanner
 from igp2.beliefcontrol.second_stage import SecondStagePlanner
-from igp2.beliefcontrol.plotting import InferencePlotter
+from igp2.beliefcontrol.secondstage_intervention import SecondStageIntervention
+from igp2.beliefcontrol.plotting import InferencePlotter, InterventionPlotter
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ class InferenceResult:
     planned_sd: Optional[np.ndarray]       # (K, 2) planned [s, d]
     planned_vel: Optional[np.ndarray]      # (K, 2) planned [vs, vd]
     solver_ok: bool
+    nlp_states: Optional[np.ndarray] = None    # (H+1, 4) [s, d, phi, v]
+    nlp_controls: Optional[np.ndarray] = None  # (H, 2) [a, delta]
 
 
 class BeliefInference:
@@ -67,11 +70,15 @@ class BeliefInference:
                  max_relevant: int = 5,
                  boltzmann_beta: float = 12.5,
                  vel_weight: float = 1.0,
+                 hidden_threshold: float = 0.6,
+                 intervention_type: str = 'none',
+                 w_agency: float = 1.0,
                  plot: bool = True):
         self._scenario_map = scenario_map
         self._warmup_fraction = warmup_fraction
         self._boltzmann_beta = boltzmann_beta
         self._vel_weight = vel_weight
+        self._hidden_threshold = hidden_threshold
         self._relevance_s_margin = relevance_s_margin
         self._relevance_d_threshold = relevance_d_threshold
         self._max_relevant = max_relevant
@@ -119,18 +126,45 @@ class BeliefInference:
             n_obs_max=policy.first_stage._n_obs_max,
         )
 
+        # Minimum-intervention optimizer (same params as second stage)
+        self._intervention_type = intervention_type
+        self._intervention = None
+        if intervention_type != 'none':
+            self._intervention = SecondStageIntervention(
+                horizon=self._horizon,
+                dt=self._dt,
+                ego_length=self._ego_length,
+                ego_width=self._ego_width,
+                wheelbase=self._wheelbase,
+                collision_margin=self._collision_margin,
+                frenet=self._frenet,
+                params=policy.nlp_params,
+                n_obs_max=policy.first_stage._n_obs_max,
+                target_speed=self._target_speed,
+                mode=intervention_type,
+                w_agency=w_agency,
+            )
+
         # History buffer
         self._history: List[HistoryEntry] = []
         self._last_results: Optional[List[InferenceResult]] = None
         self._last_observed_sd: Optional[np.ndarray] = None
+        self._last_intervention = None  # dict or None
 
-        # Debug plotter
+        # Debug plotters
         self._plotter: Optional[InferencePlotter] = None
+        self._intervention_plotter: Optional[InterventionPlotter] = None
         if plot and self._frenet is not None:
             self._plotter = InferencePlotter(
                 scenario_map, policy._reference_waypoints, self._frenet,
                 dt=self._dt,
                 ego_length=self._ego_length, ego_width=self._ego_width)
+            if intervention_type != 'none':
+                self._intervention_plotter = InterventionPlotter(
+                    scenario_map, policy._reference_waypoints, self._frenet,
+                    dt=self._dt,
+                    ego_length=self._ego_length, ego_width=self._ego_width,
+                    collision_margin=self._collision_margin)
 
     def reset(self):
         """Clear history and results."""
@@ -220,6 +254,7 @@ class BeliefInference:
                         pos_cost=float('inf'), vel_cost=float('inf'),
                         planned_sd=None, planned_vel=None,
                         solver_ok=False,
+                        nlp_states=None, nlp_controls=None,
                     ))
                     continue
 
@@ -257,6 +292,8 @@ class BeliefInference:
                     planned_sd=planned_sdvv[:, :2],
                     planned_vel=planned_sdvv[:, 2:4],
                     solver_ok=True,
+                    nlp_states=nlp_states if nlp_ok else warm_states,
+                    nlp_controls=nlp_controls if nlp_ok else warm_controls,
                 ))
 
             t_elapsed = time.perf_counter() - t_start
@@ -268,15 +305,28 @@ class BeliefInference:
             marginals = self._print_results(results, step_count, relevant_aids,
                                             t_elapsed, self._warmup_steps)
 
+            # Compute ego world heading from Frenet state
+            w = self._frenet.frenet_to_world(
+                frenet_state[0], frenet_state[1], heading=frenet_state[2])
+            ego_heading = w['heading']
+
+            # Compute minimum-deviation intervention from current state
+            self._compute_intervention(
+                marginals, frenet_state, other_agent_states,
+                relevant_aids,
+                ego_position=ego_position, step_count=step_count,
+                ego_heading=ego_heading)
+
         self._last_results = results
         self._last_observed_sd = observed_sd
 
         # 6. Update debug plot (always, even with no candidates)
         if self._plotter is not None and ego_position is not None:
-            # Compute ego world heading from Frenet state
-            w = self._frenet.frenet_to_world(
-                frenet_state[0], frenet_state[1], heading=frenet_state[2])
-            ego_heading = w['heading']
+            # Compute ego world heading from Frenet state (reuse if computed above)
+            if not relevant_aids:
+                w = self._frenet.frenet_to_world(
+                    frenet_state[0], frenet_state[1], heading=frenet_state[2])
+                ego_heading = w['heading']
             self._plotter.update(
                 observed_sd, results, ego_position, step_count,
                 other_agent_states=other_agent_states,
@@ -544,10 +594,144 @@ class BeliefInference:
                 f"{aid}={marginals[aid]:.3f}" for aid in sorted(marginals)))
         return marginals
 
+    def _compute_intervention(self, marginals: Dict[int, float],
+                               frenet_state: np.ndarray,
+                               other_agent_states: Dict[int, AgentState],
+                               relevant_aids: List[int],
+                               ego_position: np.ndarray = None,
+                               step_count: int = 0,
+                               ego_heading: float = 0.0):
+        """Compute minimum-deviation intervention from the CURRENT state.
+
+        Re-plans the believed trajectory from the current ego state (not the
+        historical window start), then solves the intervention NLP from the
+        same current state so both trajectories stay anchored to the ego.
+
+        1. Threshold marginals → believed config
+        2. Sample road boundaries & build believed obstacles from current state
+        3. Two-stage plan (MILP → NLP) for believed trajectory
+        4. Build true obstacles (all agents) from current state
+        5. Solve intervention NLP
+        6. Store results and update plotter
+        7. Print diagnostics
+        """
+        if self._intervention_type == 'none':
+            self._last_intervention = None
+            return
+
+        # 1. Threshold marginals to get believed config
+        believed_config = {}
+        for aid in relevant_aids:
+            p_hidden = marginals.get(aid, 0.0)
+            believed_config[aid] = p_hidden <= self._hidden_threshold  # visible
+
+        # Skip if all agents are believed visible — no intervention needed
+        if all(believed_config.values()):
+            self._last_intervention = None
+            return
+
+        # 2. Sample road boundaries from current state
+        s_values = np.array([
+            frenet_state[0] + frenet_state[3] * np.cos(frenet_state[2]) * k * self._dt
+            for k in range(self._horizon + 1)
+        ])
+        s_values = np.clip(s_values, 0.0, self._frenet.total_length)
+        road_left, road_right = self._sample_road_boundaries(s_values)
+
+        # Build believed obstacles (only visible agents)
+        visible_aids = {aid for aid, vis in believed_config.items() if vis}
+        believed_obstacles = self._predict_obstacles_cv(
+            other_agent_states, visible_aids)
+
+        # 3. Two-stage plan for believed trajectory from current state
+        self._first_stage.reset()
+        milp_states = self._first_stage.solve(
+            frenet_state, road_left, road_right, believed_obstacles)
+
+        if milp_states is None:
+            cfg_str = ", ".join(
+                f"{aid}:{'V' if vis else 'H'}"
+                for aid, vis in sorted(believed_config.items()))
+            print(f"  Believed config: {{{cfg_str}}} — MILP failed, skipping intervention")
+            self._last_intervention = None
+            return
+
+        warm_states, warm_controls = self._milp_to_nlp_warmstart(
+            milp_states, frenet_state)
+
+        self._second_stage.reset()
+        nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
+            frenet_state, warm_states, warm_controls,
+            road_left, road_right, believed_obstacles)
+
+        if not nlp_ok:
+            # Fall back to MILP warmstart as reference
+            nlp_states = warm_states
+            nlp_controls = warm_controls
+
+        # 4. Build TRUE obstacles: all dynamic agents visible
+        all_dynamic_aids = {aid for aid in other_agent_states if aid >= 0}
+        true_obstacles = self._predict_obstacles_cv(
+            other_agent_states, all_dynamic_aids)
+
+        # 5. Solve intervention NLP from current state
+        opt_states, opt_controls, success, intervention = self._intervention.solve(
+            frenet_state, nlp_states, nlp_controls,
+            road_left, road_right, true_obstacles)
+
+        # 6. Store results
+        self._last_intervention = {
+            'believed_config': believed_config,
+            'ref_states': nlp_states,
+            'ref_controls': nlp_controls,
+            'opt_states': opt_states,
+            'opt_controls': opt_controls,
+            'intervention': intervention,
+            'success': success,
+            'true_obstacles': true_obstacles,
+        }
+
+        # Update plotter
+        if self._intervention_plotter is not None and ego_position is not None:
+            self._intervention_plotter.update(
+                ref_states=nlp_states,
+                ref_controls=nlp_controls,
+                opt_states=opt_states,
+                opt_controls=opt_controls,
+                intervention=intervention,
+                success=success,
+                believed_config=believed_config,
+                true_obstacles=true_obstacles,
+                ego_position=ego_position,
+                ego_heading=ego_heading,
+                other_agent_states=other_agent_states or {},
+                step=step_count,
+                dt=self._dt)
+
+        # 7. Print diagnostics
+        cfg_str = ", ".join(
+            f"{aid}:{'V' if vis else 'H'}"
+            for aid, vis in sorted(believed_config.items()))
+        if success:
+            du_norm = float(np.linalg.norm(intervention))
+            max_da = float(np.max(np.abs(intervention[:, 0])))
+            max_dd = float(np.max(np.abs(intervention[:, 1])))
+            print(f"  Believed config: {{{cfg_str}}}")
+            print(f"  Intervention: OK, ||du||={du_norm:.4f}, "
+                  f"max|da|={max_da:.4f}, max|dd|={max_dd:.4f}")
+        else:
+            print(f"  Believed config: {{{cfg_str}}}")
+            print(f"  Intervention: FAILED (returning reference trajectory)")
+
     @property
     def last_results(self) -> Optional[List[InferenceResult]]:
         """Most recent inference results, sorted by cost."""
         return self._last_results
+
+    @property
+    def last_intervention(self):
+        """Most recent intervention results dict, or None."""
+        return self._last_intervention
 
     @property
     def history_length(self) -> int:

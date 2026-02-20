@@ -1079,3 +1079,414 @@ class InferencePlotter:
         self._draw_all()
         self._fig.canvas.blit(self._fig.bbox)
         self._fig.canvas.flush_events()
+
+
+# ---------------------------------------------------------------------------
+# InterventionPlotter
+# ---------------------------------------------------------------------------
+
+_MAX_INTERV_OBSTACLES = 10
+_MAX_INTERV_ELLIPSES = 30
+_MAX_INTERV_VEHICLES = 10
+
+
+class InterventionPlotter:
+    """Live debug plot for minimum-intervention visualisation.
+
+    Three-panel layout:
+    - Top: map with believed (red) vs intervened (blue) trajectories,
+      obstacle ellipses, and vehicle bounding boxes.
+    - Middle: acceleration comparison (ref vs opt).
+    - Bottom: steering comparison (ref vs opt).
+
+    Uses pre-allocated artist pools with blitting for efficiency.
+
+    Args:
+        scenario_map: The road layout to draw.
+        reference_waypoints: Concatenated A* reference path (N, 2).
+        frenet: FrenetFrame for converting (s, d) to world coords.
+        dt: Planning timestep in seconds.
+        ego_length: Ego vehicle length (m).
+        ego_width: Ego vehicle width (m).
+        collision_margin: Extra safety margin around obstacles (m).
+    """
+
+    def __init__(self,
+                 scenario_map: Map,
+                 reference_waypoints: np.ndarray,
+                 frenet: 'FrenetFrame',
+                 dt: float = 0.1,
+                 ego_length: float = 4.5,
+                 ego_width: float = 1.8,
+                 collision_margin: float = 0.5):
+        self._scenario_map = scenario_map
+        self._reference_waypoints = reference_waypoints
+        self._frenet = frenet
+        self._dt = dt
+        self._ego_length = ego_length
+        self._ego_width = ego_width
+        self._collision_margin = collision_margin
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax_map: Optional[plt.Axes] = None
+        self._ax_accel: Optional[plt.Axes] = None
+        self._ax_steer: Optional[plt.Axes] = None
+        self._background = None
+
+        # Pre-allocated artists (created in _init)
+        self._believed_line: Optional[Line2D] = None
+        self._intervened_line: Optional[Line2D] = None
+        self._ego_patch: Optional[MplPolygon] = None
+
+        self._vehicle_patches: List[MplPolygon] = []
+        self._vehicle_labels: List[plt.Text] = []
+        self._ellipses: List[MplEllipse] = []
+
+        # Control panels
+        self._ref_accel_line: Optional[Line2D] = None
+        self._opt_accel_line: Optional[Line2D] = None
+        self._ref_steer_line: Optional[Line2D] = None
+        self._opt_steer_line: Optional[Line2D] = None
+
+    def _init(self):
+        """Create figure, draw static content, pre-allocate artists."""
+        plt.ion()
+        self._fig, (self._ax_map, self._ax_accel, self._ax_steer) = plt.subplots(
+            3, 1, figsize=(12, 12),
+            gridspec_kw={'height_ratios': [3, 1, 1]},
+        )
+        ax = self._ax_map
+
+        # --- Static map content ---
+        plot_map(self._scenario_map, ax=ax, markings=True)
+
+        if len(self._reference_waypoints) > 0:
+            ax.plot(
+                self._reference_waypoints[:, 0],
+                self._reference_waypoints[:, 1],
+                color=(0.5, 0.5, 0.5), linewidth=1, linestyle='--',
+                alpha=0.5, zorder=2,
+            )
+
+        # Legend
+        legend_handles = [
+            Line2D([0], [0], color='r', linewidth=2, label='Believed trajectory'),
+            Line2D([0], [0], color=(0.2, 0.4, 0.9), linewidth=2,
+                   label='Intervened trajectory'),
+            Patch(facecolor=(0.0, 0.7, 0.0, 0.35), edgecolor=(0.0, 0.5, 0.0, 0.8),
+                  label='Visible agent'),
+            Patch(facecolor='none', edgecolor=(0.8, 0.2, 0.2, 0.8),
+                  hatch='///', label='Hidden agent'),
+        ]
+        ax.legend(handles=legend_handles, loc='upper right', fontsize=7,
+                  framealpha=0.8)
+
+        # --- Pre-allocate map artists ---
+        empty = ([], [])
+        self._believed_line, = ax.plot(*empty, 'r-', linewidth=2, zorder=5)
+        self._intervened_line, = ax.plot(
+            *empty, color=(0.2, 0.4, 0.9), linewidth=2, zorder=6)
+
+        # Ego patch
+        dummy = np.zeros((4, 2))
+        self._ego_patch = MplPolygon(
+            dummy, closed=True, visible=False,
+            facecolor=(0.1, 0.1, 0.1, 0.3), edgecolor='black',
+            linewidth=1.5, zorder=7)
+        ax.add_patch(self._ego_patch)
+
+        # Vehicle patches + labels
+        self._vehicle_patches = []
+        self._vehicle_labels = []
+        for _ in range(_MAX_INTERV_VEHICLES):
+            p = MplPolygon(dummy, closed=True, visible=False,
+                           linewidth=1.5, zorder=7)
+            ax.add_patch(p)
+            self._vehicle_patches.append(p)
+
+            t = ax.text(0, 0, '', fontsize=7, ha='center', va='bottom',
+                        fontweight='bold', visible=False, zorder=9,
+                        bbox=dict(boxstyle='round,pad=0.15',
+                                  facecolor='white', alpha=0.8,
+                                  edgecolor='none'))
+            self._vehicle_labels.append(t)
+
+        # Ellipses for obstacle footprints
+        self._ellipses = []
+        for _ in range(_MAX_INTERV_ELLIPSES):
+            e = MplEllipse((0, 0), 0, 0, visible=False, zorder=3)
+            ax.add_patch(e)
+            self._ellipses.append(e)
+
+        ax.set_aspect('equal')
+
+        # --- Acceleration panel ---
+        accel_ax = self._ax_accel
+        accel_ax.set_ylabel('Acceleration (m/s\u00b2)', fontsize=8)
+        accel_ax.tick_params(labelsize=7)
+        accel_ax.grid(True, alpha=0.3)
+
+        self._ref_accel_line, = accel_ax.plot(
+            *empty, 'r--', linewidth=1.5, label='Believed', zorder=5)
+        self._opt_accel_line, = accel_ax.plot(
+            *empty, color=(0.2, 0.4, 0.9), linewidth=1.5,
+            label='Intervened', zorder=6)
+        accel_ax.legend(loc='upper right', fontsize=7, framealpha=0.8)
+
+        # --- Steering panel ---
+        steer_ax = self._ax_steer
+        steer_ax.set_xlabel('Time (s)', fontsize=8)
+        steer_ax.set_ylabel('Steering angle (rad)', fontsize=8)
+        steer_ax.tick_params(labelsize=7)
+        steer_ax.grid(True, alpha=0.3)
+
+        self._ref_steer_line, = steer_ax.plot(
+            *empty, 'r--', linewidth=1.5, label='Believed', zorder=5)
+        self._opt_steer_line, = steer_ax.plot(
+            *empty, color=(0.2, 0.4, 0.9), linewidth=1.5,
+            label='Intervened', zorder=6)
+        steer_ax.legend(loc='upper right', fontsize=7, framealpha=0.8)
+
+        self._fig.tight_layout()
+        self._fig.canvas.draw()
+        self._background = self._fig.canvas.copy_from_bbox(self._fig.bbox)
+
+    def _hide_all(self):
+        """Reset all dynamic artists."""
+        self._believed_line.set_data([], [])
+        self._intervened_line.set_data([], [])
+        self._ego_patch.set_visible(False)
+
+        for p in self._vehicle_patches:
+            p.set_visible(False)
+        for t in self._vehicle_labels:
+            t.set_visible(False)
+        for e in self._ellipses:
+            e.set_visible(False)
+
+        self._ref_accel_line.set_data([], [])
+        self._opt_accel_line.set_data([], [])
+        self._ref_steer_line.set_data([], [])
+        self._opt_steer_line.set_data([], [])
+
+    def _draw_all(self):
+        """Draw all visible dynamic artists on all panels."""
+        ax = self._ax_map
+        ax.draw_artist(self._believed_line)
+        ax.draw_artist(self._intervened_line)
+
+        for e in self._ellipses:
+            if e.get_visible():
+                ax.draw_artist(e)
+        for p in self._vehicle_patches:
+            if p.get_visible():
+                ax.draw_artist(p)
+        for t in self._vehicle_labels:
+            if t.get_visible():
+                ax.draw_artist(t)
+        if self._ego_patch.get_visible():
+            ax.draw_artist(self._ego_patch)
+
+        self._ax_accel.draw_artist(self._ref_accel_line)
+        self._ax_accel.draw_artist(self._opt_accel_line)
+        self._ax_steer.draw_artist(self._ref_steer_line)
+        self._ax_steer.draw_artist(self._opt_steer_line)
+
+    def update(self, ref_states, ref_controls, opt_states, opt_controls,
+               intervention, success, believed_config, true_obstacles,
+               ego_position, ego_heading, other_agent_states,
+               step, dt):
+        """Redraw the intervention debug plot.
+
+        Args:
+            ref_states: (H+1, 4) believed NLP states [s, d, phi, v].
+            ref_controls: (H, 2) believed controls [a, delta].
+            opt_states: (H+1, 4) intervened NLP states.
+            opt_controls: (H, 2) intervened controls.
+            intervention: (H, 2) control deviation (opt - ref).
+            success: Whether the intervention NLP succeeded.
+            believed_config: {agent_id: visible} dict.
+            true_obstacles: List of obstacle dicts (all agents visible).
+            ego_position: [x, y] ego world position.
+            ego_heading: Ego world heading (radians).
+            other_agent_states: Dict mapping agent_id -> AgentState.
+            step: Simulation step number.
+            dt: Planning timestep (seconds).
+        """
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        ax = self._ax_map
+
+        # Centre map view on ego
+        margin = 40.0
+        ax.set_xlim(ego_position[0] - margin, ego_position[0] + margin)
+        ax.set_ylim(ego_position[1] - margin, ego_position[1] + margin)
+
+        self._fig.canvas.restore_region(self._background)
+        self._hide_all()
+
+        # --- Title ---
+        if not success:
+            title_str = f"Intervention  step={step}  |  FAILED"
+        elif ref_states is None:
+            title_str = f"Intervention  step={step}  |  NO DATA"
+        else:
+            du_norm = float(np.linalg.norm(intervention))
+            max_da = float(np.max(np.abs(intervention[:, 0])))
+            max_dd = float(np.max(np.abs(intervention[:, 1])))
+            title_str = (f"Intervention  step={step}  |  OK  "
+                         f"||du||={du_norm:.4f}  "
+                         f"max|da|={max_da:.2f}  max|dd|={max_dd:.2f}")
+        ax.set_title(title_str, fontsize=10)
+
+        if ref_states is None or opt_states is None:
+            self._draw_all()
+            self._fig.canvas.blit(self._fig.bbox)
+            self._fig.canvas.flush_events()
+            return
+
+        # --- Map panel: believed trajectory (red) ---
+        ref_world = self._frenet.frenet_to_world_batch(
+            ref_states[:, 0], ref_states[:, 1])
+        self._believed_line.set_data(ref_world[:, 0], ref_world[:, 1])
+
+        # --- Map panel: intervened trajectory (blue) ---
+        opt_world = self._frenet.frenet_to_world_batch(
+            opt_states[:, 0], opt_states[:, 1])
+        self._intervened_line.set_data(opt_world[:, 0], opt_world[:, 1])
+
+        # --- Obstacle ellipses at footprint intervals ---
+        footprint_interval = 5
+        H = len(ref_states) - 1
+        footprint_indices = list(range(0, H + 1, footprint_interval))
+        if footprint_indices[-1] != H:
+            footprint_indices.append(H)
+
+        ei = 0
+        if true_obstacles:
+            for obs in true_obstacles:
+                half_L = obs['length'] / 2.0 + self._collision_margin
+                half_W = obs['width'] / 2.0 + self._collision_margin
+                world_pts = obs.get('world_positions')
+                s_arr = obs['s']
+                n_steps = len(s_arr)
+                headings = obs.get('headings')
+
+                fc = (1, 0.6, 0, 0.12)
+                ec = (0.8, 0.4, 0, 0.5)
+                ls = '--'
+
+                for idx in footprint_indices:
+                    if idx >= n_steps or ei >= _MAX_INTERV_ELLIPSES:
+                        break
+                    if world_pts is not None and idx < len(world_pts):
+                        cx, cy = world_pts[idx]
+                    else:
+                        w = self._frenet.frenet_to_world(
+                            float(s_arr[idx]), float(obs['d'][idx]))
+                        cx, cy = w['x'], w['y']
+
+                    if headings is not None and idx < len(headings):
+                        angle = headings[idx]
+                    else:
+                        angle = 0.0
+
+                    e = self._ellipses[ei]
+                    e.set_center((cx, cy))
+                    e.width = 2 * half_L
+                    e.height = 2 * half_W
+                    e.angle = np.degrees(angle)
+                    e.set_facecolor(fc)
+                    e.set_edgecolor(ec)
+                    e.set_linestyle(ls)
+                    e.set_linewidth(0.8)
+                    e.set_visible(True)
+                    ei += 1
+
+        # --- Vehicle bounding boxes ---
+        pi = 0
+        if other_agent_states:
+            for aid, agent_state in other_agent_states.items():
+                if pi >= _MAX_INTERV_VEHICLES:
+                    break
+                meta = getattr(agent_state, 'metadata', None)
+                vl = meta.length if meta else 4.5
+                vw = meta.width if meta else 1.8
+
+                corners = calculate_multiple_bboxes(
+                    [agent_state.position[0]], [agent_state.position[1]],
+                    vl, vw, agent_state.heading,
+                )[0]
+
+                p = self._vehicle_patches[pi]
+                p.set_xy(corners)
+
+                is_visible = believed_config.get(aid, True)
+                if aid < 0:
+                    # Static obstacle
+                    fc = (0.6, 0.6, 0.6, 0.4)
+                    ec = (0.4, 0.4, 0.4, 0.8)
+                    hatch = ''
+                elif is_visible:
+                    fc = (0.0, 0.7, 0.0, 0.35)
+                    ec = (0.0, 0.5, 0.0, 0.8)
+                    hatch = ''
+                else:
+                    fc = (1, 1, 1, 0)
+                    ec = (0.8, 0.2, 0.2, 0.8)
+                    hatch = '///'
+
+                p.set_facecolor(fc)
+                p.set_edgecolor(ec)
+                p.set_hatch(hatch)
+                p.set_linewidth(1.5)
+                p.set_visible(True)
+
+                # Label
+                t = self._vehicle_labels[pi]
+                label_text = f"Agent {aid}" if aid >= 0 else ""
+                if aid >= 0:
+                    label_text += " (V)" if is_visible else " (H)"
+                t.set_position((agent_state.position[0],
+                                agent_state.position[1] + vw / 2 + 1.5))
+                t.set_text(label_text)
+                t.set_color((0.15, 0.15, 0.15))
+                t.set_visible(True)
+
+                pi += 1
+
+        # --- Ego vehicle patch ---
+        ego_corners = calculate_multiple_bboxes(
+            [ego_position[0]], [ego_position[1]],
+            self._ego_length, self._ego_width, ego_heading,
+        )[0]
+        self._ego_patch.set_xy(ego_corners)
+        self._ego_patch.set_visible(True)
+
+        # --- Acceleration panel ---
+        H = len(ref_controls)
+        t_arr = np.arange(H) * dt
+        self._ref_accel_line.set_data(t_arr, ref_controls[:, 0])
+        self._opt_accel_line.set_data(t_arr, opt_controls[:, 0])
+
+        a_all = np.concatenate([ref_controls[:, 0], opt_controls[:, 0]])
+        a_margin = max(0.5, (np.max(a_all) - np.min(a_all)) * 0.15)
+        self._ax_accel.set_xlim(-0.1, t_arr[-1] + 0.1)
+        self._ax_accel.set_ylim(np.min(a_all) - a_margin,
+                                np.max(a_all) + a_margin)
+
+        # --- Steering panel ---
+        self._ref_steer_line.set_data(t_arr, ref_controls[:, 1])
+        self._opt_steer_line.set_data(t_arr, opt_controls[:, 1])
+
+        d_all = np.concatenate([ref_controls[:, 1], opt_controls[:, 1]])
+        d_margin = max(0.05, (np.max(d_all) - np.min(d_all)) * 0.15)
+        self._ax_steer.set_xlim(-0.1, t_arr[-1] + 0.1)
+        self._ax_steer.set_ylim(np.min(d_all) - d_margin,
+                                np.max(d_all) + d_margin)
+
+        # --- Draw and blit ---
+        self._draw_all()
+        self._fig.canvas.blit(self._fig.bbox)
+        self._fig.canvas.flush_events()
