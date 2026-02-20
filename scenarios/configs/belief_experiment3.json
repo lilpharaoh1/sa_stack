@@ -16,7 +16,7 @@
         "width": 3.5,
         "heading": 1.57
       },
-      "velocity": [5.0, 10.0]
+      "velocity": [5.0, 5.0]
     },
     "goal": {
       "box": {
@@ -26,7 +26,7 @@
         "heading": 0.0
       }
     },
-    "human": false
+    "human": true
   },
   "dynamic_groups": [
     {

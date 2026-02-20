@@ -1,0 +1,541 @@
+"""Belief inference via inverse planning.
+
+Observes the ego driver's executed trajectory and infers which belief
+configuration (visibility of other agents) best explains the behaviour.
+Uses the first-stage planner to evaluate candidate belief configurations
+by comparing planned trajectories against observed history.
+"""
+
+import itertools
+import logging
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+import numpy as np
+
+from igp2.core.agentstate import AgentState
+from igp2.beliefcontrol.frenet import FrenetFrame
+from igp2.beliefcontrol.first_stage import FirstStagePlanner
+from igp2.beliefcontrol.second_stage import SecondStagePlanner
+from igp2.beliefcontrol.plotting import InferencePlotter
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class HistoryEntry:
+    """Single timestep of recorded ego and environment state."""
+    frenet_state: np.ndarray               # [s, d, phi, v]
+    other_agent_states: Dict[int, AgentState]  # snapshot of other agents
+
+
+@dataclass
+class InferenceResult:
+    """Evaluation of one belief configuration."""
+    config: Dict[int, bool]                # {agent_id: visible}
+    pos_cost: float                        # mean position L2 (metres)
+    vel_cost: float                        # mean velocity L2 (m/s)
+    planned_sd: Optional[np.ndarray]       # (K, 2) planned [s, d]
+    planned_vel: Optional[np.ndarray]      # (K, 2) planned [vs, vd]
+    solver_ok: bool
+
+
+class BeliefInference:
+    """Infer driver beliefs by comparing observed trajectory to planned ones.
+
+    For each subset of visible agents (belief configuration), solves the
+    first-stage planner from a historical ego state with only the visible
+    agents as obstacles.  The configuration whose planned trajectory most
+    closely matches the observed trajectory is the inferred belief.
+
+    Args:
+        policy: TwoStagePolicy instance (used to extract planning config).
+        scenario_map: Road layout for boundary queries.
+        warmup_fraction: Fraction of planning horizon needed before
+            inference starts.
+        relevance_s_margin: Longitudinal margin for relevant agent
+            detection (m).
+        relevance_d_threshold: Maximum lateral offset for relevance (m).
+        max_relevant: Cap on number of agents to enumerate (limits 2^N).
+    """
+
+    def __init__(self, policy, scenario_map,
+                 warmup_fraction: float = 0.2,
+                 relevance_s_margin: float = 10.0,
+                 relevance_d_threshold: float = 7.0,
+                 max_relevant: int = 5,
+                 boltzmann_beta: float = 12.5,
+                 vel_weight: float = 1.0,
+                 plot: bool = True):
+        self._scenario_map = scenario_map
+        self._warmup_fraction = warmup_fraction
+        self._boltzmann_beta = boltzmann_beta
+        self._vel_weight = vel_weight
+        self._relevance_s_margin = relevance_s_margin
+        self._relevance_d_threshold = relevance_d_threshold
+        self._max_relevant = max_relevant
+
+        # Extract planning parameters from the policy
+        self._frenet: Optional[FrenetFrame] = policy.frenet_frame
+        self._horizon = policy.horizon
+        self._dt = policy.dt
+        self._target_speed = policy._target_speed
+        self._ego_length = policy.ego_length
+        self._ego_width = policy.ego_width
+        self._collision_margin = policy.collision_margin
+        self._fps = policy._fps
+        self._dt_sim = 1.0 / self._fps
+
+        # Warmup: number of planning steps worth of history needed
+        self._warmup_steps = max(1, int(self._warmup_fraction * self._horizon))
+
+        self._wheelbase = policy._wheelbase
+
+        # Create own FirstStagePlanner to avoid corrupting the policy's
+        self._first_stage = FirstStagePlanner(
+            horizon=self._horizon,
+            dt=self._dt,
+            ego_length=self._ego_length,
+            ego_width=self._ego_width,
+            collision_margin=self._collision_margin,
+            target_speed=self._target_speed,
+            frenet=self._frenet,
+            params=policy.milp_params,
+            n_obs_max=policy.first_stage._n_obs_max,
+        )
+
+        # Create own SecondStagePlanner for two-stage inference
+        self._second_stage = SecondStagePlanner(
+            horizon=self._horizon,
+            dt=self._dt,
+            ego_length=self._ego_length,
+            ego_width=self._ego_width,
+            wheelbase=self._wheelbase,
+            collision_margin=self._collision_margin,
+            target_speed=self._target_speed,
+            frenet=self._frenet,
+            params=policy.nlp_params,
+            n_obs_max=policy.first_stage._n_obs_max,
+        )
+
+        # History buffer
+        self._history: List[HistoryEntry] = []
+        self._last_results: Optional[List[InferenceResult]] = None
+        self._last_observed_sd: Optional[np.ndarray] = None
+
+        # Debug plotter
+        self._plotter: Optional[InferencePlotter] = None
+        if plot and self._frenet is not None:
+            self._plotter = InferencePlotter(
+                scenario_map, policy._reference_waypoints, self._frenet,
+                dt=self._dt)
+
+    def reset(self):
+        """Clear history and results."""
+        self._history = []
+        self._last_results = None
+        self._first_stage.reset()
+        self._second_stage.reset()
+
+    def step(self, frenet_state: np.ndarray,
+             other_agent_states: Dict[int, AgentState],
+             step_count: int,
+             ego_position: np.ndarray = None):
+        """Run one inference step.
+
+        Args:
+            frenet_state: Current ego Frenet state [s, d, phi, v].
+            other_agent_states: Snapshot of all other agents' states.
+            step_count: Current simulation step number (for display).
+            ego_position: Current ego world position [x, y] (for plot centring).
+        """
+        # 1. Append to history
+        self._history.append(HistoryEntry(
+            frenet_state=frenet_state.copy(),
+            other_agent_states={aid: s for aid, s in other_agent_states.items()},
+        ))
+
+        # 2. Check warmup
+        # Convert warmup from planning steps to sim steps
+        sim_steps_per_plan_step = max(1, int(round(self._dt / self._dt_sim)))
+        warmup_sim_steps = self._warmup_steps * sim_steps_per_plan_step
+        if len(self._history) < warmup_sim_steps:
+            return
+
+        if self._frenet is None:
+            return
+
+        # 3. Fixed observation window: always compare the first warmup_steps
+        # of the planned trajectory, but plan the full horizon so forward
+        # obstacles influence the trajectory shape even in the compared portion.
+        window_sim_steps = self._warmup_steps * sim_steps_per_plan_step
+        start_idx = len(self._history) - window_sim_steps
+
+        # Historical ego state at the start of the window
+        hist_frenet = self._history[start_idx].frenet_state
+        hist_agents = self._history[start_idx].other_agent_states
+
+        # Subsample observed trajectory at planning dt (warmup_steps + 1 points)
+        observed_sd = self._subsample_history(start_idx, len(self._history) - 1,
+                                              sim_steps_per_plan_step)
+
+        # 4. Find relevant agents
+        ego_s = frenet_state[0]
+        relevant_aids = self._find_relevant_agents(ego_s, other_agent_states)
+
+        # 5. Evaluate belief configs (only if there are relevant agents)
+        results: List[InferenceResult] = []
+        t_elapsed = 0.0
+
+        if relevant_aids:
+            configs = self._enumerate_configs(relevant_aids)
+
+            # Sample road boundaries from the historical start state
+            s_values = np.array([
+                hist_frenet[0] + hist_frenet[3] * np.cos(hist_frenet[2]) * k * self._dt
+                for k in range(self._horizon + 1)
+            ])
+            s_values = np.clip(s_values, 0.0, self._frenet.total_length)
+            road_left, road_right = self._sample_road_boundaries(s_values)
+
+            t_start = time.perf_counter()
+
+            for config in configs:
+                visible_aids = {aid for aid, vis in config.items() if vis}
+
+                # Build obstacles with constant-velocity prediction
+                obstacles = self._predict_obstacles_cv(
+                    hist_agents, visible_aids)
+
+                # --- Stage 1: MILP ---
+                self._first_stage.reset()
+                milp_states = self._first_stage.solve(
+                    hist_frenet, road_left, road_right, obstacles)
+
+                if milp_states is None:
+                    results.append(InferenceResult(
+                        config=config,
+                        pos_cost=float('inf'), vel_cost=float('inf'),
+                        planned_sd=None, planned_vel=None,
+                        solver_ok=False,
+                    ))
+                    continue
+
+                # --- Stage 2: NLP (bicycle model) ---
+                warm_states, warm_controls = self._milp_to_nlp_warmstart(
+                    milp_states, hist_frenet)
+
+                self._second_stage.reset()
+                nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
+                    hist_frenet, warm_states, warm_controls,
+                    road_left, road_right, obstacles)
+
+                if nlp_ok:
+                    # NLP states are [s, d, phi, v] → convert to [s, d, vs, vd]
+                    planned_sdvv = np.column_stack([
+                        nlp_states[:, 0],                                     # s
+                        nlp_states[:, 1],                                     # d
+                        nlp_states[:, 3] * np.cos(nlp_states[:, 2]),          # vs
+                        nlp_states[:, 3] * np.sin(nlp_states[:, 2]),          # vd
+                    ])
+                else:
+                    # Fallback to MILP-derived warmstart
+                    planned_sdvv = np.column_stack([
+                        warm_states[:, 0],
+                        warm_states[:, 1],
+                        warm_states[:, 3] * np.cos(warm_states[:, 2]),
+                        warm_states[:, 3] * np.sin(warm_states[:, 2]),
+                    ])
+
+                pos_cost, vel_cost = self._trajectory_cost(
+                    observed_sd, planned_sdvv)
+                results.append(InferenceResult(
+                    config=config,
+                    pos_cost=pos_cost, vel_cost=vel_cost,
+                    planned_sd=planned_sdvv[:, :2],
+                    planned_vel=planned_sdvv[:, 2:4],
+                    solver_ok=True,
+                ))
+
+            t_elapsed = time.perf_counter() - t_start
+
+            # Sort by position cost
+            results.sort(key=lambda r: r.pos_cost)
+
+            # Print results
+            self._print_results(results, step_count, relevant_aids, t_elapsed,
+                                self._warmup_steps)
+
+        self._last_results = results
+        self._last_observed_sd = observed_sd
+
+        # 6. Update debug plot (always, even with no candidates)
+        if self._plotter is not None and ego_position is not None:
+            self._plotter.update(observed_sd, results, ego_position, step_count)
+
+    def _find_relevant_agents(self, ego_s: float,
+                              other_agent_states: Dict[int, AgentState]
+                              ) -> List[int]:
+        """Find agents within the planning horizon's reach."""
+        if self._frenet is None:
+            return []
+
+        margin = self._relevance_s_margin
+        v_target = self._target_speed
+        horizon_reach = self._horizon * self._dt * v_target
+        s_min = ego_s - margin
+        s_max = ego_s + horizon_reach + margin
+
+        relevant = []
+        for aid, state in other_agent_states.items():
+            # Skip static objects (negative IDs are parked vehicles/barriers)
+            if aid < 0:
+                continue
+
+            f = self._frenet.world_to_frenet(
+                float(state.position[0]), float(state.position[1]))
+            agent_s, agent_d = f['s'], f['d']
+
+            if s_min <= agent_s <= s_max and abs(agent_d) < self._relevance_d_threshold:
+                relevant.append(aid)
+
+        # Cap at max_relevant (keep the closest by s-distance)
+        if len(relevant) > self._max_relevant:
+            relevant.sort(key=lambda aid: abs(
+                self._frenet.world_to_frenet(
+                    float(other_agent_states[aid].position[0]),
+                    float(other_agent_states[aid].position[1]))['s'] - ego_s
+            ))
+            relevant = relevant[:self._max_relevant]
+
+        return sorted(relevant)
+
+    def _enumerate_configs(self, agent_ids: List[int]
+                           ) -> List[Dict[int, bool]]:
+        """Generate all 2^N visibility combinations."""
+        configs = []
+        for combo in itertools.product([True, False], repeat=len(agent_ids)):
+            configs.append(dict(zip(agent_ids, combo)))
+        return configs
+
+    def _predict_obstacles_cv(self, agent_states: Dict[int, AgentState],
+                              visible_aids: set) -> list:
+        """Constant-velocity obstacle prediction for visible agents only.
+
+        Produces the same output format as TwoStagePolicy._predict_obstacles.
+        """
+        if self._frenet is None:
+            return []
+
+        H = self._horizon
+        dt = self._dt
+        obstacles = []
+
+        for aid, state in agent_states.items():
+            # Static objects (negative IDs) are always included;
+            # dynamic agents are included only if visible in this config
+            if aid >= 0 and aid not in visible_aids:
+                continue
+
+            pos = np.array(state.position, dtype=float)
+            vel = np.array(state.velocity, dtype=float)
+
+            # Constant-velocity world positions
+            world_positions = np.empty((H + 1, 2))
+            for k in range(H + 1):
+                world_positions[k] = pos + vel * k * dt
+
+            # Headings from displacement
+            headings = np.empty(H + 1)
+            headings[0] = float(state.heading)
+            for k in range(1, H + 1):
+                dx = world_positions[k, 0] - world_positions[k - 1, 0]
+                dy = world_positions[k, 1] - world_positions[k - 1, 1]
+                if abs(dx) > 1e-3 or abs(dy) > 1e-3:
+                    headings[k] = np.arctan2(dy, dx)
+                else:
+                    headings[k] = headings[k - 1]
+
+            # Convert to Frenet
+            s_arr, d_arr = self._frenet.world_to_frenet_batch(world_positions)
+
+            obs_meta = getattr(state, 'metadata', None)
+            obs_length = obs_meta.length if obs_meta is not None else 4.5
+            obs_width = obs_meta.width if obs_meta is not None else 1.8
+
+            obstacles.append({
+                's': s_arr,
+                'd': d_arr,
+                'world_positions': world_positions,
+                'headings': headings,
+                'length': obs_length,
+                'width': obs_width,
+                'heading': float(state.heading),
+                'agent_id': aid,
+                'uses_planned_trajectory': False,
+            })
+
+        return obstacles
+
+    def _subsample_history(self, start_idx: int, end_idx: int,
+                           sim_steps_per_plan_step: int) -> np.ndarray:
+        """Subsample history from sim dt to planning dt.
+
+        Returns (K, 4) array of [s, d, vs, vd] at planning timesteps.
+        """
+        indices = list(range(start_idx, end_idx + 1,
+                             sim_steps_per_plan_step))
+        observed = np.empty((len(indices), 4))
+        for i, idx in enumerate(indices):
+            fs = self._history[idx].frenet_state  # [s, d, phi, v]
+            observed[i, 0] = fs[0]  # s
+            observed[i, 1] = fs[1]  # d
+            observed[i, 2] = fs[3] * np.cos(fs[2])  # vs = v * cos(phi)
+            observed[i, 3] = fs[3] * np.sin(fs[2])  # vd = v * sin(phi)
+        return observed
+
+    def _milp_to_nlp_warmstart(self, milp_states, frenet_state):
+        """Convert MILP [s, d, vs, vd] to NLP [s, d, phi, v] + controls.
+
+        Copied from TwoStagePolicy._milp_to_nlp_warmstart.
+        """
+        H = self._horizon
+        dt = self._dt
+        L = self._wheelbase
+        nlp = self._second_stage.params
+
+        s_arr = milp_states[:, 0]
+        d_arr = milp_states[:, 1]
+        vs_arr = milp_states[:, 2]
+        vd_arr = milp_states[:, 3]
+
+        speeds = np.sqrt(vs_arr**2 + vd_arr**2)
+        phis = np.arctan2(vd_arr, vs_arr)
+        phis[0] = frenet_state[2]
+
+        nlp_states = np.column_stack([s_arr, d_arr, phis, speeds])
+        nlp_controls = np.zeros((H, 2))
+
+        for k in range(H):
+            a_k = np.clip((speeds[k + 1] - speeds[k]) / dt,
+                          nlp['a_min'], nlp['a_max'])
+
+            d_phi = (phis[k + 1] - phis[k] + np.pi) % (2 * np.pi) - np.pi
+            spd = max(speeds[k], 0.5)
+            sin_arg = np.clip(d_phi * L / (2.0 * spd * dt), -1.0, 1.0)
+            delta_k = np.clip(np.arcsin(sin_arg),
+                              -nlp['delta_max'], nlp['delta_max'])
+
+            nlp_controls[k] = [a_k, delta_k]
+
+        return nlp_states, nlp_controls
+
+    def _trajectory_cost(self, observed_sdvv: np.ndarray,
+                         planned_sdvv: np.ndarray
+                         ) -> tuple:
+        """Mean L2 distance in (s, d) and (vs, vd) space.
+
+        Compares min(len(observed), len(planned)) steps.
+
+        Returns:
+            (pos_cost, vel_cost) tuple.
+        """
+        n = min(len(observed_sdvv), len(planned_sdvv))
+        if n == 0:
+            return float('inf'), float('inf')
+
+        # Position error
+        pos_diffs = observed_sdvv[:n, :2] - planned_sdvv[:n, :2]
+        pos_dists = np.sqrt(pos_diffs[:, 0] ** 2 + pos_diffs[:, 1] ** 2)
+
+        # Velocity error
+        vel_diffs = observed_sdvv[:n, 2:4] - planned_sdvv[:n, 2:4]
+        vel_dists = np.sqrt(vel_diffs[:, 0] ** 2 + vel_diffs[:, 1] ** 2)
+
+        return float(np.mean(pos_dists)), float(np.mean(vel_dists))
+
+    def _sample_road_boundaries(self, s_values: np.ndarray):
+        """Sample road boundaries at given s positions."""
+        if self._scenario_map is not None and self._frenet is not None:
+            return self._frenet.road_boundaries(
+                s_values, self._scenario_map, search_radius=15.0)
+        return (np.full(len(s_values), 3.5),
+                np.full(len(s_values), -3.5))
+
+    def _print_results(self, results: List[InferenceResult],
+                       step_count: int, relevant_aids: List[int],
+                       elapsed: float, window_steps: int):
+        """Pretty-print inference results table sorted by cost."""
+        n_configs = len(results)
+        aids_str = ", ".join(str(a) for a in relevant_aids)
+
+        print(f"\n[Step {step_count:4d}] BELIEF INFERENCE "
+              f"({len(relevant_aids)} relevant agents [{aids_str}], "
+              f"{n_configs} configs, window={window_steps} steps, "
+              f"{elapsed:.2f}s):")
+
+        # Boltzmann rational-action model for belief inference:
+        #
+        # b     = full belief config (e.g. {1:V, 2:H})
+        # τ_obs = observed driver trajectory
+        # τ*(b) = optimal trajectory under belief b (from two-stage planner)
+        #
+        # Energy:    E(b) = cost(τ_obs, τ*(b))
+        #                  = pos_error + w_vel * vel_error
+        # Likelihood (Boltzmann): P(τ_obs | b) ∝ exp(-β · E(b))
+        # Posterior (uniform prior): P(b | τ_obs) = P(τ_obs | b) / Z
+        #   where Z = Σ_b exp(-β · E(b))   (partition function)
+        #
+        # Marginal posterior that agent i is hidden:
+        #   P(h_i | τ_obs) = Σ_{b : i hidden in b} P(b | τ_obs)
+        #
+        # β (inverse temperature) controls rationality: β→∞ assumes perfectly
+        # rational driver, β→0 gives uniform distribution over beliefs.
+        beta = self._boltzmann_beta
+        w_vel = self._vel_weight
+
+        energies = np.array([
+            r.pos_cost + w_vel * r.vel_cost
+            if r.solver_ok and np.isfinite(r.pos_cost) and np.isfinite(r.vel_cost)
+            else 1e10
+            for r in results
+        ])
+        log_probs = -beta * energies
+        log_probs -= np.max(log_probs)  # numerical stability (shift by log Z')
+        boltzmann_probs = np.exp(log_probs)
+        Z = np.sum(boltzmann_probs)
+        boltzmann_probs = boltzmann_probs / Z if Z > 0 else np.zeros(len(results))
+
+        best_energy = np.min(energies) if len(energies) > 0 else float('inf')
+        for i, r in enumerate(results):
+            cfg_str = ", ".join(
+                f"{aid}:{'V' if vis else 'H'}"
+                for aid, vis in sorted(r.config.items())
+            )
+            status = "OK" if r.solver_ok else "FAILED"
+            marker = "  <-- best" if energies[i] == best_energy and r.solver_ok else ""
+            print(f"  {{{cfg_str}}}: E={energies[i]:.4f} (pos={r.pos_cost:.4f} vel={r.vel_cost:.4f})  "
+                  f"P(b|τ)={boltzmann_probs[i]:.3f}  [{status}]{marker}")
+
+        # Marginal posterior: P(h_i | τ_obs) = Σ_{b : i hidden in b} P(b | τ_obs)
+        if results and len(boltzmann_probs) > 0:
+            marginals = {}
+            for i, r in enumerate(results):
+                for aid, vis in r.config.items():
+                    if aid not in marginals:
+                        marginals[aid] = 0.0
+                    if not vis:
+                        marginals[aid] += boltzmann_probs[i]
+            print(f"  P(h_i|τ): " + ", ".join(
+                f"{aid}={marginals[aid]:.3f}" for aid in sorted(marginals)))
+
+    @property
+    def last_results(self) -> Optional[List[InferenceResult]]:
+        """Most recent inference results, sorted by cost."""
+        return self._last_results
+
+    @property
+    def history_length(self) -> int:
+        """Number of history entries stored."""
+        return len(self._history)

@@ -23,7 +23,9 @@ from igp2.core.vehicle import KinematicVehicle, Action, Observation, TrajectoryP
 from igp2.opendrive.map import Map
 from igp2.opendrive.elements.road_lanes import Lane
 from igp2.recognition.astar import AStar
-from igp2.beliefcontrol.policy import SampleBased, TwoStageOPT
+from igp2.beliefcontrol.sample_based import SampleBased
+from igp2.beliefcontrol.two_stage_policy import TwoStagePolicy
+from igp2.beliefcontrol.belief_inference import BeliefInference
 from igp2.beliefcontrol.plotting import BeliefPlotter, OptimisationPlotter
 
 logger = logging.getLogger(__name__)
@@ -223,7 +225,7 @@ def _simulate_agent_trajectory(agent, frame: Dict[int, AgentState],
 # Mapping from string name to policy class for configuration
 POLICY_TYPES = {
     "sample_based": SampleBased,
-    "two_stage_opt": TwoStageOPT,
+    "two_stage_opt": TwoStagePolicy,
 }
 
 
@@ -242,12 +244,12 @@ class BeliefAgent(Agent):
     The control policy is selected via ``policy_type``:
 
     * ``"sample_based"`` — :class:`SampleBased` (random sampling + PID).
-    * ``"two_stage_opt"`` — :class:`TwoStageOPT`
+    * ``"two_stage_opt"`` — :class:`TwoStagePolicy`
       (NLP with drivable-area, speed, and smoothness constraints).
 
     Extra keyword arguments are forwarded to the policy constructor,
     so you can pass e.g. ``n_samples=100`` for SampleBased or
-    ``w_ref=2.0`` for TwoStageOPT.
+    ``w_ref=2.0`` for TwoStagePolicy.
 
     Args:
         agent_id: ID of the agent.
@@ -322,6 +324,14 @@ class BeliefAgent(Agent):
                 policy_type, scenario_map, goal,
             )
 
+        # Build belief inference module (only when human policy is TwoStagePolicy)
+        self._belief_inference: Optional[BeliefInference] = None
+        if (self._human_enabled and
+                isinstance(self._human_policy, TwoStagePolicy) and
+                scenario_map is not None):
+            self._belief_inference = BeliefInference(
+                self._human_policy, scenario_map)
+
     def _build_policy(self, policy_type, fps, scenario_map, **kwargs):
         """Instantiate the control policy based on ``policy_type``."""
         if policy_type not in POLICY_TYPES:
@@ -339,7 +349,7 @@ class BeliefAgent(Agent):
         if policy_type == "two_stage_opt":
             common["scenario_map"] = scenario_map
             common.update(kwargs)
-            return TwoStageOPT(**common)
+            return TwoStagePolicy(**common)
         else:
             common.update(kwargs)
             return SampleBased(**common)
@@ -525,7 +535,7 @@ class BeliefAgent(Agent):
         human_policy_time = 0.0
         if self._human_enabled:
             t0 = _time.perf_counter()
-            if isinstance(self._human_policy, TwoStageOPT):
+            if isinstance(self._human_policy, TwoStagePolicy):
                 human_action, human_candidates, human_best = self._human_policy.select_action(
                     ego_state,
                     other_agents=human_other_agents or None,
@@ -536,7 +546,7 @@ class BeliefAgent(Agent):
 
         # --- Run true (ground-truth) policy ---
         t0 = _time.perf_counter()
-        if isinstance(self._true_policy, TwoStageOPT):
+        if isinstance(self._true_policy, TwoStagePolicy):
             true_action, true_candidates, true_best = self._true_policy.select_action(
                 ego_state,
                 other_agents=true_other_agents or None,
@@ -661,6 +671,23 @@ class BeliefAgent(Agent):
         self.update_beliefs(observation)
         action = self.policy(observation)
 
+        # Run belief inference (after policy so we have the ego's action)
+        if self._belief_inference is not None and self._human_policy is not None:
+            frenet = self._human_policy.frenet_frame
+            if frenet is not None:
+                ego_state = observation.frame.get(self.agent_id)
+                if ego_state is not None:
+                    frenet_state = self._human_policy._state_to_frenet(ego_state)
+                    other_states = {
+                        aid: s for aid, s in observation.frame.items()
+                        if aid != self.agent_id
+                    }
+                    t0 = _time.perf_counter()
+                    self._belief_inference.step(
+                        frenet_state, other_states, self._step_count,
+                        ego_position=np.array(ego_state.position))
+                    timing['belief_inference'] = _time.perf_counter() - t0
+
         # Merge policy/plot timings set by policy()
         timing.update(self.last_step_timing)
         self.last_step_timing = timing
@@ -678,3 +705,5 @@ class BeliefAgent(Agent):
         if self._human_policy is not None:
             self._human_policy.reset()
         self._true_policy.reset()
+        if self._belief_inference is not None:
+            self._belief_inference.reset()

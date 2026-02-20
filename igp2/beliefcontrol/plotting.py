@@ -246,11 +246,15 @@ class OptimisationPlotter:
 
         # --- Pre-allocate vehicle patch pool ---
         self._vehicle_patches = []
+        self._vehicle_speed_labels = []
         dummy = np.zeros((4, 2))
         for _ in range(_MAX_VEHICLE_PATCHES):
             p = MplPolygon(dummy, closed=True, visible=False, zorder=6)
             ax.add_patch(p)
             self._vehicle_patches.append(p)
+            t = ax.text(0, 0, '', fontsize=6, ha='center', va='top',
+                        alpha=0.9, visible=False, zorder=8)
+            self._vehicle_speed_labels.append(t)
 
         # --- Pre-allocate true-path footprint ellipse pool ---
         self._true_footprints = []
@@ -269,6 +273,12 @@ class OptimisationPlotter:
             linewidth=1.5, zorder=7,
         )
         ax.add_patch(self._ego_patch)
+
+        # --- Ego speed label ---
+        self._ego_speed_label = ax.text(
+            0, 0, '', fontsize=7, fontweight='bold', ha='center', va='bottom',
+            color=(0.2, 0.4, 0.9), alpha=0.9, visible=False, zorder=8,
+        )
 
         ax.set_aspect('equal')
         self._fig.tight_layout()
@@ -289,9 +299,12 @@ class OptimisationPlotter:
             e.set_visible(False)
         for p in self._vehicle_patches:
             p.set_visible(False)
+        for t in self._vehicle_speed_labels:
+            t.set_visible(False)
         for p in self._true_footprints:
             p.set_visible(False)
         self._ego_patch.set_visible(False)
+        self._ego_speed_label.set_visible(False)
 
     def _draw_all(self):
         """Call draw_artist on every pre-allocated artist."""
@@ -307,11 +320,16 @@ class OptimisationPlotter:
         for p in self._vehicle_patches:
             if p.get_visible():
                 ax.draw_artist(p)
+        for t in self._vehicle_speed_labels:
+            if t.get_visible():
+                ax.draw_artist(t)
         for p in self._true_footprints:
             if p.get_visible():
                 ax.draw_artist(p)
         if self._ego_patch.get_visible():
             ax.draw_artist(self._ego_patch)
+        if self._ego_speed_label.get_visible():
+            ax.draw_artist(self._ego_speed_label)
 
     # ------------------------------------------------------------------
 
@@ -537,6 +555,16 @@ class OptimisationPlotter:
                 p.set_hatch(hatch)
                 p.set_linewidth(lw)
                 p.set_visible(True)
+
+                # Speed annotation
+                t = self._vehicle_speed_labels[pi]
+                spd = agent_state.speed if hasattr(agent_state, 'speed') else 0.0
+                t.set_position((agent_state.position[0],
+                                agent_state.position[1] - 2.5))
+                t.set_text(f"{spd:.1f} m/s")
+                t.set_color(ec[:3] if len(ec) >= 3 else ec)
+                t.set_visible(True)
+
                 pi += 1
 
         # --- True-path ellipse footprints for biased traffic agents ---
@@ -573,6 +601,13 @@ class OptimisationPlotter:
         self._ego_patch.set_xy(cur_corners)
         self._ego_patch.set_visible(True)
 
+        # Ego speed label
+        spd = state.speed if hasattr(state, 'speed') else 0.0
+        self._ego_speed_label.set_position(
+            (state.position[0], state.position[1] + 3.0))
+        self._ego_speed_label.set_text(f"ego {spd:.1f} m/s")
+        self._ego_speed_label.set_visible(True)
+
         ax.set_title(f"BeliefAgent {agent_id}  step={step}")
 
         # Draw all pre-allocated artists and blit
@@ -588,3 +623,374 @@ class OptimisationPlotter:
         elif obs_frenet is not None:
             return obs_frenet.frenet_to_world_batch(obs['s'], obs['d'])
         return None
+
+
+# Max candidate paths to pre-allocate in InferencePlotter (2^5 = 32)
+_MAX_INFERENCE_LINES = 32
+
+
+class InferencePlotter:
+    """Live debug plot for belief inference comparisons.
+
+    Top panel: observed ego trajectory vs candidate planned trajectories
+    in world coordinates, with costs annotated at the end of each path.
+    Bottom panel: velocity (speed) profiles over time for the same paths.
+
+    Both panels use solid lines for the compared portion and faded
+    (alpha=0.2) dashed lines for the future extension.
+
+    Args:
+        scenario_map: The road layout to draw.
+        reference_waypoints: Concatenated A* reference path (N, 2).
+        frenet: FrenetFrame for converting (s, d) to world coords.
+        dt: Planning timestep in seconds (for velocity x-axis).
+    """
+
+    def __init__(self,
+                 scenario_map: Map,
+                 reference_waypoints: np.ndarray,
+                 frenet: 'FrenetFrame',
+                 dt: float = 0.1):
+        self._scenario_map = scenario_map
+        self._reference_waypoints = reference_waypoints
+        self._frenet = frenet
+        self._dt = dt
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax: Optional[plt.Axes] = None
+        self._vel_ax: Optional[plt.Axes] = None
+        self._background = None
+
+        # Pre-allocated artist handles (map panel)
+        self._observed_line: Optional[Line2D] = None
+        self._candidate_lines: List[Line2D] = []
+        self._candidate_future_lines: List[Line2D] = []
+        self._cost_labels: List[plt.Text] = []
+
+        # Pre-allocated artist handles (velocity panel)
+        self._vel_observed_line: Optional[Line2D] = None
+        self._vel_candidate_lines: List[Line2D] = []
+        self._vel_candidate_future_lines: List[Line2D] = []
+        self._vel_window_line: Optional[Line2D] = None
+
+    def _init(self):
+        """Create figure, draw static content, pre-allocate artists."""
+        plt.ion()
+        self._fig, (self._ax, self._vel_ax) = plt.subplots(
+            2, 1, figsize=(12, 10),
+            gridspec_kw={'height_ratios': [3, 1]},
+        )
+        ax = self._ax
+        vel_ax = self._vel_ax
+
+        # --- Map panel ---
+        plot_map(self._scenario_map, ax=ax, markings=True)
+
+        if len(self._reference_waypoints) > 0:
+            ax.plot(
+                self._reference_waypoints[:, 0],
+                self._reference_waypoints[:, 1],
+                color=(0.5, 0.5, 0.5), linewidth=1, linestyle='--',
+                alpha=0.5, zorder=2,
+            )
+
+        legend_handles = [
+            Line2D([0], [0], color=(0.2, 0.4, 0.9), linewidth=3,
+                   label='Observed'),
+            Line2D([0], [0], color=(0.0, 0.7, 0.0), linewidth=2.5,
+                   label='Best config'),
+            Line2D([0], [0], color=(0.8, 0.4, 0.0), linewidth=1.2,
+                   alpha=0.6, label='Other configs'),
+        ]
+        ax.legend(handles=legend_handles, loc='upper right', fontsize=7,
+                  framealpha=0.8)
+
+        # Pre-allocate map artists
+        self._observed_line, = ax.plot([], [], color=(0.2, 0.4, 0.9),
+                                       linewidth=3, zorder=6)
+        self._candidate_lines = []
+        self._candidate_future_lines = []
+        self._cost_labels = []
+        for _ in range(_MAX_INFERENCE_LINES):
+            l, = ax.plot([], [], linewidth=1.2, zorder=5)
+            l.set_visible(False)
+            self._candidate_lines.append(l)
+
+            lf, = ax.plot([], [], linewidth=1.2, alpha=0.2, zorder=4)
+            lf.set_visible(False)
+            self._candidate_future_lines.append(lf)
+
+            t = ax.text(0, 0, '', fontsize=6, ha='left', va='bottom',
+                        alpha=0.9, visible=False, zorder=8,
+                        bbox=dict(boxstyle='round,pad=0.15',
+                                  facecolor='white', alpha=0.7,
+                                  edgecolor='none'))
+            self._cost_labels.append(t)
+
+        ax.set_aspect('equal')
+
+        # --- Velocity panel ---
+        vel_ax.set_xlabel('Time (s)', fontsize=8)
+        vel_ax.set_ylabel('Speed (m/s)', fontsize=8)
+        vel_ax.tick_params(labelsize=7)
+        vel_ax.grid(True, alpha=0.3)
+
+        self._vel_observed_line, = vel_ax.plot(
+            [], [], color=(0.2, 0.4, 0.9), linewidth=2.5, zorder=6)
+        self._vel_candidate_lines = []
+        self._vel_candidate_future_lines = []
+        for _ in range(_MAX_INFERENCE_LINES):
+            l, = vel_ax.plot([], [], linewidth=1.2, zorder=5)
+            l.set_visible(False)
+            self._vel_candidate_lines.append(l)
+
+            lf, = vel_ax.plot([], [], linewidth=1.2, alpha=0.2, zorder=4)
+            lf.set_visible(False)
+            self._vel_candidate_future_lines.append(lf)
+
+        # Vertical line marking end of observation window
+        self._vel_window_line = vel_ax.axvline(
+            x=0, color='grey', linestyle=':', linewidth=1, alpha=0.5,
+            visible=False, zorder=3)
+
+        self._fig.tight_layout()
+        self._fig.canvas.draw()
+        self._background = self._fig.canvas.copy_from_bbox(self._fig.bbox)
+
+    def _hide_all(self):
+        """Reset all dynamic artists."""
+        self._observed_line.set_data([], [])
+        for l in self._candidate_lines:
+            l.set_data([], [])
+            l.set_visible(False)
+        for l in self._candidate_future_lines:
+            l.set_data([], [])
+            l.set_visible(False)
+        for t in self._cost_labels:
+            t.set_visible(False)
+
+        # Velocity panel
+        self._vel_observed_line.set_data([], [])
+        for l in self._vel_candidate_lines:
+            l.set_data([], [])
+            l.set_visible(False)
+        for l in self._vel_candidate_future_lines:
+            l.set_data([], [])
+            l.set_visible(False)
+        self._vel_window_line.set_visible(False)
+
+    def _draw_all(self):
+        """Draw all visible dynamic artists on both panels."""
+        ax = self._ax
+        vel_ax = self._vel_ax
+
+        # Map panel
+        ax.draw_artist(self._observed_line)
+        for l in self._candidate_future_lines:
+            if l.get_visible():
+                ax.draw_artist(l)
+        for l in self._candidate_lines:
+            if l.get_visible():
+                ax.draw_artist(l)
+        for t in self._cost_labels:
+            if t.get_visible():
+                ax.draw_artist(t)
+
+        # Velocity panel
+        vel_ax.draw_artist(self._vel_observed_line)
+        for l in self._vel_candidate_future_lines:
+            if l.get_visible():
+                vel_ax.draw_artist(l)
+        for l in self._vel_candidate_lines:
+            if l.get_visible():
+                vel_ax.draw_artist(l)
+        if self._vel_window_line.get_visible():
+            vel_ax.draw_artist(self._vel_window_line)
+
+    def update(self, observed_sd: np.ndarray, results: list,
+               ego_position: np.ndarray, step: int):
+        """Redraw the inference debug plot.
+
+        Args:
+            observed_sd: (K, 4) observed [s, d, vs, vd] trajectory.
+            results: List of InferenceResult, sorted by cost.
+            ego_position: Current ego world position [x, y] for view centring.
+            step: Simulation step number.
+        """
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        ax = self._ax
+        vel_ax = self._vel_ax
+
+        # Centre map view on ego
+        margin = 40.0
+        ax.set_xlim(ego_position[0] - margin, ego_position[0] + margin)
+        ax.set_ylim(ego_position[1] - margin, ego_position[1] + margin)
+
+        self._fig.canvas.restore_region(self._background)
+        self._hide_all()
+
+        n_observed = len(observed_sd)
+        dt = self._dt
+
+        # --- Observed path (map + velocity) ---
+        if n_observed > 0:
+            obs_world = self._frenet.frenet_to_world_batch(
+                observed_sd[:, 0], observed_sd[:, 1])
+            self._observed_line.set_data(obs_world[:, 0], obs_world[:, 1])
+
+            # Observed speed profile
+            obs_speed = np.sqrt(observed_sd[:, 2] ** 2 + observed_sd[:, 3] ** 2)
+            obs_time = np.arange(n_observed) * dt
+            self._vel_observed_line.set_data(obs_time, obs_speed)
+
+        # Find max time and speed for velocity axis limits
+        max_time = n_observed * dt
+        max_speed = 0.0
+        if n_observed > 0:
+            max_speed = float(np.max(np.sqrt(
+                observed_sd[:, 2] ** 2 + observed_sd[:, 3] ** 2)))
+
+        # --- Candidate paths ---
+        best_pos = results[0].pos_cost if results else float('inf')
+        for i, r in enumerate(results):
+            if i >= _MAX_INFERENCE_LINES:
+                break
+
+            l = self._candidate_lines[i]
+            lf = self._candidate_future_lines[i]
+            t = self._cost_labels[i]
+            vl = self._vel_candidate_lines[i]
+            vlf = self._vel_candidate_future_lines[i]
+
+            if r.planned_sd is not None and r.solver_ok:
+                n_planned = len(r.planned_sd)
+                n_compare = min(n_observed, n_planned)
+
+                # --- Map: compared portion ---
+                sd_compared = r.planned_sd[:n_compare]
+                plan_world = self._frenet.frenet_to_world_batch(
+                    sd_compared[:, 0], sd_compared[:, 1])
+                l.set_data(plan_world[:, 0], plan_world[:, 1])
+
+                if r.pos_cost == best_pos:
+                    color = (0.0, 0.7, 0.0)
+                    lw = 2.5
+                    alpha = 1.0
+                    l.set_zorder(5)
+                    t.set_fontweight('bold')
+                    t.set_fontsize(7)
+                    t.set_color((0.0, 0.5, 0.0))
+                else:
+                    color = (0.8, 0.4, 0.0)
+                    lw = 1.2
+                    alpha = 0.6
+                    l.set_zorder(4)
+                    t.set_fontweight('normal')
+                    t.set_fontsize(6)
+                    t.set_color((0.5, 0.3, 0.0))
+
+                l.set_color(color)
+                l.set_linewidth(lw)
+                l.set_alpha(alpha)
+                l.set_linestyle('-')
+
+                # --- Map: future extension ---
+                if n_compare < n_planned:
+                    sd_future = r.planned_sd[n_compare - 1:]
+                    future_world = self._frenet.frenet_to_world_batch(
+                        sd_future[:, 0], sd_future[:, 1])
+                    lf.set_data(future_world[:, 0], future_world[:, 1])
+                    lf.set_color(color)
+                    lf.set_linewidth(lw)
+                    lf.set_linestyle('--')
+                    lf.set_alpha(0.2)
+                    lf.set_visible(True)
+
+                # --- Velocity: compared portion ---
+                if r.planned_vel is not None:
+                    plan_speed = np.sqrt(
+                        r.planned_vel[:n_compare, 0] ** 2 +
+                        r.planned_vel[:n_compare, 1] ** 2)
+                    plan_time = np.arange(n_compare) * dt
+                    vl.set_data(plan_time, plan_speed)
+                    vl.set_color(color)
+                    vl.set_linewidth(lw)
+                    vl.set_alpha(alpha)
+                    vl.set_linestyle('-')
+                    vl.set_visible(True)
+
+                    max_speed = max(max_speed, float(np.max(plan_speed)))
+
+                    # --- Velocity: future extension ---
+                    if n_compare < len(r.planned_vel):
+                        future_speed = np.sqrt(
+                            r.planned_vel[n_compare - 1:, 0] ** 2 +
+                            r.planned_vel[n_compare - 1:, 1] ** 2)
+                        future_time = np.arange(
+                            n_compare - 1, len(r.planned_vel)) * dt
+                        vlf.set_data(future_time, future_speed)
+                        vlf.set_color(color)
+                        vlf.set_linewidth(lw)
+                        vlf.set_linestyle('--')
+                        vlf.set_alpha(0.2)
+                        vlf.set_visible(True)
+
+                        max_time = max(max_time,
+                                       float(len(r.planned_vel) * dt))
+                        max_speed = max(max_speed,
+                                        float(np.max(future_speed)))
+
+                # --- Cost label at end of compared portion ---
+                end_x, end_y = plan_world[-1]
+                cfg_str = ",".join(
+                    f"{aid}:{'V' if vis else 'H'}"
+                    for aid, vis in sorted(r.config.items())
+                )
+                t.set_position((end_x + 0.5, end_y + 0.5 + i * 1.5))
+                t.set_text(f"{{{cfg_str}}} p={r.pos_cost:.2f} v={r.vel_cost:.2f}")
+                t.set_visible(True)
+            else:
+                t.set_position((ego_position[0] + margin * 0.5,
+                                ego_position[1] + margin * 0.4 - i * 1.5))
+                cfg_str = ",".join(
+                    f"{aid}:{'V' if vis else 'H'}"
+                    for aid, vis in sorted(r.config.items())
+                )
+                t.set_text(f"{{{cfg_str}}} FAILED")
+                t.set_color((0.7, 0.0, 0.0))
+                t.set_fontweight('normal')
+                t.set_fontsize(6)
+                t.set_visible(True)
+
+            l.set_visible(True)
+
+        # --- Velocity axis limits and window marker ---
+        vel_ax.set_xlim(-0.1, max_time + 0.5)
+        vel_ax.set_ylim(-0.5, max_speed + 1.0)
+
+        # Vertical line at end of observation window
+        if n_observed > 0:
+            window_t = (n_observed - 1) * dt
+            self._vel_window_line.set_xdata([window_t, window_t])
+            self._vel_window_line.set_visible(True)
+
+        # --- Title ---
+        n_configs = len(results)
+        n_ok = sum(1 for r in results if r.solver_ok)
+        if results:
+            bp, bv = results[0].pos_cost, results[0].vel_cost
+            best_str = f"best pos={bp:.2f} vel={bv:.2f}"
+        else:
+            best_str = "no candidates"
+        ax.set_title(
+            f"Belief Inference  step={step}  |  "
+            f"{n_configs} configs ({n_ok} OK)  |  "
+            f"{best_str}",
+            fontsize=10,
+        )
+
+        self._draw_all()
+        self._fig.canvas.blit(self._fig.bbox)
+        self._fig.canvas.flush_events()
