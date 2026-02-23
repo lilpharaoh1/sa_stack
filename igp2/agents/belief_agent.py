@@ -23,7 +23,9 @@ from igp2.core.vehicle import KinematicVehicle, Action, Observation, TrajectoryP
 from igp2.opendrive.map import Map
 from igp2.opendrive.elements.road_lanes import Lane
 from igp2.recognition.astar import AStar
-from igp2.beliefcontrol.policy import SampleBased, TwoStageOPT
+from igp2.beliefcontrol.sample_based import SampleBased
+from igp2.beliefcontrol.two_stage_policy import TwoStagePolicy
+from igp2.beliefcontrol.belief_inference import BeliefInference
 from igp2.beliefcontrol.plotting import BeliefPlotter, OptimisationPlotter
 
 logger = logging.getLogger(__name__)
@@ -223,7 +225,7 @@ def _simulate_agent_trajectory(agent, frame: Dict[int, AgentState],
 # Mapping from string name to policy class for configuration
 POLICY_TYPES = {
     "sample_based": SampleBased,
-    "two_stage_opt": TwoStageOPT,
+    "two_stage_opt": TwoStagePolicy,
 }
 
 
@@ -242,12 +244,12 @@ class BeliefAgent(Agent):
     The control policy is selected via ``policy_type``:
 
     * ``"sample_based"`` — :class:`SampleBased` (random sampling + PID).
-    * ``"two_stage_opt"`` — :class:`TwoStageOPT`
+    * ``"two_stage_opt"`` — :class:`TwoStagePolicy`
       (NLP with drivable-area, speed, and smoothness constraints).
 
     Extra keyword arguments are forwarded to the policy constructor,
     so you can pass e.g. ``n_samples=100`` for SampleBased or
-    ``w_ref=2.0`` for TwoStageOPT.
+    ``w_ref=2.0`` for TwoStagePolicy.
 
     Args:
         agent_id: ID of the agent.
@@ -260,7 +262,7 @@ class BeliefAgent(Agent):
             Applied when ``set_agents()`` is called.  Defaults to empty.
         policy_type: Which control policy to use. One of
             ``"sample_based"`` or ``"two_stage_opt"``.
-        plot_interval: Plot every N steps (0 to disable plotting).
+        plot_interval: Whether to enable live plotting.
         **policy_kwargs: Additional keyword arguments forwarded to the
             policy constructor (e.g. ``horizon``, ``n_samples``,
             ``target_speed``, ``w_ref``, etc.).
@@ -274,7 +276,9 @@ class BeliefAgent(Agent):
                  scenario_map: Map = None,
                  agent_beliefs: Dict[int, Dict[str, Any]] = None,
                  policy_type: str = "two_stage_opt",
-                 plot_interval: int = 1,
+                 plot_interval: bool = True,
+                 human: bool = True,
+                 intervention_type: str = 'none',
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
@@ -282,6 +286,7 @@ class BeliefAgent(Agent):
         self._policy_type = policy_type
         self._plot_interval = plot_interval
         self._step_count = 0
+        self._human_enabled = human
         self._other_agents: Dict[int, Any] = {}  # References to other agents in the scene
 
         # Trajectory predictions (belief-filtered and ground-truth)
@@ -300,10 +305,12 @@ class BeliefAgent(Agent):
         if scenario_map is not None and goal is not None:
             self._compute_reference_path(agent_id, initial_state, goal, scenario_map)
 
-        # Build two control policies: human (belief-driven) and true (ground-truth)
-        self._human_policy = self._build_policy(
-            policy_type, fps, scenario_map, **policy_kwargs,
-        )
+        # Build control policies: human (belief-driven) only if enabled, true always
+        self._human_policy = None
+        if self._human_enabled:
+            self._human_policy = self._build_policy(
+                policy_type, fps, scenario_map, **policy_kwargs,
+            )
         self._true_policy = self._build_policy(
             policy_type, fps, scenario_map, **policy_kwargs,
         )
@@ -311,12 +318,25 @@ class BeliefAgent(Agent):
         # Per-step timing breakdown (seconds)
         self.last_step_timing: Dict[str, float] = {}
 
+        # Per-step action tracking (for evaluation metrics)
+        self._last_human_action: Optional[Action] = None
+        self._last_executed_action: Optional[Action] = None
+
         # Build the matching plotter
         self._plotter = None
-        if scenario_map is not None and plot_interval > 0:
+        if scenario_map is not None and plot_interval:
             self._plotter = self._build_plotter(
                 policy_type, scenario_map, goal,
             )
+
+        # Build belief inference module (only when human policy is TwoStagePolicy)
+        self._belief_inference: Optional[BeliefInference] = None
+        if (self._human_enabled and
+                isinstance(self._human_policy, TwoStagePolicy) and
+                scenario_map is not None):
+            self._belief_inference = BeliefInference(
+                self._human_policy, scenario_map,
+                intervention_type=intervention_type)
 
     def _build_policy(self, policy_type, fps, scenario_map, **kwargs):
         """Instantiate the control policy based on ``policy_type``."""
@@ -335,7 +355,7 @@ class BeliefAgent(Agent):
         if policy_type == "two_stage_opt":
             common["scenario_map"] = scenario_map
             common.update(kwargs)
-            return TwoStageOPT(**common)
+            return TwoStagePolicy(**common)
         else:
             common.update(kwargs)
             return SampleBased(**common)
@@ -434,11 +454,6 @@ class BeliefAgent(Agent):
                 cfg = self._agent_beliefs_config.get(str(aid), {})
             self._agent_beliefs[aid] = AgentBelief(**cfg)
 
-        logger.info("BeliefAgent %d: beliefs for %d agents: %s",
-                     self.agent_id, len(self._agent_beliefs),
-                     {aid: (b.visible, b.velocity_error)
-                      for aid, b in self._agent_beliefs.items()})
-
     def _predict_agent_trajectories(self, frame: Dict[int, AgentState],
                                      use_beliefs: bool = True) -> Dict[int, np.ndarray]:
         """Forward-simulate other agents to predict their trajectories.
@@ -517,28 +532,27 @@ class BeliefAgent(Agent):
                 continue
             human_other_agents[aid] = s
 
-        if hidden_agents and self._step_count % 20 == 1:
-            logger.info("BeliefAgent %d: hiding agents %s from human policy",
-                        self.agent_id, hidden_agents)
-
         # True: all other agents (no belief filtering)
         true_other_agents = {aid: s for aid, s in observation.frame.items()
                              if aid != self.agent_id}
 
-        # --- Run human (belief) policy ---
-        t0 = _time.perf_counter()
-        if isinstance(self._human_policy, TwoStageOPT):
-            human_action, human_candidates, human_best = self._human_policy.select_action(
-                ego_state,
-                other_agents=human_other_agents or None,
-                agent_trajectories=self._human_agent_trajectories or None)
-        else:
-            human_action, human_candidates, human_best = self._human_policy.select_action(ego_state)
-        human_policy_time = _time.perf_counter() - t0
+        # --- Run human (belief) policy (if enabled) ---
+        human_action, human_candidates, human_best = None, None, None
+        human_policy_time = 0.0
+        if self._human_enabled:
+            t0 = _time.perf_counter()
+            if isinstance(self._human_policy, TwoStagePolicy):
+                human_action, human_candidates, human_best = self._human_policy.select_action(
+                    ego_state,
+                    other_agents=human_other_agents or None,
+                    agent_trajectories=self._human_agent_trajectories or None)
+            else:
+                human_action, human_candidates, human_best = self._human_policy.select_action(ego_state)
+            human_policy_time = _time.perf_counter() - t0
 
         # --- Run true (ground-truth) policy ---
         t0 = _time.perf_counter()
-        if isinstance(self._true_policy, TwoStageOPT):
+        if isinstance(self._true_policy, TwoStagePolicy):
             true_action, true_candidates, true_best = self._true_policy.select_action(
                 ego_state,
                 other_agents=true_other_agents or None,
@@ -549,10 +563,11 @@ class BeliefAgent(Agent):
 
         # --- Plot if enabled ---
         t0 = _time.perf_counter()
-        if (self._plotter is not None
-                and self._plot_interval > 0
-                and self._step_count % self._plot_interval == 0):
-            self._plot(ego_state, human_candidates, human_best)
+        if self._plotter is not None and self._plot_interval:
+            if self._human_enabled:
+                self._plot(ego_state, human_candidates, human_best)
+            else:
+                self._plot(ego_state, true_candidates, true_best)
         plot_time = _time.perf_counter() - t0
 
         self.last_step_timing = {
@@ -561,34 +576,41 @@ class BeliefAgent(Agent):
             'plotting': plot_time,
         }
 
-        return human_action
+        # Return human action if enabled, otherwise true action
+        return human_action if self._human_enabled else true_action
 
-    def _plot(self, ego_state, human_candidates, human_best_idx):
+    def _plot(self, ego_state, candidates, best_idx):
         """Dispatch to the correct plotter depending on policy type."""
         if isinstance(self._plotter, OptimisationPlotter):
-            # Human (belief) policy data
-            human_rollout = getattr(self._human_policy, 'last_rollout', None)
-            human_milp = getattr(self._human_policy, 'last_milp_rollout', None)
-            human_traj = human_candidates[human_best_idx] if human_candidates else None
-
-            # True policy data
+            # True policy data (always available)
             true_rollout = getattr(self._true_policy, 'last_rollout', None)
             true_milp = getattr(self._true_policy, 'last_milp_rollout', None)
-
-            # Retrieve obstacle data from human policy for visualisation
-            human_other_agents = getattr(self._human_policy, 'last_other_agents', None)
-            obstacles = getattr(self._human_policy, 'last_obstacles', None)
-            frenet = getattr(self._human_policy, 'frenet_frame', None)
-            collision_margin = getattr(self._human_policy, 'collision_margin', 0.5)
-            ego_length = getattr(self._human_policy, 'ego_length', 4.5)
-            ego_width = getattr(self._human_policy, 'ego_width', 1.8)
-
-            # All agents (visible + hidden) from true policy
-            all_other_agents = getattr(self._true_policy, 'last_other_agents', None)
-
-            # True policy obstacle predictions (for drawing hidden/biased agents)
+            true_other_agents = getattr(self._true_policy, 'last_other_agents', None)
             true_obstacles = getattr(self._true_policy, 'last_obstacles', None)
             true_frenet = getattr(self._true_policy, 'frenet_frame', None)
+
+            if self._human_enabled:
+                # Human (belief) policy data
+                human_rollout = getattr(self._human_policy, 'last_rollout', None)
+                human_milp = getattr(self._human_policy, 'last_milp_rollout', None)
+                human_traj = candidates[best_idx] if candidates else None
+                human_other_agents = getattr(self._human_policy, 'last_other_agents', None)
+                obstacles = getattr(self._human_policy, 'last_obstacles', None)
+                frenet = getattr(self._human_policy, 'frenet_frame', None)
+                collision_margin = getattr(self._human_policy, 'collision_margin', 0.5)
+                ego_length = getattr(self._human_policy, 'ego_length', 4.5)
+                ego_width = getattr(self._human_policy, 'ego_width', 1.8)
+            else:
+                # No human policy — leave human slots empty
+                human_rollout = None
+                human_milp = None
+                human_traj = None
+                human_other_agents = None
+                obstacles = true_obstacles
+                frenet = true_frenet
+                collision_margin = getattr(self._true_policy, 'collision_margin', 0.5)
+                ego_length = getattr(self._true_policy, 'ego_length', 4.5)
+                ego_width = getattr(self._true_policy, 'ego_width', 1.8)
 
             self._plotter.update(
                 ego_state, human_traj, human_rollout,
@@ -602,14 +624,14 @@ class BeliefAgent(Agent):
                 collision_margin=collision_margin,
                 true_rollout=true_rollout,
                 true_milp_trajectory=true_milp,
-                all_other_agents=all_other_agents,
+                all_other_agents=true_other_agents,
                 agent_beliefs=self._agent_beliefs,
                 true_obstacles=true_obstacles,
                 true_frenet=true_frenet,
             )
         else:
             self._plotter.update(
-                ego_state, human_candidates, human_best_idx,
+                ego_state, candidates, best_idx,
                 self._trajectory_cl, self.agent_id, self._step_count,
             )
 
@@ -632,7 +654,6 @@ class BeliefAgent(Agent):
         Returns:
             Belief-conditioned action (from the human policy).
         """
-        # EMRAN TODO: Have reference path generated here when no path is found.
         if len(self.reference_path) == 0:
             pass
 
@@ -641,10 +662,11 @@ class BeliefAgent(Agent):
 
         # Predict trajectories for both policies
         if self._other_agents:
-            t0 = _time.perf_counter()
-            self._human_agent_trajectories = self._predict_agent_trajectories(
-                observation.frame, use_beliefs=True)
-            timing['human_predict'] = _time.perf_counter() - t0
+            if self._human_enabled:
+                t0 = _time.perf_counter()
+                self._human_agent_trajectories = self._predict_agent_trajectories(
+                    observation.frame, use_beliefs=True)
+                timing['human_predict'] = _time.perf_counter() - t0
 
             t0 = _time.perf_counter()
             self._true_agent_trajectories = self._predict_agent_trajectories(
@@ -653,10 +675,40 @@ class BeliefAgent(Agent):
 
         self.update_beliefs(observation)
         action = self.policy(observation)
+        self._last_human_action = action
+
+        # Run belief inference (after policy so we have the ego's action)
+        if self._belief_inference is not None and self._human_policy is not None:
+            frenet = self._human_policy.frenet_frame
+            if frenet is not None:
+                ego_state = observation.frame.get(self.agent_id)
+                if ego_state is not None:
+                    frenet_state = self._human_policy._state_to_frenet(ego_state)
+                    other_states = {
+                        aid: s for aid, s in observation.frame.items()
+                        if aid != self.agent_id
+                    }
+                    t0 = _time.perf_counter()
+                    self._belief_inference.step(
+                        frenet_state, other_states, self._step_count,
+                        ego_position=np.array(ego_state.position))
+                    timing['belief_inference'] = _time.perf_counter() - t0
+
+                    # Override action with intervention if a hidden agent was
+                    # detected and the intervention NLP succeeded.
+                    interv = self._belief_inference.last_intervention
+                    if interv is not None and interv['success']:
+                        opt_controls = interv['opt_controls']
+                        action = Action(
+                            acceleration=float(opt_controls[0, 0]),
+                            steer_angle=float(opt_controls[0, 1]),
+                            target_speed=self._human_policy.target_speed,
+                        )
 
         # Merge policy/plot timings set by policy()
         timing.update(self.last_step_timing)
         self.last_step_timing = timing
+        self._last_executed_action = action
         return action
 
     def reset(self):
@@ -668,5 +720,10 @@ class BeliefAgent(Agent):
         self._true_agent_trajectories = {}
         self._step_count = 0
         self.last_step_timing = {}
-        self._human_policy.reset()
+        self._last_human_action = None
+        self._last_executed_action = None
+        if self._human_policy is not None:
+            self._human_policy.reset()
         self._true_policy.reset()
+        if self._belief_inference is not None:
+            self._belief_inference.reset()

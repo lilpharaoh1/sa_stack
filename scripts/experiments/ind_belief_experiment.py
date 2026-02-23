@@ -5,9 +5,9 @@ Loads a scenario config, runs the BeliefAgent in CARLA, collects per-step
 diagnostics, and saves the results to a pickle file.
 
 Usage:
-    python scripts/experiments/belief_agent_experiment.py -m belief_agent_demo_parkedcars_dynamic
-    python scripts/experiments/belief_agent_experiment.py -m belief_agent_demo_parkedcars_dynamic -o my_run --seed 42
-    python scripts/experiments/belief_agent_experiment.py -m belief_agent_demo_parkedcars_dynamic --steps 300 --no-plot
+    python scripts/experiments/ind_belief_experiment.py -m belief_agent_demo_parkedcars_dynamic
+    python scripts/experiments/ind_belief_experiment.py -m belief_agent_demo_parkedcars_dynamic -o my_run --seed 42
+    python scripts/experiments/ind_belief_experiment.py -m belief_agent_demo_parkedcars_dynamic --steps 300 --no-plot
 """
 
 import sys
@@ -16,82 +16,38 @@ import logging
 import argparse
 import json
 import time
-from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Any, Optional
 
-import dill
 import carla
 import numpy as np
-from shapely.geometry import Polygon
 
 # Ensure repo root is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import igp2 as ip
 
+from belief_utils import (
+    ExperimentResult,
+    StepRecord,
+    RESULTS_DIR,
+    generate_random_frame,
+    create_agent,
+    collect_step,
+    dump_results,
+    plot_spawn_preview,
+    is_new_format,
+    expand_new_config,
+    expand_static_groups,
+    check_viability,
+    sample_viable_config,
+    print_scene_summary,
+    make_run_dir,
+    build_run_metadata,
+    save_experiment,
+    build_summary,
+    save_summary,
+)
+
 logger = logging.getLogger(__name__)
-
-RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "results")
-
-
-# ---------------------------------------------------------------------------
-# Result dataclasses
-# ---------------------------------------------------------------------------
-
-@dataclass
-class StepRecord:
-    """Diagnostics captured at a single simulation step."""
-    step: int
-    wall_time: float  # seconds since experiment start
-
-    # Ego state
-    ego_position: Optional[np.ndarray]
-    ego_speed: Optional[float]
-    ego_heading: Optional[float]
-
-    # Human (belief) policy outputs
-    human_rollout: Optional[np.ndarray]        # (H+1, 4) [x, y, heading, speed]
-    human_milp_rollout: Optional[np.ndarray]   # (H+1, 2) [x, y]
-    human_nlp_converged: Optional[bool]
-    human_obstacles: Optional[List]
-    human_other_agents: Optional[Dict]
-    human_trajectories: Dict[int, np.ndarray]
-
-    # True (ground-truth) policy outputs
-    true_rollout: Optional[np.ndarray]
-    true_milp_rollout: Optional[np.ndarray]
-    true_nlp_converged: Optional[bool]
-    true_obstacles: Optional[List]
-    true_other_agents: Optional[Dict]
-    true_trajectories: Dict[int, np.ndarray]
-
-    # Scene snapshot
-    dynamic_agents: Dict[int, Any]   # non-ego, ID >= 0
-    static_obstacles: Dict[int, Any] # ID < 0
-
-    # Completion (based on true policy)
-    goal_reached: bool
-
-
-@dataclass
-class ExperimentResult:
-    """Full result of a single experiment run."""
-    # Metadata
-    scenario_name: str
-    config: Dict[str, Any]
-    seed: int
-    fps: int
-    max_steps: int
-    start_time: str       # ISO timestamp
-
-    # Outcome
-    solved: bool = False
-    solved_step: Optional[int] = None
-    total_steps: int = 0
-    wall_time_seconds: float = 0.0
-
-    # Per-step data
-    steps: List[StepRecord] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -115,183 +71,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--no-plot", action="store_true",
                         help="Disable the BeliefAgent plotter")
+    parser.add_argument("--intervention-type", type=str, default="none",
+                        choices=["none", "agency_only", "combined", "warmstart_only"],
+                        help="Intervention scheme for the ego agent (default: none)")
     return parser.parse_args()
 
 
-def generate_random_frame(ego: int,
-                          layout: ip.Map,
-                          spawn_vel_ranges: List[Tuple[ip.Box, Tuple[float, float]]]
-                          ) -> Dict[int, ip.AgentState]:
-    """Generate a new frame with randomised spawns and velocities."""
-    ret = {}
-    for i, (spawn, vel) in enumerate(spawn_vel_ranges, ego):
-        poly = Polygon(spawn.boundary)
-        best_lane = layout.best_lane_at(spawn.center, max_distance=500.0)
-
-        intersections = list(best_lane.midline.intersection(poly).coords)
-        start_d = best_lane.distance_at(intersections[0])
-        end_d = best_lane.distance_at(intersections[1])
-        if start_d > end_d:
-            start_d, end_d = end_d, start_d
-        position_d = (end_d - start_d) * np.random.random() + start_d
-        spawn_position = np.array(best_lane.point_at(position_d))
-
-        speed = (vel[1] - vel[0]) * np.random.random() + vel[0]
-        heading = best_lane.get_heading_at(position_d)
-        ret[i] = ip.AgentState(time=0,
-                               position=spawn_position,
-                               velocity=speed * np.array([np.cos(heading), np.sin(heading)]),
-                               acceleration=np.array([0.0, 0.0]),
-                               heading=heading)
-    return ret
-
-
-def create_agent(agent_config, frame, fps, scenario_map, plot_interval=1):
-    """Create an agent from its config dict."""
-    base = {
-        "agent_id": agent_config["id"],
-        "initial_state": frame[agent_config["id"]],
-        "goal": ip.BoxGoal(ip.Box(**agent_config["goal"]["box"])),
-        "fps": fps,
-    }
-
-    agent_type = agent_config["type"]
-
-    if agent_type == "BeliefAgent":
-        agent_beliefs = agent_config.get("beliefs", None)
-        return ip.BeliefAgent(**base, scenario_map=scenario_map,
-                              plot_interval=plot_interval,
-                              agent_beliefs=agent_beliefs)
-    elif agent_type == "TrafficAgent":
-        open_loop = agent_config.get("open_loop", False)
-        return ip.TrafficAgent(**base, open_loop=open_loop)
-    else:
-        raise ValueError(f"Unsupported agent type: {agent_type}")
-
-
-def collect_step(step: int, t0: float, ego_agent, ego_goal, frame) -> StepRecord:
-    """Collect diagnostics for one simulation step."""
-    ego_id = ego_agent.agent_id
-    ego_state = frame.get(ego_id) if frame else None
-
-    human_policy = getattr(ego_agent, '_human_policy', None)
-    true_policy = getattr(ego_agent, '_true_policy', None)
-
-    # Human (belief) policy
-    human_rollout = getattr(human_policy, 'last_rollout', None) if human_policy else None
-    human_milp = getattr(human_policy, 'last_milp_rollout', None) if human_policy else None
-    human_nlp_converged = None
-    if human_policy is not None:
-        human_nlp_converged = getattr(human_policy, '_prev_nlp_states', None) is not None
-    human_obstacles = getattr(human_policy, 'last_obstacles', None) if human_policy else None
-    human_other_agents = getattr(human_policy, 'last_other_agents', None) if human_policy else None
-    human_trajectories = dict(ego_agent._human_agent_trajectories)
-
-    # True (ground-truth) policy
-    true_rollout = getattr(true_policy, 'last_rollout', None) if true_policy else None
-    true_milp = getattr(true_policy, 'last_milp_rollout', None) if true_policy else None
-    true_nlp_converged = None
-    if true_policy is not None:
-        true_nlp_converged = getattr(true_policy, '_prev_nlp_states', None) is not None
-    true_obstacles = getattr(true_policy, 'last_obstacles', None) if true_policy else None
-    true_other_agents = getattr(true_policy, 'last_other_agents', None) if true_policy else None
-    true_trajectories = dict(ego_agent._true_agent_trajectories)
-
-    dynamic_agents = {aid: s for aid, s in frame.items()
-                      if aid != ego_id and aid >= 0} if frame else {}
-    static_obstacles = {aid: s for aid, s in frame.items()
-                        if aid < 0} if frame else {}
-
-    # Goal reached: based on TRUE policy rollout
-    goal_reached = False
-    if ego_goal is not None and true_rollout is not None:
-        for pt in true_rollout[:, :2]:
-            if ego_goal.reached(pt):
-                goal_reached = True
-                break
-
-    return StepRecord(
-        step=step,
-        wall_time=time.time() - t0,
-        ego_position=np.array(ego_state.position) if ego_state else None,
-        ego_speed=float(ego_state.speed) if ego_state else None,
-        ego_heading=float(ego_state.heading) if ego_state else None,
-        human_rollout=human_rollout,
-        human_milp_rollout=human_milp,
-        human_nlp_converged=human_nlp_converged,
-        human_obstacles=human_obstacles,
-        human_other_agents=human_other_agents,
-        human_trajectories=human_trajectories,
-        true_rollout=true_rollout,
-        true_milp_rollout=true_milp,
-        true_nlp_converged=true_nlp_converged,
-        true_obstacles=true_obstacles,
-        true_other_agents=true_other_agents,
-        true_trajectories=true_trajectories,
-        dynamic_agents=dynamic_agents,
-        static_obstacles=static_obstacles,
-        goal_reached=goal_reached,
-    )
-
-
-def dump_results(result: ExperimentResult, name: str):
-    """Save experiment results to pickle."""
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    filepath = os.path.join(RESULTS_DIR, name + ".pkl")
-    with open(filepath, 'wb') as f:
-        dill.dump(result, f)
-    logger.info("Results saved to %s", filepath)
-    return filepath
-
-
 # ---------------------------------------------------------------------------
-# Main
+# Single experiment runner
 # ---------------------------------------------------------------------------
 
-def main():
-    args = parse_args()
+def run_single_experiment(config: dict,
+                          frame,
+                          scenario_map: 'ip.Map',
+                          carla_sim: 'ip.carlasim.CarlaSim',
+                          max_steps: int,
+                          fps: int,
+                          plot_interval: bool = True,
+                          seed: int = 21,
+                          scenario_name: str = "experiment",
+                          intervention_type: str = "none",
+                          ) -> ExperimentResult:
+    """Run a single experiment episode.
 
-    ip.setup_logging(level=logging.INFO)
-    np.random.seed(args.seed)
-    np.seterr(divide="ignore")
-
-    # Load scenario config
-    config_path = os.path.join("scenarios", "configs", f"{args.map}.json")
-    with open(config_path) as f:
-        config = json.load(f)
-
-    fps = config["scenario"].get("fps", 20)
-    ip.Maneuver.MAX_SPEED = config["scenario"].get("max_speed", 10.0)
-
-    scenario_xodr = config["scenario"]["map_path"]
-    scenario_map = ip.Map.parse_from_opendrive(scenario_xodr)
-
-    # Build spawn info and random initial frame
+    Creates agents, steps the simulation, collects diagnostics, and returns
+    an :class:`ExperimentResult`.  Does **not** clean up CARLA -- the caller
+    is responsible for removing agents and static objects afterwards.
+    """
     ego_id = config["agents"][0]["id"]
-    agent_spawns = []
-    for agent_config in config["agents"]:
-        spawn_box = ip.Box(
-            np.array(agent_config["spawn"]["box"]["center"]),
-            agent_config["spawn"]["box"]["length"],
-            agent_config["spawn"]["box"]["width"],
-            agent_config["spawn"]["box"]["heading"],
-        )
-        vel_range = agent_config["spawn"]["velocity"]
-        agent_spawns.append((spawn_box, vel_range))
 
-    frame = generate_random_frame(ego_id, scenario_map, agent_spawns)
+    # Inject intervention_type into the ego agent config so create_agent picks it up
+    config["agents"][0]["intervention_type"] = intervention_type
 
-    # Create CARLA simulation
-    carla_sim = ip.carlasim.CarlaSim(
-        map_name="Town01",
-        xodr=scenario_xodr,
-        carla_path=args.carla_path,
-        server=args.server,
-        port=args.port,
-        fps=fps,
-    )
-
-    plot_interval = 0 if args.no_plot else 1
     agents = {}
     for agent_config in config["agents"]:
         aid = agent_config["id"]
@@ -322,25 +133,20 @@ def main():
 
     # Prepare result object
     result = ExperimentResult(
-        scenario_name=args.map,
+        scenario_name=scenario_name,
         config=config,
-        seed=args.seed,
+        seed=seed,
         fps=fps,
-        max_steps=args.steps,
+        max_steps=max_steps,
         start_time=time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
 
-    output_name = args.output if args.output else f"{args.map}_{args.seed}"
-
-    print(f"\n{'='*60}")
-    print(f"  Experiment: {args.map}")
-    print(f"  Seed: {args.seed}  |  FPS: {fps}  |  Max steps: {args.steps}")
-    print(f"  Output: {output_name}.pkl")
-    print(f"{'='*60}\n")
+    print_scene_summary(config, frame)
 
     t0 = time.time()
+    prev_true_trajectories = None
 
-    for t in range(args.steps):
+    for t in range(max_steps):
         t_step_start = time.perf_counter()
         obs, acts = carla_sim.step()
         carla_step_total = time.perf_counter() - t_step_start
@@ -360,7 +166,9 @@ def main():
 
         # Collect diagnostics
         if ego_agent is not None and current_frame is not None:
-            record = collect_step(t, t0, ego_agent, ego_goal, current_frame)
+            record = collect_step(t, t0, ego_agent, ego_goal, current_frame,
+                                  prev_true_trajectories=prev_true_trajectories)
+            prev_true_trajectories = dict(ego_agent._true_agent_trajectories)
             result.steps.append(record)
             result.total_steps = t + 1
 
@@ -375,22 +183,149 @@ def main():
                 print(f"  Goal: {ego_goal}")
                 print(f"  Wall time: {result.wall_time_seconds:.1f}s")
                 print(f"{'='*60}\n")
+                break
 
-                # Remove all agents from CARLA
-                for aid in list(carla_sim.agents.keys()):
-                    if carla_sim.agents[aid] is not None:
-                        carla_sim.remove_agent(aid)
+            # Stop if true policy optimisation failed
+            if record.true_diag_nlp_ok is not None and not record.true_diag_nlp_ok:
+                result.failed = True
+                result.failure_step = t
+                result.wall_time_seconds = time.time() - t0
+
+                # Build failure reason -- one entry per violated constraint type
+                reasons = []
+                if record.true_diag_collision_violations > 0:
+                    reasons.append("collision avoidance infeasible")
+                if record.true_diag_road_violations > 0:
+                    reasons.append("road boundary infeasible")
+                if record.true_diag_velocity_violated:
+                    reasons.append("velocity bounds infeasible")
+                if record.true_diag_acceleration_violated:
+                    reasons.append("acceleration bounds infeasible")
+                if record.true_diag_steering_violated:
+                    reasons.append("steering bounds infeasible")
+                if record.true_diag_jerk_violated:
+                    reasons.append("jerk limits infeasible")
+                if record.true_diag_steer_rate_violated:
+                    reasons.append("steering rate infeasible")
+                result.failure_reason = "; ".join(reasons) if reasons else "NLP infeasible (unknown cause)"
+
+                print(f"\n{'='*60}")
+                print(f"  TRUE POLICY FAILED at step {t}")
+                print(f"  Reason: {result.failure_reason}")
+                print(f"  Ego position: {record.ego_position}")
+                print(f"  Wall time: {result.wall_time_seconds:.1f}s")
+                print(f"{'='*60}\n")
                 break
     else:
         result.wall_time_seconds = time.time() - t0
-        print(f"\nScenario NOT solved within {args.steps} steps "
+        print(f"\nScenario NOT solved within {max_steps} steps "
               f"({result.wall_time_seconds:.1f}s).")
 
-    # Save results
-    filepath = dump_results(result, output_name)
-    print(f"\nResults saved: {filepath}")
-    print(f"  solved={result.solved}  steps={result.total_steps}  "
-          f"time={result.wall_time_seconds:.1f}s")
+    # Close any matplotlib figures opened by agent plotters
+    import matplotlib.pyplot as plt
+    plt.close('all')
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    args = parse_args()
+
+    ip.setup_logging(level=logging.INFO)
+    np.random.seed(args.seed)
+    np.seterr(divide="ignore")
+
+    # Load scenario config
+    config_path = os.path.join("scenarios", "configs", f"{args.map}.json")
+    with open(config_path) as f:
+        config = json.load(f)
+
+    fps = config["scenario"].get("fps", 20)
+    ip.Maneuver.MAX_SPEED = config["scenario"].get("max_speed", 10.0)
+
+    scenario_xodr = config["scenario"]["map_path"]
+    scenario_map = ip.Map.parse_from_opendrive(scenario_xodr)
+    map_name = config["scenario"].get("map_name", "Town01")
+
+    rng = np.random.RandomState(args.seed)
+
+    if is_new_format(config):
+        # New format: expand dynamic groups and sample viable positions
+        expanded, frame = sample_viable_config(
+            config, scenario_map, seed=args.seed)
+    else:
+        # Old format: build spawn info and random initial frame
+        expanded = config
+        ego_id = config["agents"][0]["id"]
+        agent_spawns = []
+        for agent_config in config["agents"]:
+            spawn_box = ip.Box(
+                np.array(agent_config["spawn"]["box"]["center"]),
+                agent_config["spawn"]["box"]["length"],
+                agent_config["spawn"]["box"]["width"],
+                agent_config["spawn"]["box"]["heading"],
+            )
+            vel_range = agent_config["spawn"]["velocity"]
+            agent_spawns.append((spawn_box, vel_range))
+        frame = generate_random_frame(ego_id, scenario_map, agent_spawns, rng=rng)
+
+    plot_interval = False if args.no_plot else config["scenario"].get("plot_interval", True)
+
+    # Show spawn preview before connecting to CARLA
+    if plot_interval:
+        plot_spawn_preview(scenario_map, expanded, frame,
+                           title=f"Spawn Preview: {args.map}",
+                           raw_config=config)
+
+    # Create CARLA simulation
+    carla_sim = ip.carlasim.CarlaSim(
+        map_name=map_name,
+        xodr=scenario_xodr,
+        carla_path=args.carla_path,
+        server=args.server,
+        port=args.port,
+        fps=fps,
+    )
+
+    result = run_single_experiment(
+        config=expanded,
+        frame=frame,
+        scenario_map=scenario_map,
+        carla_sim=carla_sim,
+        max_steps=args.steps,
+        fps=fps,
+        plot_interval=plot_interval,
+        seed=args.seed,
+        scenario_name=args.map,
+        intervention_type=args.intervention_type,
+    )
+
+    run_dir = make_run_dir(
+        scenario_name=args.map,
+        intervention_type=args.intervention_type,
+        seed=args.seed,
+        custom_name=args.output,
+    )
+    metadata = build_run_metadata(args, expanded)
+    save_experiment(result, run_dir, metadata)
+
+    summary = build_summary(result)
+    save_summary(summary, run_dir)
+
+    print(f"\n{'='*60}")
+    print(f"  Experiment: {args.map}")
+    print(f"  Seed: {args.seed}  |  FPS: {fps}  |  Max steps: {args.steps}")
+    print(f"  Run directory: {run_dir}")
+    print(f"{'='*60}\n")
+
+    print(f"  solved={result.solved}  failed={result.failed}  "
+          f"steps={result.total_steps}  time={result.wall_time_seconds:.1f}s")
+    if result.failure_reason:
+        print(f"  failure_reason: {result.failure_reason}")
 
     logger.info("Done.")
 

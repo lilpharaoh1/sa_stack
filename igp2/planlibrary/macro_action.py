@@ -89,7 +89,12 @@ class MacroAction(abc.ABC):
         self.config = config
         self.agent_id = agent_id
         self.open_loop = config.open_loop
-        self.start_frame = frame
+        # In open-loop mode, hide other agents so trajectory planning
+        # (velocity profiles, give-way checks) ignores them entirely.
+        if self.open_loop:
+            self.start_frame = {agent_id: frame[agent_id]}
+        else:
+            self.start_frame = frame
         self.final_frame = None
         self.scenario_map = scenario_map
 
