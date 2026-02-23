@@ -297,7 +297,6 @@ class SecondStageIntervention:
             return opt_states, opt_controls, True, intervention
 
         except Exception as e:
-            logger.debug("Intervention NLP failed: %s", e)
-            print(f"  Intervention NLP failed: {e}")
+            logger.warning("Intervention NLP failed: %s", e)
             zeros = np.zeros_like(ref_controls)
             return ref_states, ref_controls, False, zeros

@@ -11,7 +11,7 @@ Driving" (Eiras et al.).
 """
 
 import logging
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict
 
 import numpy as np
 import casadi as ca
@@ -340,11 +340,10 @@ class SecondStagePlanner:
             return nlp_states, nlp_controls, True, None
 
         except Exception as e:
-            print("NLP solver failed: %s", e)
-            logger.debug("NLP solver failed: %s", e)
+            logger.warning("Stage2 (NLP) failed: %s", e)
 
             # Diagnose constraint violations
-            print(f"  NLP FAILURE DIAGNOSIS:")
+            logger.debug("NLP FAILURE DIAGNOSIS:")
             try:
                 S_dbg = opti.debug.value(S).T  # (H+1, 4)
                 U_dbg = opti.debug.value(U).T  # (H, 2)
@@ -445,19 +444,24 @@ class SecondStagePlanner:
                             if ellipse_val < 1.0 - 1e-3:
                                 violations.append(f"Collision obs{obs_idx}[{k}] corner({sl},{sw}): ellipse={ellipse_val:.3f} < 1.0")
 
-                # Always print constraint value summaries
-                print(f"    --- Debug State Constraint Values ---")
-                print(f"    Acceleration: min={np.min(a_dbg):.3f}, max={np.max(a_dbg):.3f} | bounds=[{a_min:.2f}, {a_max:.2f}]")
-                print(f"    Steering (deg): min={np.degrees(np.min(delta_dbg)):.2f}, max={np.degrees(np.max(delta_dbg)):.2f} | bound=\u00b1{np.degrees(delta_max):.2f}")
-                print(f"    Velocity: min={np.min(v_dbg):.3f}, max={np.max(v_dbg):.3f} | bounds=[{v_min:.2f}, {v_max:.2f}]")
+                # Log constraint value summaries
+                logger.debug("--- Debug State Constraint Values ---")
+                logger.debug("Acceleration: min=%.3f, max=%.3f | bounds=[%.2f, %.2f]",
+                             np.min(a_dbg), np.max(a_dbg), a_min, a_max)
+                logger.debug("Steering (deg): min=%.2f, max=%.2f | bound=+-%.2f",
+                             np.degrees(np.min(delta_dbg)), np.degrees(np.max(delta_dbg)), np.degrees(delta_max))
+                logger.debug("Velocity: min=%.3f, max=%.3f | bounds=[%.2f, %.2f]",
+                             np.min(v_dbg), np.max(v_dbg), v_min, v_max)
 
                 # Jerk and steering rate
                 if len(a_dbg) > 1:
                     jerk_vals = np.diff(a_dbg) / dt
-                    print(f"    Jerk: min={np.min(jerk_vals):.3f}, max={np.max(jerk_vals):.3f} | bound=\u00b1{jerk_max:.2f}")
+                    logger.debug("Jerk: min=%.3f, max=%.3f | bound=+-%.2f",
+                                 np.min(jerk_vals), np.max(jerk_vals), jerk_max)
                 if len(delta_dbg) > 1:
                     delta_rate_vals = np.diff(delta_dbg) / dt
-                    print(f"    Steer rate (deg/s): min={np.degrees(np.min(delta_rate_vals)):.2f}, max={np.degrees(np.max(delta_rate_vals)):.2f} | bound=\u00b1{np.degrees(delta_rate_max):.2f}")
+                    logger.debug("Steer rate (deg/s): min=%.2f, max=%.2f | bound=+-%.2f",
+                                 np.degrees(np.min(delta_rate_vals)), np.degrees(np.max(delta_rate_vals)), np.degrees(delta_rate_max))
 
                 # Find minimum g value across all corners and obstacles
                 if N_obs > 0:
@@ -492,40 +496,42 @@ class SecondStagePlanner:
                                     min_g_info = f"Obs{obs_idx} k={k} {name}: g={g_val}, corner=({c_s:.2f},{c_d:.2f}), obs=({s_obs:.2f},{d_obs:.2f})"
 
                     status = "VIOLATED" if min_g_overall < 1.0 - 1e-3 else "OK"
-                    print(f"    Collision (min_g): {min_g_overall} ({status}) | {min_g_info}")
+                    logger.debug("Collision (min_g): %s (%s) | %s",
+                                 min_g_overall, status, min_g_info)
 
                 if violations:
-                    print(f"    Violated constraints ({len(violations)} total):")
-                    for v in violations[:10]:  # Show first 10
-                        print(f"      - {v}")
+                    logger.debug("Violated constraints (%d total):", len(violations))
+                    for v in violations[:10]:
+                        logger.debug("  - %s", v)
                     if len(violations) > 10:
-                        print(f"      ... and {len(violations) - 10} more")
+                        logger.debug("  ... and %d more", len(violations) - 10)
                 else:
-                    print(f"    No obvious constraint violations found in debug values")
-                    print(f"    Initial: s={frenet_state[0]:.2f}, d={frenet_state[1]:.2f}, phi={frenet_state[2]:.2f}, v={frenet_state[3]:.2f}")
-                    print(f"    Ego dimensions: L={2*half_L:.2f}, W={2*half_W:.2f}")
-                    print(f"    Road bounds[0]: left={road_left[0]:.2f}, right={road_right[0]:.2f}, width={road_left[0]-road_right[0]:.2f}")
+                    logger.debug("No obvious constraint violations found in debug values")
+                    logger.debug("Initial: s=%.2f, d=%.2f, phi=%.2f, v=%.2f",
+                                 frenet_state[0], frenet_state[1], frenet_state[2], frenet_state[3])
+                    logger.debug("Ego dimensions: L=%.2f, W=%.2f", 2*half_L, 2*half_W)
+                    logger.debug("Road bounds[0]: left=%.2f, right=%.2f, width=%.2f",
+                                 road_left[0], road_right[0], road_left[0]-road_right[0])
 
                     # Show obstacle info and gap analysis
                     if N_obs > 0:
-                        print(f"    Obstacles ({N_obs}):")
+                        logger.debug("Obstacles (%d):", N_obs)
                         for obs_idx in range(min(N_obs, 3)):
                             obs = obstacles[obs_idx]
                             obs_d0 = float(obs['d'][0])
                             obs_half_W = obs['width'] / 2.0
-                            # Obstacle occupies [obs_d0 - obs_half_W, obs_d0 + obs_half_W]
                             obs_left = obs_d0 + obs_half_W + self._collision_margin
                             obs_right = obs_d0 - obs_half_W - self._collision_margin
-                            gap_left = road_left[0] - obs_left  # Gap between obstacle and left road edge
-                            gap_right = obs_right - road_right[0]  # Gap between obstacle and right road edge
-                            print(f"      Obs{obs_idx}: d={obs_d0:.2f}, W={obs['width']:.2f}, gaps: left={gap_left:.2f}, right={gap_right:.2f}")
-                            # Check if ego can fit in either gap
-                            ego_needed = 2 * half_W + 0.1  # Width needed + small margin
+                            gap_left = road_left[0] - obs_left
+                            gap_right = obs_right - road_right[0]
+                            logger.debug("  Obs%d: d=%.2f, W=%.2f, gaps: left=%.2f, right=%.2f",
+                                         obs_idx, obs_d0, obs['width'], gap_left, gap_right)
+                            ego_needed = 2 * half_W + 0.1
                             if gap_left < ego_needed and gap_right < ego_needed:
-                                print(f"      WARNING: Ego needs {ego_needed:.2f}m but gaps are too small!")
+                                logger.warning("Ego needs %.2fm but gaps are too small!", ego_needed)
 
             except Exception as debug_e:
-                print(f"    (Could not extract debug values: {debug_e})")
+                logger.debug("Could not extract debug values: %s", debug_e)
                 S_dbg, U_dbg = None, None
 
             return warm_states, warm_controls, False, (S_dbg, U_dbg)

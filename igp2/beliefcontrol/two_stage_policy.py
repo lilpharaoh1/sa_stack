@@ -18,6 +18,10 @@ from igp2.opendrive.map import Map
 from igp2.beliefcontrol.frenet import FrenetFrame
 from igp2.beliefcontrol.first_stage import FirstStagePlanner
 from igp2.beliefcontrol.second_stage import SecondStagePlanner
+from igp2.beliefcontrol.planning_utils import (
+    milp_to_nlp_warmstart as _milp_to_nlp_warmstart,
+    sample_road_boundaries as _sample_road_boundaries_util,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +77,6 @@ class TwoStagePolicy:
                  nlp_params: Optional[Dict] = None,
                  use_prev_nlp_on_fail: bool = True,
                  # Legacy params (for back-compat, override milp/nlp_params)
-                 big_m: float = None,
                  delta_max: float = None,
                  a_min: float = None,
                  a_max: float = None,
@@ -190,10 +193,6 @@ class TwoStagePolicy:
         self._last_obstacles: Optional[List] = None
         self._last_other_agents: Optional[Dict] = None
 
-        # NLP solver cache
-        self._nlp_solver = None
-        self._nlp_built = False
-
         # Debug predicted trajectory
         self._predicted_next_state: Optional[np.ndarray] = None
         self._predicted_next_world: Optional[np.ndarray] = None
@@ -248,7 +247,7 @@ class TwoStagePolicy:
         t_milp = time.time() - t_milp_start
 
         if milp_states is None:
-            print(f"[Step {self._step_count:4d}] MILP: FAILED ({t_milp*1000:.1f}ms)")
+            logger.warning("[Step %4d] MILP: FAILED (%.1fms)", self._step_count, t_milp*1000)
             action = Action(acceleration=0.0, steer_angle=0.0,
                             target_speed=self._target_speed)
             return action, [np.array([state.position])], 0
@@ -282,7 +281,8 @@ class TwoStagePolicy:
             final_controls = nlp_controls
             nlp_status = "OK"
 
-        print(f"[Step {self._step_count:4d}] MILP: OK ({t_milp*1000:.1f}ms) | NLP: {nlp_status} ({t_nlp*1000:.1f}ms)")
+        logger.info("[Step %4d] MILP: OK (%.1fms) | NLP: %s (%.1fms)",
+                    self._step_count, t_milp*1000, nlp_status, t_nlp*1000)
 
         # Constraint analysis
         if not nlp_ok and nlp_debug is not None and nlp_debug[0] is not None:
@@ -367,6 +367,26 @@ class TwoStagePolicy:
         return self._dt
 
     @property
+    def target_speed(self) -> float:
+        return self._target_speed
+
+    @property
+    def fps(self) -> int:
+        return self._fps
+
+    @property
+    def wheelbase(self) -> float:
+        return self._wheelbase
+
+    @property
+    def n_obs_max(self) -> int:
+        return self.N_OBS_MAX
+
+    @property
+    def reference_waypoints(self) -> np.ndarray:
+        return self._reference_waypoints
+
+    @property
     def last_diagnostics(self) -> Optional[Dict]:
         return self._last_diagnostics
 
@@ -387,8 +407,6 @@ class TwoStagePolicy:
         self._last_milp_rollout = None
         self._last_diagnostics = None
         self._ref_start_idx = 0
-        self._nlp_built = False
-        self._nlp_solver = None
         self._last_obstacles = None
         self._last_other_agents = None
         self._step_count = 0
@@ -433,11 +451,7 @@ class TwoStagePolicy:
 
     def _sample_road_boundaries(self, s_values: np.ndarray):
         """Sample road boundaries at given s positions."""
-        if self._scenario_map is not None and self._frenet is not None:
-            return self._frenet.road_boundaries(s_values, self._scenario_map,
-                                                search_radius=15.0)
-        return (np.full(len(s_values), 3.5),
-                np.full(len(s_values), -3.5))
+        return _sample_road_boundaries_util(s_values, self._scenario_map, self._frenet)
 
     # ------------------------------------------------------------------
     # Obstacle prediction
@@ -539,33 +553,7 @@ class TwoStagePolicy:
 
     def _milp_to_nlp_warmstart(self, milp_states, frenet_state):
         """Convert MILP [s, d, vs, vd] to NLP [s, d, phi, v] + controls."""
-        H = self._horizon
-        dt = self._dt
-        L = self._wheelbase
-        nlp = self._second_stage.params
-
-        s_arr = milp_states[:, 0]
-        d_arr = milp_states[:, 1]
-        vs_arr = milp_states[:, 2]
-        vd_arr = milp_states[:, 3]
-
-        speeds = np.sqrt(vs_arr**2 + vd_arr**2)
-        phis = np.arctan2(vd_arr, vs_arr)
-        phis[0] = frenet_state[2]
-
-        nlp_states = np.column_stack([s_arr, d_arr, phis, speeds])
-        nlp_controls = np.zeros((H, 2))
-
-        for k in range(H):
-            a_k = np.clip((speeds[k + 1] - speeds[k]) / dt,
-                          nlp['a_min'], nlp['a_max'])
-
-            d_phi = (phis[k + 1] - phis[k] + np.pi) % (2 * np.pi) - np.pi
-            spd = max(speeds[k], 0.5)
-            sin_arg = np.clip(d_phi * L / (2.0 * spd * dt), -1.0, 1.0)
-            delta_k = np.clip(np.arcsin(sin_arg),
-                              -nlp['delta_max'], nlp['delta_max'])
-
-            nlp_controls[k] = [a_k, delta_k]
-
-        return nlp_states, nlp_controls
+        return _milp_to_nlp_warmstart(
+            milp_states, frenet_state,
+            self._horizon, self._dt, self._wheelbase,
+            self._second_stage.params)

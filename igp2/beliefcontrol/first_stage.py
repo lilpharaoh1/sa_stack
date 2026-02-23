@@ -7,7 +7,6 @@ and smooth penalty-based collision avoidance.
 """
 
 import logging
-import time
 from typing import List, Optional, Dict
 
 import numpy as np
@@ -207,7 +206,6 @@ class FirstStagePlanner:
 
             # Cost function
             cost = 0.0
-            _eps = 1e-6
 
             for k in range(H + 1):
                 ref_s = min(s0 + v_goal * k * dt, s_goal)
@@ -280,17 +278,14 @@ class FirstStagePlanner:
             opti.solver('ipopt', p_opts, s_opts)
 
             # Initial guess
-            if False:  # self._prev_nlp_states is not None:
-                pass
-            else:
-                for k in range(H + 1):
-                    opti.set_initial(s[k], s0 + 0.5 * v_goal * k * dt)
-                    opti.set_initial(d[k], d0)
-                    opti.set_initial(vs[k], 0.5 * v_goal)
-                    opti.set_initial(vd[k], 0)
-                for k in range(H):
-                    opti.set_initial(a_s[k], 0)
-                    opti.set_initial(a_d[k], 0)
+            for k in range(H + 1):
+                opti.set_initial(s[k], s0 + 0.5 * v_goal * k * dt)
+                opti.set_initial(d[k], d0)
+                opti.set_initial(vs[k], 0.5 * v_goal)
+                opti.set_initial(vd[k], 0)
+            for k in range(H):
+                opti.set_initial(a_s[k], 0)
+                opti.set_initial(a_d[k], 0)
 
             sol = opti.solve()
 
@@ -304,10 +299,9 @@ class FirstStagePlanner:
             return milp_states
 
         except Exception as e:
-            print("MILP failed", e)
-            logger.debug(f"Stage1 solver failed: {e}")
+            logger.warning("Stage1 (MILP) failed: %s", e)
 
-            print(f"  MILP FAILURE DIAGNOSIS:")
+            logger.debug("MILP FAILURE DIAGNOSIS:")
             try:
                 s_dbg = opti.debug.value(s).flatten()
                 d_dbg = opti.debug.value(d).flatten()
@@ -366,17 +360,19 @@ class FirstStagePlanner:
                         violations.append(f"Jerk_d[{k}]={jerk_d:.3f} > limit={jerk_d_limit:.3f}")
 
                 if violations:
-                    print(f"    Violated constraints ({len(violations)} total):")
+                    logger.debug("Violated constraints (%d total):", len(violations))
                     for v in violations[:10]:
-                        print(f"      - {v}")
+                        logger.debug("  - %s", v)
                     if len(violations) > 10:
-                        print(f"      ... and {len(violations) - 10} more")
+                        logger.debug("  ... and %d more", len(violations) - 10)
                 else:
-                    print(f"    No obvious constraint violations found in debug values")
-                    print(f"    Initial state: s0={s0:.2f}, d0={d0:.2f}, vs0={vs0:.2f}, vd0={vd0:.2f}")
-                    print(f"    Road bounds[0]: left={road_left[0]:.2f}, right={road_right[0]:.2f}")
+                    logger.debug("No obvious constraint violations found in debug values")
+                    logger.debug("Initial state: s0=%.2f, d0=%.2f, vs0=%.2f, vd0=%.2f",
+                                 s0, d0, vs0, vd0)
+                    logger.debug("Road bounds[0]: left=%.2f, right=%.2f",
+                                 road_left[0], road_right[0])
 
             except Exception as debug_e:
-                print(f"    (Could not extract debug values: {debug_e})")
+                logger.debug("Could not extract debug values: %s", debug_e)
 
             return None

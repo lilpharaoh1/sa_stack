@@ -11,6 +11,7 @@ Usage:
 
 import sys
 import os
+import json
 import argparse
 from collections import Counter
 
@@ -20,12 +21,13 @@ import numpy as np
 # Ensure repo root is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from ind_belief_experiment import ExperimentResult, StepRecord
+from belief_utils import ExperimentResult, StepRecord
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Inspect experiment results")
-    parser.add_argument("path", type=str, help="Path to .pkl results file")
+    parser.add_argument("path", type=str,
+                        help="Path to .pkl results file or run directory")
     parser.add_argument("--steps", action="store_true",
                         help="Print per-step details for each episode")
     return parser.parse_args()
@@ -99,6 +101,19 @@ def print_episode(result: ExperimentResult, idx: int = None, show_steps: bool = 
     coll_viols = sum(s.true_diag_collision_violations for s in result.steps)
     if road_viols or coll_viols:
         print(f"    Constraint violations: road={road_viols}  collision={coll_viols}")
+
+    # Intervention stats
+    n_interv = sum(1 for s in result.steps if s.intervention_active)
+    if n_interv > 0:
+        print(f"    Intervention active: {n_interv}/{len(result.steps)} steps "
+              f"({100*n_interv/len(result.steps):.1f}%)")
+        dev_vals = [s.action_deviation for s in result.steps
+                    if s.intervention_active and s.action_deviation is not None]
+        if dev_vals:
+            dev = np.array(dev_vals)
+            print(f"    Action deviation (intervention steps only, n={len(dev_vals)}):")
+            print(f"      mean={dev.mean():.4f}  std={dev.std():.4f}  "
+                  f"min={dev.min():.4f}  max={dev.max():.4f}")
 
     # Ego speed at final step
     final = result.steps[-1]
@@ -243,6 +258,21 @@ def inspect_batch(data: dict, show_steps: bool = False):
               f"({100*n_ok/len(all_nlp):.1f}%)")
         print()
 
+    # Aggregate intervention stats
+    all_steps = [s for r in results for s in r.steps]
+    n_interv = sum(1 for s in all_steps if s.intervention_active)
+    if n_interv > 0:
+        print(f"  Intervention active: {n_interv}/{len(all_steps)} steps "
+              f"({100*n_interv/len(all_steps):.1f}%)")
+        dev_vals = [s.action_deviation for s in all_steps
+                    if s.intervention_active and s.action_deviation is not None]
+        if dev_vals:
+            dev = np.array(dev_vals)
+            print(f"  Action deviation (intervention steps only, n={len(dev_vals)}):")
+            print(f"    mean={dev.mean():.4f}  std={dev.std():.4f}  "
+                  f"min={dev.min():.4f}  max={dev.max():.4f}")
+        print()
+
     # Agent count distribution
     agent_counts = [len(r.config.get("agents", [])) for r in results]
     if agent_counts:
@@ -265,14 +295,41 @@ def main():
     args = parse_args()
 
     if not os.path.exists(args.path):
-        print(f"File not found: {args.path}")
+        print(f"Path not found: {args.path}")
         sys.exit(1)
 
-    with open(args.path, 'rb') as f:
+    # Resolve the pickle path — support both directory and direct .pkl
+    metadata = None
+    if os.path.isdir(args.path):
+        pkl_path = os.path.join(args.path, "results.pkl")
+        if not os.path.exists(pkl_path):
+            print(f"No results.pkl found in directory: {args.path}")
+            sys.exit(1)
+        meta_path = os.path.join(args.path, "metadata.json")
+        if os.path.exists(meta_path):
+            with open(meta_path) as f:
+                metadata = json.load(f)
+    else:
+        pkl_path = args.path
+
+    with open(pkl_path, 'rb') as f:
         data = dill.load(f)
 
-    print(f"\nLoaded: {args.path}")
+    print(f"\nLoaded: {pkl_path}")
     print(f"Type: {type(data).__name__}")
+
+    if metadata is not None:
+        print(f"\n  Metadata:")
+        print(f"    Scenario:          {metadata.get('scenario', '?')}")
+        print(f"    Mode:              {metadata.get('mode', '?')}")
+        print(f"    Seed:              {metadata.get('seed', '?')}")
+        print(f"    Max steps:         {metadata.get('max_steps', '?')}")
+        print(f"    Intervention type: {metadata.get('intervention_type', '?')}")
+        n_samples = metadata.get('n_samples')
+        if n_samples is not None:
+            print(f"    N samples:         {n_samples}")
+        print(f"    Timestamp:         {metadata.get('timestamp', '?')}")
+
     print()
 
     if isinstance(data, dict) and "results" in data:

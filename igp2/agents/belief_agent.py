@@ -318,6 +318,10 @@ class BeliefAgent(Agent):
         # Per-step timing breakdown (seconds)
         self.last_step_timing: Dict[str, float] = {}
 
+        # Per-step action tracking (for evaluation metrics)
+        self._last_human_action: Optional[Action] = None
+        self._last_executed_action: Optional[Action] = None
+
         # Build the matching plotter
         self._plotter = None
         if scenario_map is not None and plot_interval:
@@ -650,7 +654,6 @@ class BeliefAgent(Agent):
         Returns:
             Belief-conditioned action (from the human policy).
         """
-        # EMRAN TODO: Have reference path generated here when no path is found.
         if len(self.reference_path) == 0:
             pass
 
@@ -672,6 +675,7 @@ class BeliefAgent(Agent):
 
         self.update_beliefs(observation)
         action = self.policy(observation)
+        self._last_human_action = action
 
         # Run belief inference (after policy so we have the ego's action)
         if self._belief_inference is not None and self._human_policy is not None:
@@ -698,12 +702,13 @@ class BeliefAgent(Agent):
                         action = Action(
                             acceleration=float(opt_controls[0, 0]),
                             steer_angle=float(opt_controls[0, 1]),
-                            target_speed=self._human_policy._target_speed,
+                            target_speed=self._human_policy.target_speed,
                         )
 
         # Merge policy/plot timings set by policy()
         timing.update(self.last_step_timing)
         self.last_step_timing = timing
+        self._last_executed_action = action
         return action
 
     def reset(self):
@@ -715,6 +720,8 @@ class BeliefAgent(Agent):
         self._true_agent_trajectories = {}
         self._step_count = 0
         self.last_step_timing = {}
+        self._last_human_action = None
+        self._last_executed_action = None
         if self._human_policy is not None:
             self._human_policy.reset()
         self._true_policy.reset()

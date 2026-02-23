@@ -20,6 +20,11 @@ from igp2.beliefcontrol.first_stage import FirstStagePlanner
 from igp2.beliefcontrol.second_stage import SecondStagePlanner
 from igp2.beliefcontrol.secondstage_intervention import SecondStageIntervention
 from igp2.beliefcontrol.plotting import InferencePlotter, InterventionPlotter
+from igp2.beliefcontrol.planning_utils import (
+    milp_to_nlp_warmstart as _milp_to_nlp_warmstart,
+    sample_road_boundaries as _sample_road_boundaries_util,
+    predict_obstacles_cv as _predict_obstacles_cv_util,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,17 +92,17 @@ class BeliefInference:
         self._frenet: Optional[FrenetFrame] = policy.frenet_frame
         self._horizon = policy.horizon
         self._dt = policy.dt
-        self._target_speed = policy._target_speed
+        self._target_speed = policy.target_speed
         self._ego_length = policy.ego_length
         self._ego_width = policy.ego_width
         self._collision_margin = policy.collision_margin
-        self._fps = policy._fps
+        self._fps = policy.fps
         self._dt_sim = 1.0 / self._fps
 
         # Warmup: number of planning steps worth of history needed
         self._warmup_steps = max(1, int(self._warmup_fraction * self._horizon))
 
-        self._wheelbase = policy._wheelbase
+        self._wheelbase = policy.wheelbase
 
         # Create own FirstStagePlanner to avoid corrupting the policy's
         self._first_stage = FirstStagePlanner(
@@ -150,18 +155,21 @@ class BeliefInference:
         self._last_results: Optional[List[InferenceResult]] = None
         self._last_observed_sd: Optional[np.ndarray] = None
         self._last_intervention = None  # dict or None
+        self._last_marginals: Dict[int, float] = {}  # P(hidden | τ_obs) per agent
+        self._last_config_probs: List[float] = []     # P(b | τ_obs) per config
+        self._last_energies: List[float] = []          # E(b) per config
 
         # Debug plotters
         self._plotter: Optional[InferencePlotter] = None
         self._intervention_plotter: Optional[InterventionPlotter] = None
         if plot and self._frenet is not None:
             self._plotter = InferencePlotter(
-                scenario_map, policy._reference_waypoints, self._frenet,
+                scenario_map, policy.reference_waypoints, self._frenet,
                 dt=self._dt,
                 ego_length=self._ego_length, ego_width=self._ego_width)
             if intervention_type != 'none':
                 self._intervention_plotter = InterventionPlotter(
-                    scenario_map, policy._reference_waypoints, self._frenet,
+                    scenario_map, policy.reference_waypoints, self._frenet,
                     dt=self._dt,
                     ego_length=self._ego_length, ego_width=self._ego_width,
                     collision_margin=self._collision_margin)
@@ -170,6 +178,10 @@ class BeliefInference:
         """Clear history and results."""
         self._history = []
         self._last_results = None
+        self._last_marginals = {}
+        self._last_config_probs = []
+        self._last_energies = []
+        self._last_intervention = None
         self._first_stage.reset()
         self._second_stage.reset()
 
@@ -304,6 +316,7 @@ class BeliefInference:
             # Print results and get marginal posteriors
             marginals = self._print_results(results, step_count, relevant_aids,
                                             t_elapsed, self._warmup_steps)
+            self._last_marginals = marginals
 
             # Compute ego world heading from Frenet state
             w = self._frenet.frenet_to_world(
@@ -380,62 +393,10 @@ class BeliefInference:
 
     def _predict_obstacles_cv(self, agent_states: Dict[int, AgentState],
                               visible_aids: set) -> list:
-        """Constant-velocity obstacle prediction for visible agents only.
-
-        Produces the same output format as TwoStagePolicy._predict_obstacles.
-        """
-        if self._frenet is None:
-            return []
-
-        H = self._horizon
-        dt = self._dt
-        obstacles = []
-
-        for aid, state in agent_states.items():
-            # Static objects (negative IDs) are always included;
-            # dynamic agents are included only if visible in this config
-            if aid >= 0 and aid not in visible_aids:
-                continue
-
-            pos = np.array(state.position, dtype=float)
-            vel = np.array(state.velocity, dtype=float)
-
-            # Constant-velocity world positions
-            world_positions = np.empty((H + 1, 2))
-            for k in range(H + 1):
-                world_positions[k] = pos + vel * k * dt
-
-            # Headings from displacement
-            headings = np.empty(H + 1)
-            headings[0] = float(state.heading)
-            for k in range(1, H + 1):
-                dx = world_positions[k, 0] - world_positions[k - 1, 0]
-                dy = world_positions[k, 1] - world_positions[k - 1, 1]
-                if abs(dx) > 1e-3 or abs(dy) > 1e-3:
-                    headings[k] = np.arctan2(dy, dx)
-                else:
-                    headings[k] = headings[k - 1]
-
-            # Convert to Frenet
-            s_arr, d_arr = self._frenet.world_to_frenet_batch(world_positions)
-
-            obs_meta = getattr(state, 'metadata', None)
-            obs_length = obs_meta.length if obs_meta is not None else 4.5
-            obs_width = obs_meta.width if obs_meta is not None else 1.8
-
-            obstacles.append({
-                's': s_arr,
-                'd': d_arr,
-                'world_positions': world_positions,
-                'headings': headings,
-                'length': obs_length,
-                'width': obs_width,
-                'heading': float(state.heading),
-                'agent_id': aid,
-                'uses_planned_trajectory': False,
-            })
-
-        return obstacles
+        """Constant-velocity obstacle prediction for visible agents only."""
+        return _predict_obstacles_cv_util(
+            agent_states, visible_aids, self._frenet,
+            self._horizon, self._dt)
 
     def _subsample_history(self, start_idx: int, end_idx: int,
                            sim_steps_per_plan_step: int) -> np.ndarray:
@@ -455,40 +416,11 @@ class BeliefInference:
         return observed
 
     def _milp_to_nlp_warmstart(self, milp_states, frenet_state):
-        """Convert MILP [s, d, vs, vd] to NLP [s, d, phi, v] + controls.
-
-        Copied from TwoStagePolicy._milp_to_nlp_warmstart.
-        """
-        H = self._horizon
-        dt = self._dt
-        L = self._wheelbase
-        nlp = self._second_stage.params
-
-        s_arr = milp_states[:, 0]
-        d_arr = milp_states[:, 1]
-        vs_arr = milp_states[:, 2]
-        vd_arr = milp_states[:, 3]
-
-        speeds = np.sqrt(vs_arr**2 + vd_arr**2)
-        phis = np.arctan2(vd_arr, vs_arr)
-        phis[0] = frenet_state[2]
-
-        nlp_states = np.column_stack([s_arr, d_arr, phis, speeds])
-        nlp_controls = np.zeros((H, 2))
-
-        for k in range(H):
-            a_k = np.clip((speeds[k + 1] - speeds[k]) / dt,
-                          nlp['a_min'], nlp['a_max'])
-
-            d_phi = (phis[k + 1] - phis[k] + np.pi) % (2 * np.pi) - np.pi
-            spd = max(speeds[k], 0.5)
-            sin_arg = np.clip(d_phi * L / (2.0 * spd * dt), -1.0, 1.0)
-            delta_k = np.clip(np.arcsin(sin_arg),
-                              -nlp['delta_max'], nlp['delta_max'])
-
-            nlp_controls[k] = [a_k, delta_k]
-
-        return nlp_states, nlp_controls
+        """Convert MILP [s, d, vs, vd] to NLP [s, d, phi, v] + controls."""
+        return _milp_to_nlp_warmstart(
+            milp_states, frenet_state,
+            self._horizon, self._dt, self._wheelbase,
+            self._second_stage.params)
 
     def _trajectory_cost(self, observed_sdvv: np.ndarray,
                          planned_sdvv: np.ndarray
@@ -516,11 +448,7 @@ class BeliefInference:
 
     def _sample_road_boundaries(self, s_values: np.ndarray):
         """Sample road boundaries at given s positions."""
-        if self._scenario_map is not None and self._frenet is not None:
-            return self._frenet.road_boundaries(
-                s_values, self._scenario_map, search_radius=15.0)
-        return (np.full(len(s_values), 3.5),
-                np.full(len(s_values), -3.5))
+        return _sample_road_boundaries_util(s_values, self._scenario_map, self._frenet)
 
     def _print_results(self, results: List[InferenceResult],
                        step_count: int, relevant_aids: List[int],
@@ -533,10 +461,10 @@ class BeliefInference:
         n_configs = len(results)
         aids_str = ", ".join(str(a) for a in relevant_aids)
 
-        print(f"\n[Step {step_count:4d}] BELIEF INFERENCE "
-              f"({len(relevant_aids)} relevant agents [{aids_str}], "
-              f"{n_configs} configs, window={window_steps} steps, "
-              f"{elapsed:.2f}s):")
+        logger.info("[Step %4d] BELIEF INFERENCE "
+                    "(%d relevant agents [%s], %d configs, window=%d steps, %.2fs):",
+                    step_count, len(relevant_aids), aids_str,
+                    n_configs, window_steps, elapsed)
 
         # Boltzmann rational-action model for belief inference:
         #
@@ -570,6 +498,10 @@ class BeliefInference:
         Z = np.sum(boltzmann_probs)
         boltzmann_probs = boltzmann_probs / Z if Z > 0 else np.zeros(len(results))
 
+        # Store for external access
+        self._last_energies = energies.tolist()
+        self._last_config_probs = boltzmann_probs.tolist()
+
         best_energy = np.min(energies) if len(energies) > 0 else float('inf')
         for i, r in enumerate(results):
             cfg_str = ", ".join(
@@ -578,8 +510,9 @@ class BeliefInference:
             )
             status = "OK" if r.solver_ok else "FAILED"
             marker = "  <-- best" if energies[i] == best_energy and r.solver_ok else ""
-            print(f"  {{{cfg_str}}}: E={energies[i]:.4f} (pos={r.pos_cost:.4f} vel={r.vel_cost:.4f})  "
-                  f"P(b|τ)={boltzmann_probs[i]:.3f}  [{status}]{marker}")
+            logger.info("  {%s}: E=%.4f (pos=%.4f vel=%.4f)  P(b|tau)=%.3f  [%s]%s",
+                        cfg_str, energies[i], r.pos_cost, r.vel_cost,
+                        boltzmann_probs[i], status, marker)
 
         # Marginal posterior: P(h_i | τ_obs) = Σ_{b : i hidden in b} P(b | τ_obs)
         marginals = {}
@@ -590,7 +523,7 @@ class BeliefInference:
                         marginals[aid] = 0.0
                     if not vis:
                         marginals[aid] += boltzmann_probs[i]
-            print(f"  P(h_i|τ): " + ", ".join(
+            logger.info("  P(h_i|tau): %s", ", ".join(
                 f"{aid}={marginals[aid]:.3f}" for aid in sorted(marginals)))
         return marginals
 
@@ -652,7 +585,7 @@ class BeliefInference:
             cfg_str = ", ".join(
                 f"{aid}:{'V' if vis else 'H'}"
                 for aid, vis in sorted(believed_config.items()))
-            print(f"  Believed config: {{{cfg_str}}} — MILP failed, skipping intervention")
+            logger.info("  Believed config: {%s} -- MILP failed, skipping intervention", cfg_str)
             self._last_intervention = None
             return
 
@@ -716,12 +649,12 @@ class BeliefInference:
             du_norm = float(np.linalg.norm(intervention))
             max_da = float(np.max(np.abs(intervention[:, 0])))
             max_dd = float(np.max(np.abs(intervention[:, 1])))
-            print(f"  Believed config: {{{cfg_str}}}")
-            print(f"  Intervention: OK, ||du||={du_norm:.4f}, "
-                  f"max|da|={max_da:.4f}, max|dd|={max_dd:.4f}")
+            logger.info("  Believed config: {%s}", cfg_str)
+            logger.info("  Intervention: OK, ||du||=%.4f, max|da|=%.4f, max|dd|=%.4f",
+                        du_norm, max_da, max_dd)
         else:
-            print(f"  Believed config: {{{cfg_str}}}")
-            print(f"  Intervention: FAILED (returning reference trajectory)")
+            logger.info("  Believed config: {%s}", cfg_str)
+            logger.info("  Intervention: FAILED (returning reference trajectory)")
 
     @property
     def last_results(self) -> Optional[List[InferenceResult]]:
@@ -732,6 +665,21 @@ class BeliefInference:
     def last_intervention(self):
         """Most recent intervention results dict, or None."""
         return self._last_intervention
+
+    @property
+    def last_marginals(self) -> Dict[int, float]:
+        """Most recent marginal posteriors {agent_id: P(hidden | τ_obs)}."""
+        return self._last_marginals
+
+    @property
+    def last_config_probs(self) -> List[float]:
+        """P(b | τ_obs) for each config, aligned with ``last_results``."""
+        return self._last_config_probs
+
+    @property
+    def last_energies(self) -> List[float]:
+        """Energy E(b) for each config, aligned with ``last_results``."""
+        return self._last_energies
 
     @property
     def history_length(self) -> int:

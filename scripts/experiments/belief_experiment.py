@@ -18,7 +18,6 @@ import time
 from typing import List
 from collections import Counter
 
-import dill
 import carla
 import numpy as np
 
@@ -27,18 +26,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import igp2 as ip
 
-from ind_belief_experiment import (
+from belief_utils import (
     ExperimentResult,
     is_new_format,
     sample_viable_config,
     expand_new_config,
     generate_random_frame,
-    run_single_experiment,
     check_viability,
     dump_results,
     plot_spawn_preview,
     RESULTS_DIR,
+    make_run_dir,
+    build_run_metadata,
+    save_experiment,
+    build_batch_summary,
+    save_summary,
 )
+from ind_belief_experiment import run_single_experiment
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +74,7 @@ def print_summary(scenario_name: str,
                   results: List[ExperimentResult],
                   n_viable: int,
                   n_nonviable: int,
-                  save_path: str):
+                  run_dir: str):
     """Print a formatted summary of batch experiment results."""
     n_total = n_viable + n_nonviable
 
@@ -127,7 +131,32 @@ def print_summary(scenario_name: str,
             print(f"    min={sp.min():.1f}  max={sp.max():.1f}  "
                   f"mean={sp.mean():.1f}  std={sp.std():.1f} m/s")
 
-    print(f"\n  Results saved: {save_path}")
+    # Belief inference & intervention metrics (across all runs)
+    all_steps = [s for r in results for s in r.steps]
+    if all_steps:
+        # Belief accuracy (only steps where inference ran)
+        acc_vals = [s.belief_accuracy for s in all_steps
+                    if s.belief_accuracy is not None]
+        if acc_vals:
+            acc = np.array(acc_vals)
+            print(f"\n  Belief accuracy ({len(acc_vals)} steps with inference):")
+            print(f"    mean={acc.mean():.3f}  std={acc.std():.3f}")
+
+        # Intervention stats
+        n_interv = sum(1 for s in all_steps if s.intervention_active)
+        n_total_steps = len(all_steps)
+        print(f"\n  Intervention active: {n_interv}/{n_total_steps} steps "
+              f"({pct(n_interv, n_total_steps)}%)")
+
+        # Action deviation (only during intervention)
+        dev_vals = [s.action_deviation for s in all_steps
+                    if s.intervention_active and s.action_deviation is not None]
+        if dev_vals:
+            dev = np.array(dev_vals)
+            print(f"  Action deviation (during intervention, {len(dev_vals)} steps):")
+            print(f"    mean={dev.mean():.4f}  max={dev.max():.4f}  std={dev.std():.4f}")
+
+    print(f"\n  Run directory: {run_dir}")
     print(f"{'='*60}\n")
 
 
@@ -166,10 +195,24 @@ def main():
     n_viable = 0
     n_nonviable = 0
 
+    # Create run directory and write metadata before the loop so we have it
+    # even if the run crashes mid-way.
+    run_dir = make_run_dir(
+        scenario_name=args.map,
+        intervention_type=args.intervention_type,
+        seed=args.seed,
+        n_samples=args.n_samples,
+    )
+    metadata = build_run_metadata(args, config)
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "metadata.json"), 'w') as _mf:
+        json.dump(metadata, _mf, indent=2, default=str)
+
     print(f"\n{'='*60}")
     print(f"  Batch Experiment: {args.map}")
     print(f"  Samples: {args.n_samples}  |  Base seed: {args.seed}")
     print(f"  FPS: {fps}  |  Max steps: {args.steps}")
+    print(f"  Run directory: {run_dir}")
     print(f"{'='*60}\n")
 
     batch_t0 = time.time()
@@ -249,20 +292,20 @@ def main():
 
     batch_time = time.time() - batch_t0
 
-    # Save all results to a single pickle
-    save_name = f"{args.map}_batch_{args.n_samples}"
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    save_path = os.path.join(RESULTS_DIR, save_name + ".pkl")
-    with open(save_path, 'wb') as f:
-        dill.dump({
-            "results": results,
-            "n_viable": n_viable,
-            "n_nonviable": n_nonviable,
-            "args": vars(args),
-            "batch_wall_time": batch_time,
-        }, f)
+    # Save results to a structured run directory
+    batch_data = {
+        "results": results,
+        "n_viable": n_viable,
+        "n_nonviable": n_nonviable,
+        "args": vars(args),
+        "batch_wall_time": batch_time,
+    }
+    save_experiment(batch_data, run_dir, metadata)
 
-    print_summary(args.map, results, n_viable, n_nonviable, save_path)
+    summary = build_batch_summary(results, n_viable, n_nonviable, batch_time)
+    save_summary(summary, run_dir)
+
+    print_summary(args.map, results, n_viable, n_nonviable, run_dir)
     print(f"  Total batch time: {batch_time:.1f}s")
 
 

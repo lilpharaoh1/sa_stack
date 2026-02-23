@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import igp2 as ip
 from igp2.opendrive.plot_map import plot_map
 from igp2.core.util import calculate_multiple_bboxes
-from ind_belief_experiment import ExperimentResult, StepRecord
+from belief_utils import ExperimentResult, StepRecord
 
 # Colours
 COLOUR_EGO = (0.2, 0.4, 0.9)
@@ -123,7 +123,7 @@ def render_scene_frame(step_record: StepRecord,
 
         # Speed annotation
         ax.annotate(f"{state.speed:.1f} m/s",
-                    xy=(state.position[0], state.position[1] - 2.5),
+                    xy=(state.position[0], state.position[1] - 4.0),
                     fontsize=6, ha='center', color=COLOUR_DYNAMIC,
                     alpha=0.8, zorder=7)
 
@@ -306,7 +306,7 @@ def render_video_frames(result: ExperimentResult,
         ax.set_aspect('equal')
 
         kw = dict(kwargs, fps=fps, ego_goal=ego_goal,
-                  show_legend=(i == 0))
+                  show_legend=True)
         render_scene_frame(sr, scenario_map, ax, **kw)
         fig.tight_layout()
 

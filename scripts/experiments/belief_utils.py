@@ -1,0 +1,1164 @@
+"""
+Shared utilities for BeliefAgent experiments.
+
+Provides dataclasses, helper functions, and plotting utilities used by
+multiple experiment and debug scripts.
+"""
+
+import os
+import json
+import logging
+import time
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import List, Tuple, Dict, Any, Optional
+from collections import Counter
+
+import dill
+import numpy as np
+from shapely.geometry import Polygon
+
+import igp2 as ip
+
+logger = logging.getLogger(__name__)
+
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "results")
+
+
+# ---------------------------------------------------------------------------
+# Result dataclasses
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StepRecord:
+    """Diagnostics captured at a single simulation step."""
+    step: int
+    wall_time: float  # seconds since experiment start
+
+    # Ego state
+    ego_position: Optional[np.ndarray]
+    ego_speed: Optional[float]
+    ego_heading: Optional[float]
+
+    # Human (belief) policy outputs
+    human_rollout: Optional[np.ndarray]        # (H+1, 4) [x, y, heading, speed]
+    human_milp_rollout: Optional[np.ndarray]   # (H+1, 2) [x, y]
+    human_nlp_converged: Optional[bool]
+    human_obstacles: Optional[List]
+    human_other_agents: Optional[Dict]
+    human_trajectories: Dict[int, np.ndarray]
+
+    # True (ground-truth) policy outputs
+    true_rollout: Optional[np.ndarray]
+    true_milp_rollout: Optional[np.ndarray]
+    true_nlp_converged: Optional[bool]
+    true_obstacles: Optional[List]
+    true_other_agents: Optional[Dict]
+    true_trajectories: Dict[int, np.ndarray]
+
+    # Scene snapshot
+    dynamic_agents: Dict[int, Any]   # non-ego, ID >= 0
+    static_obstacles: Dict[int, Any] # ID < 0
+
+    # Completion (based on true policy)
+    goal_reached: bool
+
+    # True policy constraint diagnostics (from TwoStageOPT._analyse_constraints)
+    #   - nlp_ok: whether the NLP solver converged
+    #   - velocity_violated: speed outside [v_min, v_max]
+    #   - acceleration_violated: acceleration outside [a_min, a_max]
+    #   - steering_violated: steering angle exceeds delta_max
+    #   - jerk_violated: jerk exceeds jerk_max
+    #   - steer_rate_violated: steering rate exceeds delta_rate_max
+    #   - road_boundary_violations: number of corner-timestep road violations
+    #   - collision_violations: number of corner-timestep collision violations
+    true_diag_nlp_ok: Optional[bool] = None
+    true_diag_velocity_violated: Optional[bool] = None
+    true_diag_acceleration_violated: Optional[bool] = None
+    true_diag_steering_violated: Optional[bool] = None
+    true_diag_jerk_violated: Optional[bool] = None
+    true_diag_steer_rate_violated: Optional[bool] = None
+    true_diag_road_violations: int = 0
+    true_diag_collision_violations: int = 0
+
+    # Per-step ego timing breakdown (seconds).
+    # Keys match BeliefAgent.last_step_timing, e.g.:
+    #   human_predict, true_predict, human_policy, true_policy, plotting
+    ego_timing: Optional[Dict[str, float]] = None
+
+    # Prediction error: mean L2 distance (metres) between the 1-step-ahead
+    # predicted positions from the *previous* step and the actual positions
+    # observed at *this* step, averaged over all predicted agents.
+    # NOTE: Currently uses the TRUE (ground-truth) predicted trajectories.
+    # When belief inference is implemented, a separate belief_prediction_error
+    # field should be added for the human-policy predictions.
+    prediction_error: Optional[float] = None
+
+    # --- Belief inference & intervention metrics ---
+
+    # Belief accuracy: fraction of relevant agents whose visibility was
+    # correctly classified by the inference module.
+    # None when inference has not run yet (warmup period).
+    belief_accuracy: Optional[float] = None
+
+    # Raw marginal posteriors P(hidden | tau_obs) per agent from belief
+    # inference.  Empty dict when inference hasn't run.
+    belief_marginals: Optional[Dict[int, float]] = None
+
+    # Ground-truth visibility per agent from the ego's configured beliefs
+    # (True = visible, False = hidden).
+    belief_ground_truth: Optional[Dict[int, bool]] = None
+
+    # Per-configuration inference detail.  Each entry is a dict with:
+    #   'config': {aid: visible_bool}
+    #   'pos_cost': float
+    #   'vel_cost': float
+    #   'energy': float   (pos_cost + w_vel * vel_cost)
+    #   'prob': float     (Boltzmann posterior P(b | tau_obs))
+    #   'solver_ok': bool
+    # Empty list when inference hasn't run yet.
+    belief_config_results: Optional[List[Dict]] = None
+
+    # Believed visibility vector after thresholding marginals.
+    # {aid: visible_bool}.  None when inference hasn't run.
+    believed_config: Optional[Dict[int, bool]] = None
+
+    # L2 norm of the difference between the human-policy action and the
+    # actually executed action: sqrt((da)^2 + (ddelta)^2).
+    # 0.0 when no intervention is active.
+    action_deviation: Optional[float] = None
+
+    # Whether intervention was active at this timestep (i.e., the
+    # intervention NLP succeeded and overrode the human-policy action).
+    intervention_active: bool = False
+
+    # --- Intervention detail ---
+
+    # Raw control intervention: (H, 2) array of [da, ddelta] corrections
+    # applied to the believed trajectory.  None when no intervention.
+    intervention_controls: Optional[np.ndarray] = None
+
+    # Intervention-corrected optimal states: (H+1, 4) [s, d, phi, v].
+    # None when no intervention.
+    intervention_opt_states: Optional[np.ndarray] = None
+
+    # Intervention-corrected optimal controls: (H, 2) [a, delta].
+    # None when no intervention.
+    intervention_opt_controls: Optional[np.ndarray] = None
+
+    # Reference (believed) states fed to the intervention NLP: (H+1, 4).
+    # None when no intervention.
+    intervention_ref_states: Optional[np.ndarray] = None
+
+    # Reference (believed) controls fed to the intervention NLP: (H, 2).
+    # None when no intervention.
+    intervention_ref_controls: Optional[np.ndarray] = None
+
+    # Whether the intervention NLP converged.
+    intervention_success: Optional[bool] = None
+
+
+@dataclass
+class ExperimentResult:
+    """Full result of a single experiment run."""
+    # Metadata
+    scenario_name: str
+    config: Dict[str, Any]
+    seed: int
+    fps: int
+    max_steps: int
+    start_time: str       # ISO timestamp
+
+    # Outcome
+    solved: bool = False
+    solved_step: Optional[int] = None
+    total_steps: int = 0
+    wall_time_seconds: float = 0.0
+
+    # Failure outcome (human policy optimisation failure)
+    failed: bool = False
+    failure_step: Optional[int] = None
+    failure_reason: Optional[str] = None
+
+    # Per-step data
+    steps: List[StepRecord] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def generate_random_frame(ego: int,
+                          layout: ip.Map,
+                          spawn_vel_ranges: List[Tuple[ip.Box, Tuple[float, float]]],
+                          rng: np.random.RandomState = None,
+                          ) -> Dict[int, ip.AgentState]:
+    """Generate a new frame with randomised spawns and velocities.
+
+    Args:
+        ego: Starting agent ID (usually 0).
+        layout: Parsed road map.
+        spawn_vel_ranges: List of (spawn_box, (vel_min, vel_max)) per agent.
+        rng: Random state for reproducibility.  Falls back to the global
+             ``np.random`` if *None*.
+    """
+    if rng is None:
+        rng = np.random.RandomState()
+
+    ret = {}
+    for i, (spawn, vel) in enumerate(spawn_vel_ranges, ego):
+        poly = Polygon(spawn.boundary)
+        best_lane = layout.best_lane_at(spawn.center, max_distance=500.0)
+
+        intersections = list(best_lane.midline.intersection(poly).coords)
+        start_d = best_lane.distance_at(intersections[0])
+        end_d = best_lane.distance_at(intersections[1])
+        if start_d > end_d:
+            start_d, end_d = end_d, start_d
+        position_d = (end_d - start_d) * rng.random() + start_d
+        spawn_position = np.array(best_lane.point_at(position_d))
+
+        speed = (vel[1] - vel[0]) * rng.random() + vel[0]
+        heading = best_lane.get_heading_at(position_d)
+        ret[i] = ip.AgentState(time=0,
+                               position=spawn_position,
+                               velocity=speed * np.array([np.cos(heading), np.sin(heading)]),
+                               acceleration=np.array([0.0, 0.0]),
+                               heading=heading)
+    return ret
+
+
+def create_agent(agent_config, frame, fps, scenario_map, plot_interval=True):
+    """Create an agent from its config dict."""
+    base = {
+        "agent_id": agent_config["id"],
+        "initial_state": frame[agent_config["id"]],
+        "goal": ip.BoxGoal(ip.Box(**agent_config["goal"]["box"])),
+        "fps": fps,
+    }
+
+    agent_type = agent_config["type"]
+
+    if agent_type == "BeliefAgent":
+        agent_beliefs = agent_config.get("beliefs", None)
+        human = agent_config.get("human", True)
+        intervention_type = agent_config.get("intervention_type", "none")
+        return ip.BeliefAgent(**base, scenario_map=scenario_map,
+                              plot_interval=plot_interval,
+                              agent_beliefs=agent_beliefs,
+                              human=human,
+                              intervention_type=intervention_type)
+    elif agent_type == "TrafficAgent":
+        open_loop = agent_config.get("open_loop", False)
+        return ip.TrafficAgent(**base, open_loop=open_loop)
+    else:
+        raise ValueError(f"Unsupported agent type: {agent_type}")
+
+
+def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
+                 prev_true_trajectories: Optional[Dict[int, np.ndarray]] = None,
+                 ) -> StepRecord:
+    """Collect diagnostics for one simulation step.
+
+    Args:
+        step: Current step index.
+        t0: Wall-clock start time of the experiment.
+        ego_agent: The ego BeliefAgent instance.
+        ego_goal: Ego goal (used for goal-reached check).
+        frame: Current observation frame.
+        prev_true_trajectories: True-policy predicted trajectories from the
+            *previous* step.  Used to compute 1-step-ahead prediction error.
+    """
+    ego_id = ego_agent.agent_id
+    ego_state = frame.get(ego_id) if frame else None
+
+    human_policy = getattr(ego_agent, '_human_policy', None)
+    true_policy = getattr(ego_agent, '_true_policy', None)
+
+    # Human (belief) policy
+    human_rollout = getattr(human_policy, 'last_rollout', None) if human_policy else None
+    human_milp = getattr(human_policy, 'last_milp_rollout', None) if human_policy else None
+    human_nlp_converged = None
+    if human_policy is not None:
+        human_nlp_converged = getattr(human_policy, '_prev_nlp_states', None) is not None
+    human_obstacles = getattr(human_policy, 'last_obstacles', None) if human_policy else None
+    human_other_agents = getattr(human_policy, 'last_other_agents', None) if human_policy else None
+    human_trajectories = dict(ego_agent._human_agent_trajectories)
+
+    # True (ground-truth) policy
+    true_rollout = getattr(true_policy, 'last_rollout', None) if true_policy else None
+    true_milp = getattr(true_policy, 'last_milp_rollout', None) if true_policy else None
+    true_nlp_converged = None
+    if true_policy is not None:
+        true_nlp_converged = getattr(true_policy, '_prev_nlp_states', None) is not None
+    true_obstacles = getattr(true_policy, 'last_obstacles', None) if true_policy else None
+    true_other_agents = getattr(true_policy, 'last_other_agents', None) if true_policy else None
+    true_trajectories = dict(ego_agent._true_agent_trajectories)
+
+    dynamic_agents = {aid: s for aid, s in frame.items()
+                      if aid != ego_id and aid >= 0} if frame else {}
+    static_obstacles = {aid: s for aid, s in frame.items()
+                        if aid < 0} if frame else {}
+
+    # Goal reached: based on TRUE policy rollout
+    goal_reached = False
+    if ego_goal is not None and true_rollout is not None:
+        for pt in true_rollout[:, :2]:
+            if ego_goal.reached(pt):
+                goal_reached = True
+                break
+
+    # True policy constraint diagnostics
+    true_diag = getattr(true_policy, 'last_diagnostics', None) if true_policy else None
+
+    # Ego timing breakdown
+    ego_timing = dict(ego_agent.last_step_timing) if ego_agent.last_step_timing else None
+
+    # 1-step-ahead prediction error: compare previous step's predicted
+    # positions (index 1 of each trajectory) with actual positions now.
+    # NOTE: uses TRUE trajectories. When belief inference is added, compute
+    # a separate error from human (belief) trajectories.
+    prediction_error = None
+    if prev_true_trajectories and frame:
+        errors = []
+        for aid, pred_traj in prev_true_trajectories.items():
+            actual_state = frame.get(aid)
+            if actual_state is None or len(pred_traj) < 2:
+                continue
+            predicted_pos = pred_traj[1]  # 1-step-ahead prediction
+            actual_pos = actual_state.position
+            errors.append(float(np.linalg.norm(predicted_pos - actual_pos)))
+        if errors:
+            prediction_error = float(np.mean(errors))
+
+    # --- Belief inference & intervention metrics ---
+    belief_accuracy = None
+    belief_marginals = None
+    belief_ground_truth = None
+    belief_config_results = None
+    believed_config = None
+    action_deviation = None
+    intervention_active = False
+    intervention_controls = None
+    intervention_opt_states = None
+    intervention_opt_controls = None
+    intervention_ref_states = None
+    intervention_ref_controls = None
+    intervention_success = None
+
+    belief_inference = getattr(ego_agent, '_belief_inference', None)
+    agent_beliefs = getattr(ego_agent, '_agent_beliefs', {})
+
+    # Ground-truth visibility from configured beliefs
+    if agent_beliefs:
+        belief_ground_truth = {
+            aid: belief.visible for aid, belief in agent_beliefs.items()
+        }
+
+    # Marginals, per-config costs, and accuracy from belief inference
+    if belief_inference is not None:
+        marginals = belief_inference.last_marginals
+        if marginals:
+            belief_marginals = dict(marginals)
+
+            # Compute accuracy: for each agent in marginals, check if
+            # the inferred classification matches ground truth
+            hidden_threshold = getattr(belief_inference, '_hidden_threshold', 0.6)
+            correct = 0
+            total = 0
+            for aid, p_hidden in marginals.items():
+                gt_belief = agent_beliefs.get(aid)
+                if gt_belief is None:
+                    continue
+                gt_visible = gt_belief.visible
+                inferred_visible = p_hidden <= hidden_threshold
+                if inferred_visible == gt_visible:
+                    correct += 1
+                total += 1
+            if total > 0:
+                belief_accuracy = correct / total
+
+        # Per-configuration inference detail (costs, energies, probs)
+        inf_results = belief_inference.last_results
+        inf_energies = belief_inference.last_energies
+        inf_probs = belief_inference.last_config_probs
+        if inf_results and inf_energies and inf_probs:
+            belief_config_results = []
+            for i, r in enumerate(inf_results):
+                belief_config_results.append({
+                    'config': dict(r.config),
+                    'pos_cost': float(r.pos_cost),
+                    'vel_cost': float(r.vel_cost),
+                    'energy': float(inf_energies[i]),
+                    'prob': float(inf_probs[i]),
+                    'solver_ok': r.solver_ok,
+                })
+
+    # Action deviation: compare human policy action to executed action
+    last_human = getattr(ego_agent, '_last_human_action', None)
+    last_executed = getattr(ego_agent, '_last_executed_action', None)
+    if last_human is not None and last_executed is not None:
+        da = last_executed.acceleration - last_human.acceleration
+        dd = last_executed.steer_angle - last_human.steer_angle
+        action_deviation = float(np.sqrt(da**2 + dd**2))
+
+    # Intervention detail
+    if belief_inference is not None:
+        interv = belief_inference.last_intervention
+        if interv is not None:
+            intervention_success = interv.get('success', False)
+            believed_config = interv.get('believed_config')
+            if intervention_success:
+                intervention_active = True
+                intervention_controls = interv.get('intervention')
+                intervention_opt_states = interv.get('opt_states')
+                intervention_opt_controls = interv.get('opt_controls')
+                intervention_ref_states = interv.get('ref_states')
+                intervention_ref_controls = interv.get('ref_controls')
+
+    return StepRecord(
+        step=step,
+        wall_time=time.time() - t0,
+        ego_position=np.array(ego_state.position) if ego_state else None,
+        ego_speed=float(ego_state.speed) if ego_state else None,
+        ego_heading=float(ego_state.heading) if ego_state else None,
+        human_rollout=human_rollout,
+        human_milp_rollout=human_milp,
+        human_nlp_converged=human_nlp_converged,
+        human_obstacles=human_obstacles,
+        human_other_agents=human_other_agents,
+        human_trajectories=human_trajectories,
+        true_rollout=true_rollout,
+        true_milp_rollout=true_milp,
+        true_nlp_converged=true_nlp_converged,
+        true_obstacles=true_obstacles,
+        true_other_agents=true_other_agents,
+        true_trajectories=true_trajectories,
+        dynamic_agents=dynamic_agents,
+        static_obstacles=static_obstacles,
+        goal_reached=goal_reached,
+        # Constraint diagnostics from true policy
+        true_diag_nlp_ok=true_diag.get('nlp_ok') if true_diag else None,
+        true_diag_velocity_violated=true_diag.get('velocity_violated') if true_diag else None,
+        true_diag_acceleration_violated=true_diag.get('acceleration_violated') if true_diag else None,
+        true_diag_steering_violated=true_diag.get('steering_violated') if true_diag else None,
+        true_diag_jerk_violated=true_diag.get('jerk_violated') if true_diag else None,
+        true_diag_steer_rate_violated=true_diag.get('steer_rate_violated') if true_diag else None,
+        true_diag_road_violations=len(true_diag.get('road_boundary_violations', [])) if true_diag else 0,
+        true_diag_collision_violations=len(true_diag.get('collision_violations', [])) if true_diag else 0,
+        # Timing and prediction
+        ego_timing=ego_timing,
+        prediction_error=prediction_error,
+        # Belief inference & intervention
+        belief_accuracy=belief_accuracy,
+        belief_marginals=belief_marginals,
+        belief_ground_truth=belief_ground_truth,
+        belief_config_results=belief_config_results,
+        believed_config=believed_config,
+        action_deviation=action_deviation,
+        intervention_active=intervention_active,
+        intervention_controls=intervention_controls,
+        intervention_opt_states=intervention_opt_states,
+        intervention_opt_controls=intervention_opt_controls,
+        intervention_ref_states=intervention_ref_states,
+        intervention_ref_controls=intervention_ref_controls,
+        intervention_success=intervention_success,
+    )
+
+
+def dump_results(result: ExperimentResult, name: str):
+    """Save experiment results to pickle."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    filepath = os.path.join(RESULTS_DIR, name + ".pkl")
+    with open(filepath, 'wb') as f:
+        dill.dump(result, f)
+    logger.info("Results saved to %s", filepath)
+    return filepath
+
+
+# ---------------------------------------------------------------------------
+# Structured run directory helpers
+# ---------------------------------------------------------------------------
+
+def make_run_dir(scenario_name: str,
+                 intervention_type: str = "none",
+                 seed: int = 0,
+                 n_samples: int = None,
+                 custom_name: str = None) -> str:
+    """Build a unique folder path under ``RESULTS_DIR``.
+
+    Folder naming:
+      - Batch: ``{scenario}_{intervention}_seed{seed}_n{n_samples}_{timestamp}``
+      - Single: ``{scenario}_{intervention}_seed{seed}_{timestamp}``
+      - If *custom_name* is given, use it as the folder name directly.
+    """
+    if custom_name:
+        folder = custom_name
+    else:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if n_samples is not None:
+            folder = f"{scenario_name}_{intervention_type}_seed{seed}_n{n_samples}_{ts}"
+        else:
+            folder = f"{scenario_name}_{intervention_type}_seed{seed}_{ts}"
+    return os.path.join(RESULTS_DIR, folder)
+
+
+def build_run_metadata(args, config: dict) -> dict:
+    """Construct metadata dict from parsed argparse Namespace + expanded config.
+
+    Args:
+        args: argparse.Namespace with at least ``map``, ``seed``, ``steps``,
+              ``intervention_type``.  May also have ``n_samples`` (batch mode).
+        config: The full (expanded) scenario config dict.
+    """
+    n_samples = getattr(args, 'n_samples', None)
+    return {
+        "mode": "batch" if n_samples is not None else "single",
+        "scenario": args.map,
+        "seed": args.seed,
+        "max_steps": args.steps,
+        "intervention_type": args.intervention_type,
+        "n_samples": n_samples,
+        "timestamp": datetime.now().isoformat(),
+        "config": config,
+    }
+
+
+def save_experiment(result_or_batch, run_dir: str, metadata: dict) -> str:
+    """Create the run directory, write ``metadata.json`` and ``results.pkl``.
+
+    Args:
+        result_or_batch: An :class:`ExperimentResult` (single) or a batch dict.
+        run_dir: Absolute path to the run directory.
+        metadata: Dict returned by :func:`build_run_metadata`.
+
+    Returns:
+        Path to the written ``results.pkl``.
+    """
+    os.makedirs(run_dir, exist_ok=True)
+
+    meta_path = os.path.join(run_dir, "metadata.json")
+    with open(meta_path, 'w') as f:
+        json.dump(metadata, f, indent=2, default=str)
+
+    pkl_path = os.path.join(run_dir, "results.pkl")
+    with open(pkl_path, 'wb') as f:
+        dill.dump(result_or_batch, f)
+
+    logger.info("Experiment saved to %s", run_dir)
+    return pkl_path
+
+
+def build_summary(result: ExperimentResult) -> dict:
+    """Compute summary stats for a single experiment run.
+
+    Returns a JSON-serialisable dict.
+    """
+    # NLP convergence
+    nlp_flags = [s.true_diag_nlp_ok for s in result.steps
+                 if s.true_diag_nlp_ok is not None]
+    n_ok = sum(1 for f in nlp_flags if f)
+    n_total_nlp = len(nlp_flags)
+    nlp_rate = n_ok / n_total_nlp if n_total_nlp > 0 else None
+
+    # Intervention
+    n_interv = sum(1 for s in result.steps if s.intervention_active)
+    n_total_steps = len(result.steps)
+    dev_vals = [s.action_deviation for s in result.steps
+                if s.intervention_active and s.action_deviation is not None]
+    if dev_vals:
+        dev_arr = np.array(dev_vals)
+        action_dev = {
+            "mean": round(float(dev_arr.mean()), 4),
+            "std": round(float(dev_arr.std()), 4),
+            "min": round(float(dev_arr.min()), 4),
+            "max": round(float(dev_arr.max()), 4),
+        }
+    else:
+        action_dev = None
+
+    return {
+        "solved": result.solved,
+        "failed": result.failed,
+        "total_steps": result.total_steps,
+        "wall_time_seconds": round(result.wall_time_seconds, 1),
+        "failure_reason": result.failure_reason,
+        "nlp_convergence": {
+            "ok": n_ok,
+            "total": n_total_nlp,
+            "rate": round(nlp_rate, 3) if nlp_rate is not None else None,
+        },
+        "intervention": {
+            "active_steps": n_interv,
+            "total_steps": n_total_steps,
+            "rate": round(n_interv / n_total_steps, 3) if n_total_steps > 0 else 0.0,
+            "action_deviation": action_dev,
+        },
+    }
+
+
+def build_batch_summary(results: List[ExperimentResult],
+                        n_viable: int,
+                        n_nonviable: int,
+                        batch_wall_time: float) -> dict:
+    """Compute summary stats for a batch experiment.
+
+    Returns a JSON-serialisable dict.
+    """
+    n_episodes = len(results)
+    solved = [r for r in results if r.solved]
+    failed = [r for r in results if r.failed]
+    timed_out = [r for r in results if not r.solved and not r.failed]
+
+    def _pct(count, total):
+        return round(100 * count / total, 1) if total > 0 else 0.0
+
+    # Outcomes
+    outcomes = {
+        "solved": {"count": len(solved), "pct": _pct(len(solved), n_viable)},
+        "failed": {"count": len(failed), "pct": _pct(len(failed), n_viable)},
+        "timed_out": {"count": len(timed_out), "pct": _pct(len(timed_out), n_viable)},
+    }
+
+    # Steps to solve
+    steps_to_solve = None
+    if solved:
+        steps_arr = np.array([r.solved_step for r in solved])
+        steps_to_solve = {
+            "mean": round(float(steps_arr.mean()), 1),
+            "std": round(float(steps_arr.std()), 1),
+            "min": int(steps_arr.min()),
+            "max": int(steps_arr.max()),
+        }
+
+    # Wall time per episode
+    times = np.array([r.wall_time_seconds for r in results
+                      if r.wall_time_seconds > 0])
+    wall_time_per_ep = None
+    if len(times) > 0:
+        wall_time_per_ep = {
+            "mean": round(float(times.mean()), 1),
+            "std": round(float(times.std()), 1),
+            "min": round(float(times.min()), 1),
+            "max": round(float(times.max()), 1),
+        }
+
+    # Belief accuracy
+    all_steps = [s for r in results for s in r.steps]
+    acc_vals = [s.belief_accuracy for s in all_steps
+                if s.belief_accuracy is not None]
+    belief_accuracy = None
+    if acc_vals:
+        acc = np.array(acc_vals)
+        belief_accuracy = {
+            "mean": round(float(acc.mean()), 3),
+            "std": round(float(acc.std()), 3),
+            "n_steps": len(acc_vals),
+        }
+
+    # Intervention
+    n_interv = sum(1 for s in all_steps if s.intervention_active)
+    n_total_steps = len(all_steps)
+    dev_vals = [s.action_deviation for s in all_steps
+                if s.intervention_active and s.action_deviation is not None]
+    if dev_vals:
+        dev_arr = np.array(dev_vals)
+        action_dev = {
+            "mean": round(float(dev_arr.mean()), 4),
+            "std": round(float(dev_arr.std()), 4),
+            "min": round(float(dev_arr.min()), 4),
+            "max": round(float(dev_arr.max()), 4),
+        }
+    else:
+        action_dev = None
+
+    intervention = {
+        "active_steps": n_interv,
+        "total_steps": n_total_steps,
+        "rate": round(n_interv / n_total_steps, 3) if n_total_steps > 0 else 0.0,
+        "action_deviation": action_dev,
+    }
+
+    # Failure breakdown
+    failure_breakdown = {}
+    if failed:
+        reason_counts = Counter()
+        for r in failed:
+            if r.failure_reason:
+                for part in r.failure_reason.split("; "):
+                    reason_counts[part] += 1
+            else:
+                reason_counts["NLP infeasible"] += 1
+        failure_breakdown = dict(reason_counts)
+
+    return {
+        "n_episodes": n_episodes,
+        "n_viable": n_viable,
+        "n_nonviable": n_nonviable,
+        "batch_wall_time_seconds": round(batch_wall_time, 1),
+        "outcomes": outcomes,
+        "steps_to_solve": steps_to_solve,
+        "wall_time_per_episode": wall_time_per_ep,
+        "belief_accuracy": belief_accuracy,
+        "intervention": intervention,
+        "failure_breakdown": failure_breakdown,
+    }
+
+
+def save_summary(summary: dict, run_dir: str) -> str:
+    """Write a summary dict to ``summary.json`` in the run directory."""
+    path = os.path.join(run_dir, "summary.json")
+    with open(path, 'w') as f:
+        json.dump(summary, f, indent=2, default=str)
+    logger.info("Summary saved to %s", path)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Spawn preview plot
+# ---------------------------------------------------------------------------
+
+def plot_spawn_preview(scenario_map: 'ip.Map',
+                       config: dict,
+                       frame: Dict[int, 'ip.AgentState'],
+                       title: str = "Spawn Preview",
+                       raw_config: dict = None):
+    """Show the road layout, spawn group boxes, goal boxes, and sampled positions.
+
+    Displays a blocking matplotlib figure.  Close the window to continue.
+
+    Args:
+        scenario_map: Parsed road map.
+        config: The *expanded* (old-format) config with ``"agents"`` list
+            and concrete ``"static_objects"`` list.
+        frame: Sampled initial states keyed by agent ID.
+        title: Figure window title.
+        raw_config: Optional original config with ``dynamic_groups`` and
+            ``static_groups``.  When provided the group spawn boxes are drawn.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from igp2.opendrive.plot_map import plot_map
+    from igp2.core.util import calculate_multiple_bboxes
+
+    fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+    plot_map(scenario_map, ax=ax, markings=True)
+
+    # Collect all positions to auto-fit the view
+    all_x, all_y = [], []
+
+    # Colours
+    COLOUR_EGO = (0.2, 0.4, 0.9)         # blue
+    COLOUR_DYNAMIC = (0.85, 0.75, 0.3)   # desaturated yellow
+    COLOUR_STATIC = (0.9, 0.4, 0.1)      # orange
+
+    # --- Draw dynamic group spawn boxes (from raw config) ---
+    if raw_config is not None:
+        for group in raw_config.get("dynamic_groups", []):
+            sb = group["spawn"]["box"]
+            box = ip.Box(np.array(sb["center"]), sb["length"], sb["width"],
+                         sb.get("heading", 0.0))
+            corners = np.array(box.boundary)
+            poly = plt.Polygon(corners, closed=True,
+                                facecolor=(*COLOUR_DYNAMIC, 0.15),
+                                edgecolor=(*COLOUR_DYNAMIC, 0.6),
+                                linewidth=1.5, linestyle='--', zorder=2)
+            ax.add_patch(poly)
+            all_x.extend(corners[:, 0])
+            all_y.extend(corners[:, 1])
+
+        # Draw static group spawn boxes
+        for group in raw_config.get("static_groups", []):
+            sb = group["spawn"]["box"]
+            box = ip.Box(np.array(sb["center"]), sb["length"], sb["width"],
+                         sb.get("heading", 0.0))
+            corners = np.array(box.boundary)
+            poly = plt.Polygon(corners, closed=True,
+                                facecolor=(*COLOUR_STATIC, 0.15),
+                                edgecolor=(*COLOUR_STATIC, 0.6),
+                                linewidth=1.5, linestyle='--', zorder=2)
+            ax.add_patch(poly)
+            all_x.extend(corners[:, 0])
+            all_y.extend(corners[:, 1])
+
+    # --- Draw ego spawn box and goal box ---
+    ego_id = config["agents"][0]["id"]
+    ego_cfg = config["agents"][0]
+    sb = ego_cfg["spawn"]["box"]
+    box = ip.Box(np.array(sb["center"]), sb["length"], sb["width"],
+                 sb.get("heading", 0.0))
+    corners = np.array(box.boundary)
+    poly = plt.Polygon(corners, closed=True,
+                        facecolor=(*COLOUR_EGO, 0.15),
+                        edgecolor=(*COLOUR_EGO, 0.6),
+                        linewidth=1.5, linestyle='--', zorder=2)
+    ax.add_patch(poly)
+    all_x.extend(corners[:, 0])
+    all_y.extend(corners[:, 1])
+
+    gb = ego_cfg["goal"]["box"]
+    gbox = ip.Box(np.array(gb["center"]), gb["length"], gb["width"],
+                  gb.get("heading", 0.0))
+    gcorners = np.array(gbox.boundary)
+    goal_poly = plt.Polygon(gcorners, closed=True,
+                            facecolor=(*COLOUR_EGO, 0.10),
+                            edgecolor=(*COLOUR_EGO, 0.5),
+                            linewidth=1.5, linestyle=':', zorder=2)
+    ax.add_patch(goal_poly)
+    ax.annotate("Goal ego", xy=gb["center"], fontsize=7,
+                ha='center', va='center', color=COLOUR_EGO, alpha=0.7, zorder=3)
+    all_x.extend(gcorners[:, 0])
+    all_y.extend(gcorners[:, 1])
+
+    # --- Draw goal boxes for traffic agents ---
+    for agent_cfg in config["agents"][1:]:
+        gb = agent_cfg["goal"]["box"]
+        gbox = ip.Box(np.array(gb["center"]), gb["length"], gb["width"],
+                      gb.get("heading", 0.0))
+        gcorners = np.array(gbox.boundary)
+        goal_poly = plt.Polygon(gcorners, closed=True,
+                                facecolor=(*COLOUR_DYNAMIC, 0.10),
+                                edgecolor=(*COLOUR_DYNAMIC, 0.5),
+                                linewidth=1.5, linestyle=':', zorder=2)
+        ax.add_patch(goal_poly)
+        aid = agent_cfg["id"]
+        ax.annotate(f"Goal {aid}", xy=gb["center"], fontsize=7,
+                    ha='center', va='center', color=COLOUR_DYNAMIC, alpha=0.7, zorder=3)
+        all_x.extend(gcorners[:, 0])
+        all_y.extend(gcorners[:, 1])
+
+    # --- Draw sampled vehicle positions ---
+    for aid, state in frame.items():
+        is_ego = (aid == ego_id)
+        colour = COLOUR_EGO if is_ego else COLOUR_DYNAMIC
+        pos = state.position
+        heading = state.heading
+
+        vl, vw = 4.5, 1.8
+        corners = calculate_multiple_bboxes(
+            [pos[0]], [pos[1]], vl, vw, heading)[0]
+        veh_poly = plt.Polygon(corners, closed=True,
+                               facecolor=(*colour, 0.6),
+                               edgecolor=(*colour, 1.0),
+                               linewidth=2.0, zorder=5)
+        ax.add_patch(veh_poly)
+
+        arrow_len = 3.0
+        dx = arrow_len * np.cos(heading)
+        dy = arrow_len * np.sin(heading)
+        ax.annotate("", xy=(pos[0] + dx, pos[1] + dy), xytext=(pos[0], pos[1]),
+                    arrowprops=dict(arrowstyle='->', color=colour, lw=2), zorder=6)
+
+        label = f"Ego (id={aid})" if is_ego else f"id={aid}"
+        ax.annotate(label, xy=(pos[0], pos[1] + 2.5), fontsize=8, fontweight='bold',
+                    ha='center', color=colour, zorder=7)
+
+        ax.annotate(f"{state.speed:.1f} m/s", xy=(pos[0], pos[1] - 2.5), fontsize=7,
+                    ha='center', color=colour, alpha=0.8, zorder=7)
+
+        all_x.append(pos[0])
+        all_y.append(pos[1])
+
+    # --- Draw sampled static objects ---
+    static_objs = config.get("static_objects", [])
+    for obj in static_objs:
+        pos = obj["position"][:2]
+        heading = obj.get("heading", 0.0)
+        ol = obj.get("length", 4.5)
+        ow = obj.get("width", 1.8)
+
+        corners = calculate_multiple_bboxes(
+            [pos[0]], [pos[1]], ol, ow, heading)[0]
+        obj_poly = plt.Polygon(corners, closed=True,
+                               facecolor=(*COLOUR_STATIC, 0.7),
+                               edgecolor=(*COLOUR_STATIC, 1.0),
+                               linewidth=2.0, zorder=5)
+        ax.add_patch(obj_poly)
+
+        bp = obj.get("blueprint", "static")
+        short_bp = bp.split(".")[-1] if "." in bp else bp
+        ax.annotate(short_bp, xy=(pos[0], pos[1] + 2.5), fontsize=7,
+                    ha='center', color=COLOUR_STATIC, zorder=7)
+
+        all_x.append(pos[0])
+        all_y.append(pos[1])
+
+    # --- Auto-fit with margin ---
+    if all_x and all_y:
+        pad = 20.0
+        ax.set_xlim(min(all_x) - pad, max(all_x) + pad)
+        ax.set_ylim(min(all_y) - pad, max(all_y) + pad)
+
+    # --- Legend ---
+    legend_handles = [
+        Line2D([0], [0], color=COLOUR_EGO, linewidth=6, alpha=0.6, label='Ego vehicle'),
+        Line2D([0], [0], color=COLOUR_DYNAMIC, linewidth=6, alpha=0.6, label='Traffic vehicle'),
+        Line2D([0], [0], color=COLOUR_STATIC, linewidth=6, alpha=0.7, label='Static object'),
+        plt.Polygon([[0, 0]], closed=True,
+                     facecolor=(0.5, 0.5, 0.5, 0.15), edgecolor=(0.5, 0.5, 0.5, 0.5),
+                     linestyle='--', label='Spawn region'),
+        plt.Polygon([[0, 0]], closed=True,
+                     facecolor=(0.5, 0.5, 0.5, 0.08), edgecolor=(0.5, 0.5, 0.5, 0.4),
+                     linestyle=':', label='Goal region'),
+    ]
+    ax.legend(handles=legend_handles, loc='upper right', fontsize=8, framealpha=0.9)
+
+    n_agents = len(config["agents"])
+    n_static = len(static_objs)
+    ax.set_title(f"{title}  ({n_agents} agents, {n_static} static)", fontsize=12)
+    ax.set_aspect('equal')
+    fig.tight_layout()
+
+    logger.info("Showing spawn preview. Close the plot window to continue...")
+    plt.show(block=True)
+
+
+# ---------------------------------------------------------------------------
+# New-format config helpers
+# ---------------------------------------------------------------------------
+
+def is_new_format(config: dict) -> bool:
+    """Check whether a config uses the new dynamic_groups format."""
+    return "ego" in config and "dynamic_groups" in config
+
+
+def expand_static_groups(config: dict,
+                         rng: np.random.RandomState = None,
+                         ) -> list:
+    """Sample concrete static objects from ``static_groups``.
+
+    Each group specifies a spawn box, a count range ``[min, max]``, and shared
+    properties (blueprint, z_offset, length, width, heading).  For each sampled
+    object the position is chosen uniformly within the spawn box.
+
+    Any literal entries in ``"static_objects"`` are included unchanged.
+
+    Returns:
+        List of concrete static-object dicts ready for
+        ``CarlaSim.spawn_static_objects_from_config``.
+    """
+    if rng is None:
+        rng = np.random.RandomState()
+
+    # Start with any explicitly listed static objects
+    result = list(config.get("static_objects", []))
+
+    for group in config.get("static_groups", []):
+        lo, hi = group["count"]
+        count = int(rng.randint(lo, hi + 1))
+
+        spawn_cfg = group["spawn"]["box"]
+        center = np.array(spawn_cfg["center"])
+        half_len = spawn_cfg["length"] / 2.0
+        half_wid = spawn_cfg["width"] / 2.0
+        box_heading = spawn_cfg.get("heading", 0.0)
+        cos_h = np.cos(box_heading)
+        sin_h = np.sin(box_heading)
+
+        heading = group.get("heading", box_heading)
+
+        for _ in range(count):
+            # Sample uniformly in the box's local frame then rotate
+            local_x = (rng.random() * 2 - 1) * half_len
+            local_y = (rng.random() * 2 - 1) * half_wid
+            x = center[0] + local_x * cos_h - local_y * sin_h
+            y = center[1] + local_x * sin_h + local_y * cos_h
+
+            obj = {
+                "position": [float(x), float(y)],
+                "heading": float(heading),
+            }
+            for key in ("blueprint", "z_offset", "length", "width"):
+                if key in group:
+                    obj[key] = group[key]
+            result.append(obj)
+
+    return result
+
+
+def expand_new_config(config: dict,
+                      layout: 'ip.Map',
+                      rng: np.random.RandomState = None) -> dict:
+    """Convert a new-format config (ego + dynamic_groups) to old-format (agents list).
+
+    Samples vehicle counts from each group's [min, max] range, assigns sequential
+    IDs starting from 1, and builds the ego's ``beliefs`` dict from per-group
+    belief entries.  Also expands ``static_groups`` into concrete
+    ``static_objects``.
+
+    Returns:
+        Old-format config dict with an ``"agents"`` list.
+    """
+    if rng is None:
+        rng = np.random.RandomState()
+
+    ego_cfg = config["ego"]
+    groups = config["dynamic_groups"]
+
+    # Ego is always agent 0
+    ego_agent = {
+        "id": 0,
+        "type": ego_cfg.get("type", "BeliefAgent"),
+        "spawn": ego_cfg["spawn"],
+        "goal": ego_cfg["goal"],
+    }
+    if "human" in ego_cfg:
+        ego_agent["human"] = ego_cfg["human"]
+    if "intervention_type" in ego_cfg:
+        ego_agent["intervention_type"] = ego_cfg["intervention_type"]
+
+    agents = [ego_agent]
+    beliefs = {}
+    next_id = 1
+
+    for group in groups:
+        lo, hi = group["count"]
+        count = int(rng.randint(lo, hi + 1))
+        for _ in range(count):
+            agent = {
+                "id": next_id,
+                "type": group.get("agent_type", "TrafficAgent"),
+                "open_loop": group.get("open_loop", False),
+                "spawn": group["spawn"],
+                "goal": group["goal"],
+            }
+            agents.append(agent)
+            if "belief" in group:
+                beliefs[str(next_id)] = group["belief"]
+            next_id += 1
+
+    ego_agent["beliefs"] = beliefs
+
+    static_objects = expand_static_groups(config, rng=rng)
+
+    expanded = {
+        "scenario": config["scenario"],
+        "agents": agents,
+        "static_objects": static_objects,
+    }
+    return expanded
+
+
+def check_viability(frame: Dict[int, 'ip.AgentState'],
+                    static_objects: list = None,
+                    min_dist: float = 10.0) -> bool:
+    """Return True if no objects are too close to each other.
+
+    Checks all pairwise distances between dynamic agents, between dynamic
+    agents and static objects, and between static objects themselves.
+    """
+    # Collect all positions
+    positions = [state.position for state in frame.values()]
+    if static_objects:
+        for obj in static_objects:
+            positions.append(np.array(obj["position"][:2]))
+
+    for i in range(len(positions)):
+        for j in range(i + 1, len(positions)):
+            d = np.linalg.norm(positions[i] - positions[j])
+            if d < min_dist:
+                return False
+    return True
+
+
+def sample_viable_config(config: dict,
+                         layout: 'ip.Map',
+                         min_dist: float = 10.0,
+                         max_attempts: int = 50,
+                         seed: int = None,
+                         ) -> Tuple[dict, Dict[int, 'ip.AgentState']]:
+    """Repeatedly expand a new-format config and sample positions until viable.
+
+    Returns:
+        (expanded_config, frame) where frame passes the viability check.
+
+    Raises:
+        RuntimeError: after *max_attempts* without a viable sample.
+    """
+    rng = np.random.RandomState(seed)
+
+    for attempt in range(max_attempts):
+        expanded = expand_new_config(config, layout, rng=rng)
+
+        ego_id = expanded["agents"][0]["id"]
+        agent_spawns = []
+        for ac in expanded["agents"]:
+            spawn_box = ip.Box(
+                np.array(ac["spawn"]["box"]["center"]),
+                ac["spawn"]["box"]["length"],
+                ac["spawn"]["box"]["width"],
+                ac["spawn"]["box"]["heading"],
+            )
+            vel_range = ac["spawn"]["velocity"]
+            agent_spawns.append((spawn_box, vel_range))
+
+        frame = generate_random_frame(ego_id, layout, agent_spawns, rng=rng)
+
+        if check_viability(frame, expanded.get("static_objects", []), min_dist):
+            return expanded, frame
+
+    raise RuntimeError(
+        f"Could not find viable spawn configuration after {max_attempts} attempts"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scene summary
+# ---------------------------------------------------------------------------
+
+def print_scene_summary(config: dict, frame: Dict[int, 'ip.AgentState']):
+    """Print a compact summary of the scene configuration."""
+    agents_cfg = config["agents"]
+    ego_id = agents_cfg[0]["id"]
+    ego_beliefs = agents_cfg[0].get("beliefs", {})
+
+    print("  Agents")
+    print("  " + "-" * 56)
+    for ac in agents_cfg:
+        aid = ac["id"]
+        atype = ac["type"]
+        is_ego = (aid == ego_id)
+        state = frame.get(aid)
+
+        # Position and speed from sampled frame
+        if state is not None:
+            pos = state.position
+            spd = state.speed
+            pos_str = f"({pos[0]:7.1f}, {pos[1]:7.1f})"
+            spd_str = f"{spd:.1f} m/s"
+        else:
+            pos_str = "(?)"
+            spd_str = "?"
+
+        # Goal centre
+        gc = ac["goal"]["box"]["center"]
+        goal_str = f"({gc[0]:7.1f}, {gc[1]:7.1f})"
+
+        # Belief about this agent (from ego's perspective)
+        belief_str = ""
+        if not is_ego:
+            b = ego_beliefs.get(str(aid))
+            if b is not None:
+                vis = "visible" if b.get("visible", True) else "hidden"
+                verr = b.get("velocity_error", 0.0)
+                belief_str = f"  [{vis}"
+                if verr != 0.0:
+                    belief_str += f", vel_err={verr:+.1f}"
+                belief_str += "]"
+
+        role = "ego" if is_ego else "   "
+        label = f"  {role} Agent {aid}"
+        print(f"{label:<16} {atype:<14} pos={pos_str}  "
+              f"v={spd_str:<8}  goal={goal_str}{belief_str}")
+
+    # Static objects
+    static_objs = config.get("static_objects", [])
+    if static_objs:
+        print(f"  Static objects: {len(static_objs)}")
+        for obj in static_objs:
+            pos = obj["position"]
+            bp = obj.get("blueprint", "prop")
+            # Shorten blueprint name
+            short_bp = bp.split(".")[-1] if "." in bp else bp
+            print(f"    {short_bp:<20} pos=({pos[0]:7.1f}, {pos[1]:7.1f})")
+    print()
