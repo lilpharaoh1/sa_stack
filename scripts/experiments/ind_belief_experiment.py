@@ -72,8 +72,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-plot", action="store_true",
                         help="Disable the BeliefAgent plotter")
     parser.add_argument("--intervention-type", type=str, default="none",
-                        choices=["none", "agency_only", "combined", "warmstart_only"],
+                        choices=["none", "agency_only", "combined", "warmstart_only", "policy_only"],
                         help="Intervention scheme for the ego agent (default: none)")
+    parser.add_argument("--inference-type", type=str, default="naive",
+                        choices=["naive"],
+                        help="Belief inference strategy (default: naive)")
+    parser.add_argument("--relevance-method", type=str, default="dual",
+                        choices=["corridor", "dual"],
+                        help="Relevance detection method for belief inference "
+                             "(default: dual)")
     return parser.parse_args()
 
 
@@ -91,6 +98,8 @@ def run_single_experiment(config: dict,
                           seed: int = 21,
                           scenario_name: str = "experiment",
                           intervention_type: str = "none",
+                          inference_type: str = "naive",
+                          relevance_method: str = "dual",
                           ) -> ExperimentResult:
     """Run a single experiment episode.
 
@@ -100,8 +109,11 @@ def run_single_experiment(config: dict,
     """
     ego_id = config["agents"][0]["id"]
 
-    # Inject intervention_type into the ego agent config so create_agent picks it up
+    # Inject intervention_type, inference_type, and relevance_method into
+    # the ego agent config so create_agent picks them up
     config["agents"][0]["intervention_type"] = intervention_type
+    config["agents"][0]["inference_type"] = inference_type
+    config["agents"][0]["relevance_method"] = relevance_method
 
     agents = {}
     for agent_config in config["agents"]:
@@ -302,6 +314,8 @@ def main():
         seed=args.seed,
         scenario_name=args.map,
         intervention_type=args.intervention_type,
+        inference_type=args.inference_type,
+        relevance_method=args.relevance_method,
     )
 
     run_dir = make_run_dir(

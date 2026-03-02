@@ -65,8 +65,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview", action="store_true",
                         help="Show spawn preview plot for the first sample before running")
     parser.add_argument("--intervention-type", type=str, default="none",
-                        choices=["none", "agency_only", "combined", "warmstart_only"],
+                        choices=["none", "agency_only", "combined", "warmstart_only", "policy_only"],
                         help="Intervention scheme for the ego agent (default: none)")
+    parser.add_argument("--inference-type", type=str, default="naive",
+                        choices=["naive"],
+                        help="Belief inference strategy (default: naive)")
+    parser.add_argument("--relevance-method", type=str, default="dual",
+                        choices=["corridor", "dual"],
+                        help="Relevance detection method for belief inference "
+                             "(default: dual)")
     return parser.parse_args()
 
 
@@ -163,7 +170,7 @@ def print_summary(scenario_name: str,
 def main():
     args = parse_args()
 
-    ip.setup_logging(level=logging.INFO)
+    ip.setup_logging(level=logging.DEBUG)
     np.seterr(divide="ignore")
 
     # Load scenario config
@@ -277,6 +284,8 @@ def main():
             seed=sample_seed,
             scenario_name=args.map,
             intervention_type=args.intervention_type,
+            inference_type=args.inference_type,
+            relevance_method=args.relevance_method,
         )
         results.append(result)
 

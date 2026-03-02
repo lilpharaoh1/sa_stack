@@ -28,12 +28,15 @@ from igp2.beliefcontrol.planning_utils import (
 
 logger = logging.getLogger(__name__)
 
+INFERENCE_TYPES = ('naive',)
+
 
 @dataclass
 class HistoryEntry:
     """Single timestep of recorded ego and environment state."""
     frenet_state: np.ndarray               # [s, d, phi, v]
     other_agent_states: Dict[int, AgentState]  # snapshot of other agents
+    human_action: Optional[tuple] = None   # (acceleration, steer_angle) before intervention
 
 
 @dataclass
@@ -44,7 +47,8 @@ class InferenceResult:
     vel_cost: float                        # mean velocity L2 (m/s)
     planned_sd: Optional[np.ndarray]       # (K, 2) planned [s, d]
     planned_vel: Optional[np.ndarray]      # (K, 2) planned [vs, vd]
-    solver_ok: bool
+    milp_ok: bool                          # True if MILP succeeded
+    nlp_ok: bool                           # True if NLP succeeded (False = MILP fallback)
     nlp_states: Optional[np.ndarray] = None    # (H+1, 4) [s, d, phi, v]
     nlp_controls: Optional[np.ndarray] = None  # (H, 2) [a, delta]
 
@@ -65,20 +69,32 @@ class BeliefInference:
         relevance_s_margin: Longitudinal margin for relevant agent
             detection (m).
         relevance_d_threshold: Maximum lateral offset for relevance (m).
-        max_relevant: Cap on number of agents to enumerate (limits 2^N).
     """
+
+    RELEVANCE_METHODS = ('corridor', 'dual')
 
     def __init__(self, policy, scenario_map,
                  warmup_fraction: float = 0.2,
                  relevance_s_margin: float = 10.0,
                  relevance_d_threshold: float = 7.0,
-                 max_relevant: int = 5,
                  boltzmann_beta: float = 12.5,
                  vel_weight: float = 1.0,
                  hidden_threshold: float = 0.6,
                  intervention_type: str = 'none',
                  w_agency: float = 1.0,
+                 inference_type: str = 'naive',
+                 relevance_method: str = 'dual',
                  plot: bool = True):
+        if relevance_method not in self.RELEVANCE_METHODS:
+            raise ValueError(
+                f"Unknown relevance_method {relevance_method!r}. "
+                f"Choose from: {self.RELEVANCE_METHODS}")
+        self._relevance_method = relevance_method
+        if inference_type not in INFERENCE_TYPES:
+            raise ValueError(
+                f"Unknown inference_type {inference_type!r}. "
+                f"Choose from: {INFERENCE_TYPES}")
+        self._inference_type = inference_type
         self._scenario_map = scenario_map
         self._warmup_fraction = warmup_fraction
         self._boltzmann_beta = boltzmann_beta
@@ -86,7 +102,6 @@ class BeliefInference:
         self._hidden_threshold = hidden_threshold
         self._relevance_s_margin = relevance_s_margin
         self._relevance_d_threshold = relevance_d_threshold
-        self._max_relevant = max_relevant
 
         # Extract planning parameters from the policy
         self._frenet: Optional[FrenetFrame] = policy.frenet_frame
@@ -132,9 +147,10 @@ class BeliefInference:
         )
 
         # Minimum-intervention optimizer (same params as second stage)
+        # policy_only bypasses the intervention NLP entirely (uses MILP→NLP)
         self._intervention_type = intervention_type
         self._intervention = None
-        if intervention_type != 'none':
+        if intervention_type not in ('none', 'policy_only'):
             self._intervention = SecondStageIntervention(
                 horizon=self._horizon,
                 dt=self._dt,
@@ -188,7 +204,12 @@ class BeliefInference:
     def step(self, frenet_state: np.ndarray,
              other_agent_states: Dict[int, AgentState],
              step_count: int,
-             ego_position: np.ndarray = None):
+             ego_position: np.ndarray = None,
+             human_action: Optional[tuple] = None,
+             true_obstacles: Optional[list] = None,
+             true_policy_result: Optional[tuple] = None,
+             human_policy_result: Optional[tuple] = None,
+             active_agents: Optional[Dict[int, float]] = None):
         """Run one inference step.
 
         Args:
@@ -196,11 +217,27 @@ class BeliefInference:
             other_agent_states: Snapshot of all other agents' states.
             step_count: Current simulation step number (for display).
             ego_position: Current ego world position [x, y] (for plot centring).
+            human_action: Raw (acceleration, steer_angle) from the human policy
+                before any intervention override.
+            true_obstacles: Pre-built obstacle list from the true policy
+                (same prediction used for true planning).  If provided, the
+                intervention uses these directly so obstacle prediction is
+                identical to the true policy.
+            true_policy_result: (states, controls) from the true policy's last
+                solve.  For ``policy_only`` mode this is used directly as the
+                intervention result, avoiding a redundant MILP→NLP.
+            human_policy_result: (states, controls) from the human policy's
+                last solve.  For ``policy_only`` mode this is shown as the
+                believed trajectory in the intervention plotter.
+            active_agents: Per-agent dual influence {agent_id: Σ|λ|} from
+                the true policy's NLP solve.  Used for dual-based relevance
+                detection.
         """
         # 1. Append to history
         self._history.append(HistoryEntry(
             frenet_state=frenet_state.copy(),
             other_agent_states={aid: s for aid, s in other_agent_states.items()},
+            human_action=human_action,
         ))
 
         # 2. Check warmup
@@ -223,99 +260,28 @@ class BeliefInference:
         hist_frenet = self._history[start_idx].frenet_state
         hist_agents = self._history[start_idx].other_agent_states
 
-        # Subsample observed trajectory at planning dt (warmup_steps + 1 points)
-        observed_sd = self._subsample_history(start_idx, len(self._history) - 1,
-                                              sim_steps_per_plan_step)
+        # Forward-simulate human-intended trajectory from window start
+        observed_sd = self._simulate_human_trajectory(start_idx, len(self._history) - 1,
+                                                      sim_steps_per_plan_step)
 
         # 4. Find relevant agents
-        ego_s = frenet_state[0]
-        relevant_aids = self._find_relevant_agents(ego_s, other_agent_states)
+        relevant_aids = self._find_relevant_agents(
+            frenet_state, other_agent_states, active_agents=active_agents)
 
         # 5. Evaluate belief configs (only if there are relevant agents)
         results: List[InferenceResult] = []
         t_elapsed = 0.0
 
         if relevant_aids:
-            configs = self._enumerate_configs(relevant_aids)
+            if self._inference_type == 'naive':
+                results, marginals, t_elapsed = self._run_naive_inference(
+                    hist_frenet, hist_agents, observed_sd,
+                    current_frenet=frenet_state,
+                    relevant_aids=relevant_aids,
+                    step_count=step_count)
+            else:
+                raise ValueError(f"Unknown inference type: {self._inference_type}")
 
-            # Sample road boundaries from the historical start state
-            s_values = np.array([
-                hist_frenet[0] + hist_frenet[3] * np.cos(hist_frenet[2]) * k * self._dt
-                for k in range(self._horizon + 1)
-            ])
-            s_values = np.clip(s_values, 0.0, self._frenet.total_length)
-            road_left, road_right = self._sample_road_boundaries(s_values)
-
-            t_start = time.perf_counter()
-
-            for config in configs:
-                visible_aids = {aid for aid, vis in config.items() if vis}
-
-                # Build obstacles with constant-velocity prediction
-                obstacles = self._predict_obstacles_cv(
-                    hist_agents, visible_aids)
-
-                # --- Stage 1: MILP ---
-                self._first_stage.reset()
-                milp_states = self._first_stage.solve(
-                    hist_frenet, road_left, road_right, obstacles)
-
-                if milp_states is None:
-                    results.append(InferenceResult(
-                        config=config,
-                        pos_cost=float('inf'), vel_cost=float('inf'),
-                        planned_sd=None, planned_vel=None,
-                        solver_ok=False,
-                        nlp_states=None, nlp_controls=None,
-                    ))
-                    continue
-
-                # --- Stage 2: NLP (bicycle model) ---
-                warm_states, warm_controls = self._milp_to_nlp_warmstart(
-                    milp_states, hist_frenet)
-
-                self._second_stage.reset()
-                nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
-                    hist_frenet, warm_states, warm_controls,
-                    road_left, road_right, obstacles)
-
-                if nlp_ok:
-                    # NLP states are [s, d, phi, v] → convert to [s, d, vs, vd]
-                    planned_sdvv = np.column_stack([
-                        nlp_states[:, 0],                                     # s
-                        nlp_states[:, 1],                                     # d
-                        nlp_states[:, 3] * np.cos(nlp_states[:, 2]),          # vs
-                        nlp_states[:, 3] * np.sin(nlp_states[:, 2]),          # vd
-                    ])
-                else:
-                    # Fallback to MILP-derived warmstart
-                    planned_sdvv = np.column_stack([
-                        warm_states[:, 0],
-                        warm_states[:, 1],
-                        warm_states[:, 3] * np.cos(warm_states[:, 2]),
-                        warm_states[:, 3] * np.sin(warm_states[:, 2]),
-                    ])
-
-                pos_cost, vel_cost = self._trajectory_cost(
-                    observed_sd, planned_sdvv)
-                results.append(InferenceResult(
-                    config=config,
-                    pos_cost=pos_cost, vel_cost=vel_cost,
-                    planned_sd=planned_sdvv[:, :2],
-                    planned_vel=planned_sdvv[:, 2:4],
-                    solver_ok=True,
-                    nlp_states=nlp_states if nlp_ok else warm_states,
-                    nlp_controls=nlp_controls if nlp_ok else warm_controls,
-                ))
-
-            t_elapsed = time.perf_counter() - t_start
-
-            # Sort by position cost
-            results.sort(key=lambda r: r.pos_cost)
-
-            # Print results and get marginal posteriors
-            marginals = self._print_results(results, step_count, relevant_aids,
-                                            t_elapsed, self._warmup_steps)
             self._last_marginals = marginals
 
             # Compute ego world heading from Frenet state
@@ -328,7 +294,10 @@ class BeliefInference:
                 marginals, frenet_state, other_agent_states,
                 relevant_aids,
                 ego_position=ego_position, step_count=step_count,
-                ego_heading=ego_heading)
+                ego_heading=ego_heading,
+                true_obstacles=true_obstacles,
+                true_policy_result=true_policy_result,
+                human_policy_result=human_policy_result)
 
         self._last_results = results
         self._last_observed_sd = observed_sd
@@ -346,40 +315,184 @@ class BeliefInference:
                 marginals=marginals if relevant_aids else {},
                 ego_heading=ego_heading)
 
-    def _find_relevant_agents(self, ego_s: float,
-                              other_agent_states: Dict[int, AgentState]
+    def _run_naive_inference(self, hist_frenet: np.ndarray,
+                             hist_agents: Dict[int, AgentState],
+                             observed_sd: np.ndarray,
+                             current_frenet: np.ndarray,
+                             relevant_aids: List[int],
+                             step_count: int,
+                             ) -> tuple:
+        """Exhaustive 2^N enumeration of belief configs with Boltzmann posteriors.
+
+        Returns:
+            (results, marginals, elapsed_time) where *results* is a sorted list
+            of :class:`InferenceResult`, *marginals* is ``{aid: P(hidden)}``,
+            and *elapsed_time* is wall-clock seconds for the solve loop.
+        """
+        configs = self._enumerate_configs(relevant_aids)
+
+        # Sample road boundaries from the historical start state
+        s_values = np.array([
+            hist_frenet[0] + hist_frenet[3] * np.cos(hist_frenet[2]) * k * self._dt
+            for k in range(self._horizon + 1)
+        ])
+        s_values = np.clip(s_values, 0.0, self._frenet.total_length)
+        road_left, road_right = self._sample_road_boundaries(s_values)
+
+        results: List[InferenceResult] = []
+        t_start = time.perf_counter()
+
+        for config in configs:
+            visible_aids = {aid for aid, vis in config.items() if vis}
+
+            # Build obstacles with constant-velocity prediction
+            obstacles = self._predict_obstacles_cv(
+                hist_agents, visible_aids)
+
+            # --- Stage 1: MILP ---
+            self._first_stage.reset()
+            milp_states = self._first_stage.solve(
+                hist_frenet, road_left, road_right, obstacles)
+
+            if milp_states is None:
+                results.append(InferenceResult(
+                    config=config,
+                    pos_cost=float('inf'), vel_cost=float('inf'),
+                    planned_sd=None, planned_vel=None,
+                    milp_ok=False, nlp_ok=False,
+                    nlp_states=None, nlp_controls=None,
+                ))
+                continue
+
+            # --- Stage 2: NLP (bicycle model) ---
+            warm_states, warm_controls = self._milp_to_nlp_warmstart(
+                milp_states, hist_frenet)
+
+            self._second_stage.reset()
+            nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
+                hist_frenet, warm_states, warm_controls,
+                road_left, road_right, obstacles)
+
+            if nlp_ok:
+                # NLP states are [s, d, phi, v] → convert to [s, d, vs, vd]
+                planned_sdvv = np.column_stack([
+                    nlp_states[:, 0],                                     # s
+                    nlp_states[:, 1],                                     # d
+                    nlp_states[:, 3] * np.cos(nlp_states[:, 2]),          # vs
+                    nlp_states[:, 3] * np.sin(nlp_states[:, 2]),          # vd
+                ])
+            else:
+                # Fallback to MILP-derived warmstart
+                planned_sdvv = np.column_stack([
+                    warm_states[:, 0],
+                    warm_states[:, 1],
+                    warm_states[:, 3] * np.cos(warm_states[:, 2]),
+                    warm_states[:, 3] * np.sin(warm_states[:, 2]),
+                ])
+
+            pos_cost, vel_cost = self._trajectory_cost(
+                observed_sd, planned_sdvv)
+            results.append(InferenceResult(
+                config=config,
+                pos_cost=pos_cost, vel_cost=vel_cost,
+                planned_sd=planned_sdvv[:, :2],
+                planned_vel=planned_sdvv[:, 2:4],
+                milp_ok=True, nlp_ok=nlp_ok,
+                nlp_states=nlp_states if nlp_ok else warm_states,
+                nlp_controls=nlp_controls if nlp_ok else warm_controls,
+            ))
+
+        t_elapsed = time.perf_counter() - t_start
+
+        # Sort by position cost
+        results.sort(key=lambda r: r.pos_cost)
+
+        # Print results and get marginal posteriors
+        marginals = self._print_results(results, step_count, relevant_aids,
+                                        t_elapsed, self._warmup_steps)
+
+        return results, marginals, t_elapsed
+
+    def _find_relevant_agents(self, frenet_state: np.ndarray,
+                              other_agent_states: Dict[int, AgentState],
+                              active_agents: Optional[Dict[int, float]] = None,
                               ) -> List[int]:
-        """Find agents within the planning horizon's reach."""
+        """Find agents that are relevant for belief inference enumeration.
+
+        Dispatches to either dual-based or corridor-based detection depending
+        on ``self._relevance_method``.
+
+        Args:
+            frenet_state: Current ego Frenet state [s, d, phi, v].
+            other_agent_states: Snapshot of all other agents' states.
+            active_agents: Per-agent dual influence {agent_id: Σ|λ|} from
+                the true policy's NLP solve (only used for 'dual' method).
+        """
+        if self._relevance_method == 'dual':
+            if active_agents is not None:
+                return sorted([
+                    aid for aid, influence in active_agents.items()
+                    if influence > 1e-4 and aid >= 0
+                ])
+            # Fall back to corridor if dual info not yet available
+            # (e.g. first steps before the true policy has solved)
+            logger.debug("Dual relevance requested but active_agents is None, "
+                         "falling back to corridor method")
+
+        return self._find_relevant_agents_corridor(frenet_state, other_agent_states)
+
+    def _find_relevant_agents_corridor(self, frenet_state: np.ndarray,
+                                        other_agent_states: Dict[int, AgentState],
+                                        ) -> List[int]:
+        """Find agents whose predicted trajectories enter the ego corridor.
+
+        Forward-simulates each agent via constant-velocity prediction,
+        converts to Frenet, and checks overlap with the ego's driving
+        corridor (road boundaries + lateral margin).
+        """
         if self._frenet is None:
             return []
 
-        margin = self._relevance_s_margin
-        v_target = self._target_speed
-        horizon_reach = self._horizon * self._dt * v_target
-        s_min = ego_s - margin
-        s_max = ego_s + horizon_reach + margin
+        # Ego corridor: forward-simulate ego position along the reference
+        ego_s = frenet_state[0]
+        vs = frenet_state[3] * np.cos(frenet_state[2])
+        s_ego = np.array([ego_s + vs * k * self._dt
+                          for k in range(self._horizon + 1)])
+        s_ego = np.clip(s_ego, 0.0, self._frenet.total_length)
+        s_min = s_ego[0] - self._relevance_s_margin
+        s_max = s_ego[-1] + self._relevance_s_margin
+
+        # Road boundaries at ego s-positions define the lateral corridor
+        d_left, d_right = self._sample_road_boundaries(s_ego)
+        d_margin = self._relevance_d_threshold
 
         relevant = []
+        times = np.arange(self._horizon + 1).reshape(-1, 1) * self._dt
+
         for aid, state in other_agent_states.items():
             # Skip static objects (negative IDs are parked vehicles/barriers)
             if aid < 0:
                 continue
 
-            f = self._frenet.world_to_frenet(
-                float(state.position[0]), float(state.position[1]))
-            agent_s, agent_d = f['s'], f['d']
+            # Constant-velocity prediction in world frame
+            pos = np.array(state.position[:2], dtype=float)
+            vel = np.array(state.velocity[:2], dtype=float)
+            world_traj = pos + vel * times  # (H+1, 2)
 
-            if s_min <= agent_s <= s_max and abs(agent_d) < self._relevance_d_threshold:
-                relevant.append(aid)
+            # Convert to Frenet
+            s_agent, d_agent = self._frenet.world_to_frenet_batch(world_traj)
 
-        # Cap at max_relevant (keep the closest by s-distance)
-        if len(relevant) > self._max_relevant:
-            relevant.sort(key=lambda aid: abs(
-                self._frenet.world_to_frenet(
-                    float(other_agent_states[aid].position[0]),
-                    float(other_agent_states[aid].position[1]))['s'] - ego_s
-            ))
-            relevant = relevant[:self._max_relevant]
+            # Check if any predicted point falls inside the corridor
+            for k in range(len(s_agent)):
+                sk, dk = s_agent[k], d_agent[k]
+                if not (s_min <= sk <= s_max):
+                    continue
+                # Interpolate road boundaries at this agent s-position
+                dl = np.interp(sk, s_ego, d_left)
+                dr = np.interp(sk, s_ego, d_right)
+                if dr - d_margin <= dk <= dl + d_margin:
+                    relevant.append(aid)
+                    break
 
         return sorted(relevant)
 
@@ -413,6 +526,65 @@ class BeliefInference:
             observed[i, 1] = fs[1]  # d
             observed[i, 2] = fs[3] * np.cos(fs[2])  # vs = v * cos(phi)
             observed[i, 3] = fs[3] * np.sin(fs[2])  # vd = v * sin(phi)
+        return observed
+
+    def _simulate_human_trajectory(self, start_idx: int, end_idx: int,
+                                    sim_steps_per_plan_step: int) -> np.ndarray:
+        """Forward-simulate from window start using stored human actions.
+
+        Uses the NLP bicycle model in Frenet coordinates to replay what the
+        human *intended* (before intervention override), then subsamples at
+        planning dt.
+
+        Dynamics (matching second_stage.py and carla_client._bicycle_step):
+            s_{k+1}   = s_k   + v_k * cos(phi_k + delta_k) * dt_sim
+            d_{k+1}   = d_k   + v_k * sin(phi_k + delta_k) * dt_sim
+            phi_{k+1} = phi_k + (2*v_k/L) * sin(delta_k) * dt_sim
+            v_{k+1}   = max(0, v_k + a_k * dt_sim)
+
+        Returns (K, 4) array of [s, d, vs, vd] at planning timesteps.
+        """
+        # Initial Frenet state at window start
+        fs0 = self._history[start_idx].frenet_state  # [s, d, phi, v]
+        s, d, phi, v = float(fs0[0]), float(fs0[1]), float(fs0[2]), float(fs0[3])
+
+        dt_sim = self._dt_sim
+        L = self._wheelbase
+
+        # Collect sim-step states: initial + one per sim step
+        n_sim_steps = end_idx - start_idx
+        # Store [s, d, phi, v] at each sim step (including initial)
+        states = np.empty((n_sim_steps + 1, 4))
+        states[0] = [s, d, phi, v]
+
+        for k in range(n_sim_steps):
+            hist_entry = self._history[start_idx + k]
+            ha = hist_entry.human_action
+            if ha is not None:
+                a_k, delta_k = float(ha[0]), float(ha[1])
+            else:
+                a_k, delta_k = 0.0, 0.0
+
+            s_new = s + v * np.cos(phi + delta_k) * dt_sim
+            d_new = d + v * np.sin(phi + delta_k) * dt_sim
+            phi_new = phi + (2.0 * v / L) * np.sin(delta_k) * dt_sim
+            v_new = max(0.0, v + a_k * dt_sim)
+
+            # Wrap heading to [-pi, pi]
+            phi_new = (phi_new + np.pi) % (2.0 * np.pi) - np.pi
+
+            s, d, phi, v = s_new, d_new, phi_new, v_new
+            states[k + 1] = [s, d, phi, v]
+
+        # Subsample at planning dt intervals
+        indices = list(range(0, n_sim_steps + 1, sim_steps_per_plan_step))
+        observed = np.empty((len(indices), 4))
+        for i, idx in enumerate(indices):
+            st = states[idx]
+            observed[i, 0] = st[0]                          # s
+            observed[i, 1] = st[1]                          # d
+            observed[i, 2] = st[3] * np.cos(st[2])          # vs = v * cos(phi)
+            observed[i, 3] = st[3] * np.sin(st[2])          # vd = v * sin(phi)
         return observed
 
     def _milp_to_nlp_warmstart(self, milp_states, frenet_state):
@@ -488,7 +660,7 @@ class BeliefInference:
 
         energies = np.array([
             r.pos_cost + w_vel * r.vel_cost
-            if r.solver_ok and np.isfinite(r.pos_cost) and np.isfinite(r.vel_cost)
+            if r.milp_ok and np.isfinite(r.pos_cost) and np.isfinite(r.vel_cost)
             else 1e10
             for r in results
         ])
@@ -508,8 +680,13 @@ class BeliefInference:
                 f"{aid}:{'V' if vis else 'H'}"
                 for aid, vis in sorted(r.config.items())
             )
-            status = "OK" if r.solver_ok else "FAILED"
-            marker = "  <-- best" if energies[i] == best_energy and r.solver_ok else ""
+            if not r.milp_ok:
+                status = "MILP_FAIL"
+            elif not r.nlp_ok:
+                status = "NLP_FAIL"
+            else:
+                status = "OK"
+            marker = "  <-- best" if energies[i] == best_energy and r.milp_ok else ""
             logger.info("  {%s}: E=%.4f (pos=%.4f vel=%.4f)  P(b|tau)=%.3f  [%s]%s",
                         cfg_str, energies[i], r.pos_cost, r.vel_cost,
                         boltzmann_probs[i], status, marker)
@@ -533,20 +710,25 @@ class BeliefInference:
                                relevant_aids: List[int],
                                ego_position: np.ndarray = None,
                                step_count: int = 0,
-                               ego_heading: float = 0.0):
+                               ego_heading: float = 0.0,
+                               true_obstacles: Optional[list] = None,
+                               true_policy_result: Optional[tuple] = None,
+                               human_policy_result: Optional[tuple] = None):
         """Compute minimum-deviation intervention from the CURRENT state.
 
         Re-plans the believed trajectory from the current ego state (not the
         historical window start), then solves the intervention NLP from the
         same current state so both trajectories stay anchored to the ego.
 
+        The ``true_obstacles`` list should come from the true policy so that
+        the intervention sees exactly the same obstacle predictions.
+
         1. Threshold marginals → believed config
-        2. Sample road boundaries & build believed obstacles from current state
-        3. Two-stage plan (MILP → NLP) for believed trajectory
-        4. Build true obstacles (all agents) from current state
-        5. Solve intervention NLP
-        6. Store results and update plotter
-        7. Print diagnostics
+        2. Sample road boundaries from current state
+        3. (non-policy_only) Two-stage plan for believed trajectory
+        4. Solve intervention (or replan for policy_only) with true obstacles
+        5. Store results and update plotter
+        6. Print diagnostics
         """
         if self._intervention_type == 'none':
             self._last_intervention = None
@@ -571,6 +753,75 @@ class BeliefInference:
         s_values = np.clip(s_values, 0.0, self._frenet.total_length)
         road_left, road_right = self._sample_road_boundaries(s_values)
 
+        # Use pre-built obstacles from the true policy so prediction is
+        # identical.  Fall back to constant-velocity if not provided.
+        if true_obstacles is None:
+            all_dynamic_aids = {aid for aid in other_agent_states if aid >= 0}
+            true_obstacles = self._predict_obstacles_cv(
+                other_agent_states, all_dynamic_aids)
+
+        cfg_str = ", ".join(
+            f"{aid}:{'V' if vis else 'H'}"
+            for aid, vis in sorted(believed_config.items()))
+
+        if self._intervention_type == 'policy_only':
+            # Reuse the true policy's last NLP result directly — no redundant
+            # MILP→NLP solve.  The true policy already planned with all agents
+            # and identical conditions, so its result is the optimal
+            # intervention for the "policy_only" scheme.
+            if true_policy_result is not None:
+                opt_states, opt_controls = true_policy_result
+                success = True
+            else:
+                logger.warning("  policy_only: no true_policy_result provided, skipping")
+                self._last_intervention = None
+                return
+
+            # Use the human policy's result as the believed reference (red)
+            # so the plotter shows the meaningful comparison:
+            #   red  = what the human planned (with missing agents)
+            #   blue = what the true policy planned (with all agents)
+            if human_policy_result is not None:
+                ref_states, ref_controls = human_policy_result
+            else:
+                # Fallback: both are the true policy result
+                ref_states, ref_controls = opt_states, opt_controls
+
+            intervention = opt_controls - ref_controls
+
+            self._last_intervention = {
+                'believed_config': believed_config,
+                'ref_states': ref_states,
+                'ref_controls': ref_controls,
+                'opt_states': opt_states,
+                'opt_controls': opt_controls,
+                'intervention': intervention,
+                'success': success,
+                'true_obstacles': true_obstacles,
+            }
+
+            if self._intervention_plotter is not None and ego_position is not None:
+                self._intervention_plotter.update(
+                    ref_states=ref_states,
+                    ref_controls=ref_controls,
+                    opt_states=opt_states,
+                    opt_controls=opt_controls,
+                    intervention=intervention,
+                    success=success,
+                    believed_config=believed_config,
+                    true_obstacles=true_obstacles,
+                    ego_position=ego_position,
+                    ego_heading=ego_heading,
+                    other_agent_states=other_agent_states or {},
+                    step=step_count,
+                    dt=self._dt)
+
+            logger.info("  Believed config: {%s}", cfg_str)
+            logger.info("  Intervention (policy_only): reused true policy result")
+            return
+
+        # --- All other modes: believed trajectory + intervention NLP ---
+
         # Build believed obstacles (only visible agents)
         visible_aids = {aid for aid, vis in believed_config.items() if vis}
         believed_obstacles = self._predict_obstacles_cv(
@@ -582,9 +833,6 @@ class BeliefInference:
             frenet_state, road_left, road_right, believed_obstacles)
 
         if milp_states is None:
-            cfg_str = ", ".join(
-                f"{aid}:{'V' if vis else 'H'}"
-                for aid, vis in sorted(believed_config.items()))
             logger.info("  Believed config: {%s} -- MILP failed, skipping intervention", cfg_str)
             self._last_intervention = None
             return
@@ -601,11 +849,6 @@ class BeliefInference:
             # Fall back to MILP warmstart as reference
             nlp_states = warm_states
             nlp_controls = warm_controls
-
-        # 4. Build TRUE obstacles: all dynamic agents visible
-        all_dynamic_aids = {aid for aid in other_agent_states if aid >= 0}
-        true_obstacles = self._predict_obstacles_cv(
-            other_agent_states, all_dynamic_aids)
 
         # 5. Solve intervention NLP from current state
         opt_states, opt_controls, success, intervention = self._intervention.solve(
@@ -642,9 +885,6 @@ class BeliefInference:
                 dt=self._dt)
 
         # 7. Print diagnostics
-        cfg_str = ", ".join(
-            f"{aid}:{'V' if vis else 'H'}"
-            for aid, vis in sorted(believed_config.items()))
         if success:
             du_norm = float(np.linalg.norm(intervention))
             max_da = float(np.max(np.abs(intervention[:, 0])))

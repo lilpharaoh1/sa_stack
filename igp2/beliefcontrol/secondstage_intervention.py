@@ -298,5 +298,196 @@ class SecondStageIntervention:
 
         except Exception as e:
             logger.warning("Intervention NLP failed: %s", e)
+
+            # Diagnose constraint violations (same pattern as SecondStagePlanner)
+            logger.debug("INTERVENTION NLP FAILURE DIAGNOSIS:")
+            S_dbg, U_dbg = None, None
+            try:
+                S_dbg = opti.debug.value(S).T  # (H+1, 4)
+                U_dbg = opti.debug.value(U).T  # (H, 2)
+
+                s_dbg = S_dbg[:, 0]
+                d_dbg = S_dbg[:, 1]
+                phi_dbg = S_dbg[:, 2]
+                v_dbg = S_dbg[:, 3]
+                a_dbg = U_dbg[:, 0]
+                delta_dbg = U_dbg[:, 1]
+
+                violations = []
+
+                # Check initial state constraints
+                if abs(s_dbg[0] - frenet_state[0]) > 1e-3:
+                    violations.append(f"Initial s: {s_dbg[0]:.3f} != {frenet_state[0]:.3f}")
+                if abs(d_dbg[0] - frenet_state[1]) > 1e-3:
+                    violations.append(f"Initial d: {d_dbg[0]:.3f} != {frenet_state[1]:.3f}")
+                if abs(phi_dbg[0] - frenet_state[2]) > 1e-3:
+                    violations.append(f"Initial phi: {phi_dbg[0]:.3f} != {frenet_state[2]:.3f}")
+                if abs(v_dbg[0] - frenet_state[3]) > 1e-3:
+                    violations.append(f"Initial v: {v_dbg[0]:.3f} != {frenet_state[3]:.3f}")
+
+                # Check speed bounds
+                for k in range(H + 1):
+                    if v_dbg[k] < v_min - 1e-3:
+                        violations.append(f"v[{k}]={v_dbg[k]:.3f} < v_min={v_min}")
+                    if v_dbg[k] > v_max + 1e-3:
+                        violations.append(f"v[{k}]={v_dbg[k]:.3f} > v_max={v_max}")
+
+                # Check control bounds
+                for k in range(H):
+                    if a_dbg[k] < a_min - 1e-3:
+                        violations.append(f"a[{k}]={a_dbg[k]:.3f} < a_min={a_min}")
+                    if a_dbg[k] > a_max + 1e-3:
+                        violations.append(f"a[{k}]={a_dbg[k]:.3f} > a_max={a_max}")
+                    if abs(delta_dbg[k]) > delta_max + 1e-3:
+                        violations.append(f"|delta[{k}]|={abs(delta_dbg[k]):.3f} > delta_max={delta_max}")
+
+                # Check jerk constraints
+                jerk_limit = jerk_max * dt
+                for k in range(H - 1):
+                    jerk = abs(a_dbg[k + 1] - a_dbg[k])
+                    if jerk > jerk_limit + 1e-3:
+                        violations.append(f"Jerk[{k}]={jerk:.3f} > limit={jerk_limit:.3f}")
+
+                # Check steering rate constraints
+                delta_rate_limit = delta_rate_max * dt
+                for k in range(H - 1):
+                    delta_rate = abs(delta_dbg[k + 1] - delta_dbg[k])
+                    if delta_rate > delta_rate_limit + 1e-3:
+                        violations.append(f"DeltaRate[{k}]={delta_rate:.3f} > limit={delta_rate_limit:.3f}")
+
+                # Check road boundary constraints (corner-based)
+                half_L = self._ego_length / 2.0
+                half_W = self._ego_width / 2.0
+                for k in range(H + 1):
+                    cos_phi = np.cos(phi_dbg[k])
+                    sin_phi = np.sin(phi_dbg[k])
+                    for sl, sw in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                        c_d = d_dbg[k] + sl * half_L * sin_phi + sw * half_W * cos_phi
+                        if c_d < road_right[k] - 1e-3:
+                            violations.append(f"Road right[{k}] corner({sl},{sw}): c_d={c_d:.3f} < {road_right[k]:.3f}")
+                        if c_d > road_left[k] + 1e-3:
+                            violations.append(f"Road left[{k}] corner({sl},{sw}): c_d={c_d:.3f} > {road_left[k]:.3f}")
+
+                # Check collision constraints (ellipse)
+                for obs_idx in range(N_obs):
+                    obs = obstacles[obs_idx]
+                    obs_half_L = obs['length'] / 2.0
+                    obs_half_W = obs['width'] / 2.0
+                    rx = obs_half_L + self._collision_margin
+                    ry = obs_half_W + self._collision_margin
+
+                    obs_s0 = float(obs['s'][0])
+                    _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
+                    obs_heading_frenet = obs.get('heading', road_angle_obs) - road_angle_obs
+                    cos_theta = np.cos(obs_heading_frenet)
+                    sin_theta = np.sin(obs_heading_frenet)
+
+                    for k in range(1, H + 1):
+                        s_obs = float(obs['s'][k] if k < len(obs['s']) else obs['s'][-1])
+                        d_obs = float(obs['d'][k] if k < len(obs['d']) else obs['d'][-1])
+
+                        cos_phi = np.cos(phi_dbg[k])
+                        sin_phi = np.sin(phi_dbg[k])
+
+                        for sl, sw in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                            c_s = s_dbg[k] + sl * half_L * cos_phi - sw * half_W * sin_phi
+                            c_d = d_dbg[k] + sl * half_L * sin_phi + sw * half_W * cos_phi
+                            ds = c_s - s_obs
+                            dd = c_d - d_obs
+                            x_body = cos_theta * ds + sin_theta * dd
+                            y_body = -sin_theta * ds + cos_theta * dd
+                            ellipse_val = (x_body / rx)**2 + (y_body / ry)**2
+                            if ellipse_val < 1.0 - 1e-3:
+                                violations.append(f"Collision obs{obs_idx}[{k}] corner({sl},{sw}): ellipse={ellipse_val:.3f} < 1.0")
+
+                # Log constraint value summaries
+                logger.debug("--- Debug State Constraint Values ---")
+                logger.debug("Acceleration: min=%.3f, max=%.3f | bounds=[%.2f, %.2f]",
+                             np.min(a_dbg), np.max(a_dbg), a_min, a_max)
+                logger.debug("Steering (deg): min=%.2f, max=%.2f | bound=+-%.2f",
+                             np.degrees(np.min(delta_dbg)), np.degrees(np.max(delta_dbg)), np.degrees(delta_max))
+                logger.debug("Velocity: min=%.3f, max=%.3f | bounds=[%.2f, %.2f]",
+                             np.min(v_dbg), np.max(v_dbg), v_min, v_max)
+
+                # Jerk and steering rate
+                if len(a_dbg) > 1:
+                    jerk_vals = np.diff(a_dbg) / dt
+                    logger.debug("Jerk: min=%.3f, max=%.3f | bound=+-%.2f",
+                                 np.min(jerk_vals), np.max(jerk_vals), jerk_max)
+                if len(delta_dbg) > 1:
+                    delta_rate_vals = np.diff(delta_dbg) / dt
+                    logger.debug("Steer rate (deg/s): min=%.2f, max=%.2f | bound=+-%.2f",
+                                 np.degrees(np.min(delta_rate_vals)), np.degrees(np.max(delta_rate_vals)), np.degrees(delta_rate_max))
+
+                # Find minimum g value across all corners and obstacles
+                if N_obs > 0:
+                    min_g_overall = float('inf')
+                    min_g_info = ""
+                    for obs_idx in range(N_obs):
+                        obs = obstacles[obs_idx]
+                        rx = obs['length'] / 2.0 + self._collision_margin
+                        ry = obs['width'] / 2.0 + self._collision_margin
+                        obs_s0 = float(obs['s'][0])
+                        _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
+                        obs_heading_frenet = obs.get('heading', road_angle_obs) - road_angle_obs
+                        cos_theta = np.cos(obs_heading_frenet)
+                        sin_theta = np.sin(obs_heading_frenet)
+
+                        for k in range(1, H + 1):
+                            s_obs = float(obs['s'][k] if k < len(obs['s']) else obs['s'][-1])
+                            d_obs = float(obs['d'][k] if k < len(obs['d']) else obs['d'][-1])
+                            cos_phi = np.cos(phi_dbg[k])
+                            sin_phi = np.sin(phi_dbg[k])
+
+                            for sl, sw, name in [(1, 1, 'FL'), (1, -1, 'FR'), (-1, 1, 'RL'), (-1, -1, 'RR')]:
+                                c_s = s_dbg[k] + sl * half_L * cos_phi - sw * half_W * sin_phi
+                                c_d = d_dbg[k] + sl * half_L * sin_phi + sw * half_W * cos_phi
+                                ds = c_s - s_obs
+                                dd = c_d - d_obs
+                                x_body = cos_theta * ds + sin_theta * dd
+                                y_body = -sin_theta * ds + cos_theta * dd
+                                g_val = (x_body / rx)**2 + (y_body / ry)**2
+                                if g_val < min_g_overall:
+                                    min_g_overall = g_val
+                                    min_g_info = f"Obs{obs_idx} k={k} {name}: g={g_val}, corner=({c_s:.2f},{c_d:.2f}), obs=({s_obs:.2f},{d_obs:.2f})"
+
+                    status = "VIOLATED" if min_g_overall < 1.0 - 1e-3 else "OK"
+                    logger.debug("Collision (min_g): %s (%s) | %s",
+                                 min_g_overall, status, min_g_info)
+
+                if violations:
+                    logger.debug("Violated constraints (%d total):", len(violations))
+                    for v in violations[:10]:
+                        logger.debug("  - %s", v)
+                    if len(violations) > 10:
+                        logger.debug("  ... and %d more", len(violations) - 10)
+                else:
+                    logger.debug("No obvious constraint violations found in debug values")
+                    logger.debug("Initial: s=%.2f, d=%.2f, phi=%.2f, v=%.2f",
+                                 frenet_state[0], frenet_state[1], frenet_state[2], frenet_state[3])
+                    logger.debug("Ego dimensions: L=%.2f, W=%.2f", 2*half_L, 2*half_W)
+                    logger.debug("Road bounds[0]: left=%.2f, right=%.2f, width=%.2f",
+                                 road_left[0], road_right[0], road_left[0]-road_right[0])
+
+                    # Show obstacle info and gap analysis
+                    if N_obs > 0:
+                        logger.debug("Obstacles (%d):", N_obs)
+                        for obs_idx in range(min(N_obs, 3)):
+                            obs = obstacles[obs_idx]
+                            obs_d0 = float(obs['d'][0])
+                            obs_half_W = obs['width'] / 2.0
+                            obs_left = obs_d0 + obs_half_W + self._collision_margin
+                            obs_right = obs_d0 - obs_half_W - self._collision_margin
+                            gap_left = road_left[0] - obs_left
+                            gap_right = obs_right - road_right[0]
+                            logger.debug("  Obs%d: d=%.2f, W=%.2f, gaps: left=%.2f, right=%.2f",
+                                         obs_idx, obs_d0, obs['width'], gap_left, gap_right)
+                            ego_needed = 2 * half_W + 0.1
+                            if gap_left < ego_needed and gap_right < ego_needed:
+                                logger.warning("Ego needs %.2fm but gaps are too small!", ego_needed)
+
+            except Exception as debug_e:
+                logger.debug("Could not extract debug values: %s", debug_e)
+
             zeros = np.zeros_like(ref_controls)
             return ref_states, ref_controls, False, zeros

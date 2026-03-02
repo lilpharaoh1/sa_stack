@@ -115,7 +115,8 @@ class StepRecord:
     #   'vel_cost': float
     #   'energy': float   (pos_cost + w_vel * vel_cost)
     #   'prob': float     (Boltzmann posterior P(b | tau_obs))
-    #   'solver_ok': bool
+    #   'milp_ok': bool
+    #   'nlp_ok': bool
     # Empty list when inference hasn't run yet.
     belief_config_results: Optional[List[Dict]] = None
 
@@ -243,11 +244,15 @@ def create_agent(agent_config, frame, fps, scenario_map, plot_interval=True):
         agent_beliefs = agent_config.get("beliefs", None)
         human = agent_config.get("human", True)
         intervention_type = agent_config.get("intervention_type", "none")
+        inference_type = agent_config.get("inference_type", "naive")
+        relevance_method = agent_config.get("relevance_method", "dual")
         return ip.BeliefAgent(**base, scenario_map=scenario_map,
                               plot_interval=plot_interval,
                               agent_beliefs=agent_beliefs,
                               human=human,
-                              intervention_type=intervention_type)
+                              intervention_type=intervention_type,
+                              inference_type=inference_type,
+                              relevance_method=relevance_method)
     elif agent_type == "TrafficAgent":
         open_loop = agent_config.get("open_loop", False)
         return ip.TrafficAgent(**base, open_loop=open_loop)
@@ -391,7 +396,8 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
                     'vel_cost': float(r.vel_cost),
                     'energy': float(inf_energies[i]),
                     'prob': float(inf_probs[i]),
-                    'solver_ok': r.solver_ok,
+                    'milp_ok': r.milp_ok,
+                    'nlp_ok': r.nlp_ok,
                 })
 
     # Action deviation: compare human policy action to executed action
@@ -518,6 +524,7 @@ def build_run_metadata(args, config: dict) -> dict:
         "seed": args.seed,
         "max_steps": args.steps,
         "intervention_type": args.intervention_type,
+        "inference_type": getattr(args, 'inference_type', 'naive'),
         "n_samples": n_samples,
         "timestamp": datetime.now().isoformat(),
         "config": config,
@@ -1006,6 +1013,8 @@ def expand_new_config(config: dict,
         ego_agent["human"] = ego_cfg["human"]
     if "intervention_type" in ego_cfg:
         ego_agent["intervention_type"] = ego_cfg["intervention_type"]
+    if "inference_type" in ego_cfg:
+        ego_agent["inference_type"] = ego_cfg["inference_type"]
 
     agents = [ego_agent]
     beliefs = {}

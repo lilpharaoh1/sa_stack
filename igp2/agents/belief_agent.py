@@ -279,6 +279,8 @@ class BeliefAgent(Agent):
                  plot_interval: bool = True,
                  human: bool = True,
                  intervention_type: str = 'none',
+                 inference_type: str = 'naive',
+                 relevance_method: str = 'dual',
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
@@ -311,9 +313,15 @@ class BeliefAgent(Agent):
             self._human_policy = self._build_policy(
                 policy_type, fps, scenario_map, **policy_kwargs,
             )
+            if isinstance(self._human_policy, TwoStagePolicy):
+                self._human_policy.label = "human"
         self._true_policy = self._build_policy(
             policy_type, fps, scenario_map, **policy_kwargs,
         )
+        # Enable collision dual analysis on the true policy only
+        if isinstance(self._true_policy, TwoStagePolicy):
+            self._true_policy.analyse_duals = True
+            self._true_policy.label = "true"
 
         # Per-step timing breakdown (seconds)
         self.last_step_timing: Dict[str, float] = {}
@@ -336,7 +344,9 @@ class BeliefAgent(Agent):
                 scenario_map is not None):
             self._belief_inference = BeliefInference(
                 self._human_policy, scenario_map,
-                intervention_type=intervention_type)
+                intervention_type=intervention_type,
+                inference_type=inference_type,
+                relevance_method=relevance_method)
 
     def _build_policy(self, policy_type, fps, scenario_map, **kwargs):
         """Instantiate the control policy based on ``policy_type``."""
@@ -688,10 +698,43 @@ class BeliefAgent(Agent):
                         aid: s for aid, s in observation.frame.items()
                         if aid != self.agent_id
                     }
+                    # Pass raw human action (before intervention override)
+                    human_action_tuple = None
+                    if action is not None:
+                        human_action_tuple = (float(action.acceleration),
+                                              float(action.steer_angle))
+                    # Pass the true policy's obstacles so intervention uses
+                    # the same prediction (not CV fallback)
+                    true_obs = self._true_policy.last_obstacles
+                    # Pass the true policy's last NLP result so policy_only
+                    # can reuse it directly instead of re-solving
+                    true_result = None
+                    if (self._true_policy._prev_nlp_states is not None and
+                            self._true_policy._prev_nlp_controls is not None):
+                        true_result = (self._true_policy._prev_nlp_states,
+                                       self._true_policy._prev_nlp_controls)
+                    # Pass the human policy's last NLP result so the
+                    # intervention plotter can show believed vs true
+                    human_result = None
+                    if (self._human_policy._prev_nlp_states is not None and
+                            self._human_policy._prev_nlp_controls is not None):
+                        human_result = (self._human_policy._prev_nlp_states,
+                                        self._human_policy._prev_nlp_controls)
+                    # Extract dual analysis from the true policy for
+                    # dual-based relevance detection
+                    active_agents = None
+                    if isinstance(self._true_policy, TwoStagePolicy):
+                        active_agents = self._true_policy.last_dual_analysis
+
                     t0 = _time.perf_counter()
                     self._belief_inference.step(
                         frenet_state, other_states, self._step_count,
-                        ego_position=np.array(ego_state.position))
+                        ego_position=np.array(ego_state.position),
+                        human_action=human_action_tuple,
+                        true_obstacles=true_obs,
+                        true_policy_result=true_result,
+                        human_policy_result=human_result,
+                        active_agents=active_agents)
                     timing['belief_inference'] = _time.perf_counter() - t0
 
                     # Override action with intervention if a hidden agent was

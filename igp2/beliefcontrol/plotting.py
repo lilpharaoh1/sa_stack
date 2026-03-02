@@ -920,7 +920,7 @@ class InferencePlotter:
             vl = self._vel_candidate_lines[i]
             vlf = self._vel_candidate_future_lines[i]
 
-            if r.planned_sd is not None and r.solver_ok:
+            if r.planned_sd is not None and r.milp_ok:
                 n_planned = len(r.planned_sd)
                 n_compare = min(n_observed, n_planned)
 
@@ -1063,7 +1063,7 @@ class InferencePlotter:
 
         # --- Title ---
         n_configs = len(results)
-        n_ok = sum(1 for r in results if r.solver_ok)
+        n_ok = sum(1 for r in results if r.milp_ok)
         if results:
             bp, bv = results[0].pos_cost, results[0].vel_cost
             best_str = f"best pos={bp:.2f} vel={bv:.2f}"

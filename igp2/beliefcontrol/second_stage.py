@@ -111,7 +111,8 @@ class SecondStagePlanner:
         self._step_count = 0
 
     def solve(self, frenet_state, warm_states, warm_controls,
-              road_left, road_right, obstacles):
+              road_left, road_right, obstacles,
+              analyse_duals: bool = False, step_label: int = 0):
         """Solve the NLP using CasADi + IPOPT.
 
         Bicycle model in Frenet frame:
@@ -127,6 +128,9 @@ class SecondStagePlanner:
             road_left: (H+1,) left boundary.
             road_right: (H+1,) right boundary.
             obstacles: List of obstacle dicts.
+            analyse_duals: If True, extract and log collision constraint
+                dual variables after solving.
+            step_label: Simulation step number for log messages.
 
         Returns:
             (nlp_states, nlp_controls, success, debug_info) --
@@ -260,6 +264,13 @@ class SecondStagePlanner:
             half_L = self._ego_length / 2.0  # l/2
             half_W = self._ego_width / 2.0   # w/2
 
+            # Track collision constraint metadata for dual variable extraction.
+            # lam_g is ordered by constraint creation, so we record the index
+            # where collision constraints start and a mapping back to
+            # (obs_idx, timestep, corner_name) for each one.
+            _collision_lam_start = opti.ng
+            _collision_meta = []   # [(obs_idx, timestep, corner_name), ...]
+
             for obs_idx in range(N_obs):
                 obs = obstacles[obs_idx]
 
@@ -309,6 +320,10 @@ class SecondStagePlanner:
                         # Constraint: g >= 1 (corner must be outside ellipse)
                         g = (d_body_x / a_i)**2 + (d_body_y / b_i)**2
                         opti.subject_to(g >= 1.0)
+                        _collision_meta.append((obs_idx, k, 'FL' if (alpha_l, alpha_w) == (1, 1)
+                                                else 'FR' if (alpha_l, alpha_w) == (1, -1)
+                                                else 'RL' if (alpha_l, alpha_w) == (-1, 1)
+                                                else 'RR'))
 
             # --- Initial guess ---
             opti.set_initial(S, warm_states.T)
@@ -337,7 +352,58 @@ class SecondStagePlanner:
             nlp_states = sol.value(S).T   # (H+1, 4)
             nlp_controls = sol.value(U).T  # (H, 2)
 
-            return nlp_states, nlp_controls, True, None
+            # --- Collision constraint dual variable analysis ---
+            # The Lagrange multiplier λ for g >= 1 tells us how much the
+            # objective *would improve* if that constraint were relaxed.
+            # |λ| > 0 means the constraint actively shapes the trajectory;
+            # |λ| ≈ 0 means the obstacle has no influence on the solution.
+            # Only run when explicitly requested (e.g. for the true policy).
+            dual_info = None
+            if analyse_duals and _collision_meta and N_obs > 0:
+                try:
+                    lam_g = np.array(sol.value(opti.lam_g)).flatten()
+                    n_coll = len(_collision_meta)
+                    coll_lam = lam_g[_collision_lam_start:
+                                     _collision_lam_start + n_coll]
+
+                    # Aggregate |λ| per obstacle (sum across timesteps & corners)
+                    obs_influence = {}  # obs_idx -> total |λ|
+                    obs_max_lam = {}    # obs_idx -> (max |λ|, timestep, corner)
+                    for i, (oi, k, corner) in enumerate(_collision_meta):
+                        lam_abs = abs(float(coll_lam[i]))
+                        if oi not in obs_influence:
+                            obs_influence[oi] = 0.0
+                            obs_max_lam[oi] = (0.0, 0, '')
+                        obs_influence[oi] += lam_abs
+                        if lam_abs > obs_max_lam[oi][0]:
+                            obs_max_lam[oi] = (lam_abs, k, corner)
+
+                    # Print per-obstacle summary, keyed by agent_id to
+                    # match the plotter's labelling
+                    logger.info("[Step %4d] COLLISION DUAL ANALYSIS (%d obstacles):",
+                                step_label, N_obs)
+                    for oi in sorted(obs_influence.keys()):
+                        obs = obstacles[oi]
+                        aid = obs.get('agent_id', '?')
+                        total = obs_influence[oi]
+                        max_lam, max_k, max_corner = obs_max_lam[oi]
+                        active = "ACTIVE" if total > 1e-4 else "inactive"
+                        logger.info("  Agent %s: Σ|λ|=%.4f  max|λ|=%.4f "
+                                    "(k=%d, %s)  [%s]",
+                                    aid, total, max_lam, max_k,
+                                    max_corner, active)
+
+                    # Build dict keyed by agent_id for downstream use
+                    dual_info = {}
+                    for oi in obs_influence:
+                        aid = obstacles[oi].get('agent_id')
+                        if aid is not None:
+                            dual_info[aid] = obs_influence[oi]
+
+                except Exception as dual_e:
+                    logger.debug("Could not extract collision duals: %s", dual_e)
+
+            return nlp_states, nlp_controls, True, dual_info
 
         except Exception as e:
             logger.warning("Stage2 (NLP) failed: %s", e)

@@ -186,12 +186,21 @@ class TwoStagePolicy:
         self._ref_start_idx: int = 0
         self._step_count: int = 0
 
+        # Human-readable label used in log lines (e.g. "human", "true")
+        self.label: str = ""
+
+        # When True, the NLP solve logs collision constraint dual variables
+        self.analyse_duals: bool = False
+
         # Per-step diagnostics
         self._last_diagnostics: Optional[Dict] = None
 
         # Obstacle data (stored for plotter access)
         self._last_obstacles: Optional[List] = None
         self._last_other_agents: Optional[Dict] = None
+
+        # Dual analysis from the last true-policy NLP solve
+        self._last_dual_analysis: Optional[Dict[int, float]] = None
 
         # Debug predicted trajectory
         self._predicted_next_state: Optional[np.ndarray] = None
@@ -262,10 +271,13 @@ class TwoStagePolicy:
         t_nlp_start = time.time()
         nlp_states, nlp_controls, nlp_ok, nlp_debug = self._second_stage.solve(
             frenet_state, warm_states, warm_controls,
-            road_left, road_right, obstacles)
+            road_left, road_right, obstacles,
+            analyse_duals=self.analyse_duals,
+            step_label=self._step_count)
         t_nlp = time.time() - t_nlp_start
 
         if not nlp_ok:
+            self._last_dual_analysis = None
             if (self._use_prev_nlp_on_fail and
                 self._prev_nlp_states is not None and
                 self._prev_nlp_controls is not None):
@@ -277,12 +289,14 @@ class TwoStagePolicy:
                 final_controls = warm_controls
                 nlp_status = "FAILED(milp)"
         else:
+            self._last_dual_analysis = nlp_debug
             final_states = nlp_states
             final_controls = nlp_controls
             nlp_status = "OK"
 
-        logger.info("[Step %4d] MILP: OK (%.1fms) | NLP: %s (%.1fms)",
-                    self._step_count, t_milp*1000, nlp_status, t_nlp*1000)
+        tag = f" ({self.label})" if self.label else ""
+        logger.info("[Step %4d]%s MILP: OK (%.1fms) | NLP: %s (%.1fms)",
+                    self._step_count, tag, t_milp*1000, nlp_status, t_nlp*1000)
 
         # Constraint analysis
         if not nlp_ok and nlp_debug is not None and nlp_debug[0] is not None:
@@ -387,6 +401,11 @@ class TwoStagePolicy:
         return self._reference_waypoints
 
     @property
+    def last_dual_analysis(self) -> Optional[Dict[int, float]]:
+        """Per-agent dual influence {agent_id: Σ|λ|} from the last NLP solve."""
+        return self._last_dual_analysis
+
+    @property
     def last_diagnostics(self) -> Optional[Dict]:
         return self._last_diagnostics
 
@@ -406,6 +425,7 @@ class TwoStagePolicy:
         self._last_rollout = None
         self._last_milp_rollout = None
         self._last_diagnostics = None
+        self._last_dual_analysis = None
         self._ref_start_idx = 0
         self._last_obstacles = None
         self._last_other_agents = None
