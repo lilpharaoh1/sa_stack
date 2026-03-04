@@ -35,10 +35,14 @@ class StepRecord:
     step: int
     wall_time: float  # seconds since experiment start
 
-    # Ego state
-    ego_position: Optional[np.ndarray]
+    # Ego state (world frame)
+    ego_position: Optional[np.ndarray]   # [x, y]
     ego_speed: Optional[float]
     ego_heading: Optional[float]
+
+    # Ego state (Frenet frame) from the true policy
+    # [s, d, phi, v]: arc-length, lateral offset, heading rel. road, speed
+    ego_frenet_state: Optional[np.ndarray]
 
     # Human (belief) policy outputs
     human_rollout: Optional[np.ndarray]        # (H+1, 4) [x, y, heading, speed]
@@ -72,6 +76,7 @@ class StepRecord:
     #   - steer_rate_violated: steering rate exceeds delta_rate_max
     #   - road_boundary_violations: number of corner-timestep road violations
     #   - collision_violations: number of corner-timestep collision violations
+    true_diag_milp_ok: Optional[bool] = None
     true_diag_nlp_ok: Optional[bool] = None
     true_diag_velocity_violated: Optional[bool] = None
     true_diag_acceleration_violated: Optional[bool] = None
@@ -300,6 +305,12 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
     true_other_agents = getattr(true_policy, 'last_other_agents', None) if true_policy else None
     true_trajectories = dict(ego_agent._true_agent_trajectories)
 
+    # Frenet state from the true policy
+    ego_frenet_state = None
+    fs = getattr(true_policy, 'last_frenet_state', None) if true_policy else None
+    if fs is not None:
+        ego_frenet_state = np.array(fs, dtype=float)
+
     dynamic_agents = {aid: s for aid, s in frame.items()
                       if aid != ego_id and aid >= 0} if frame else {}
     static_obstacles = {aid: s for aid, s in frame.items()
@@ -428,6 +439,7 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         ego_position=np.array(ego_state.position) if ego_state else None,
         ego_speed=float(ego_state.speed) if ego_state else None,
         ego_heading=float(ego_state.heading) if ego_state else None,
+        ego_frenet_state=ego_frenet_state,
         human_rollout=human_rollout,
         human_milp_rollout=human_milp,
         human_nlp_converged=human_nlp_converged,
@@ -444,6 +456,7 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         static_obstacles=static_obstacles,
         goal_reached=goal_reached,
         # Constraint diagnostics from true policy
+        true_diag_milp_ok=true_diag.get('milp_ok') if true_diag else None,
         true_diag_nlp_ok=true_diag.get('nlp_ok') if true_diag else None,
         true_diag_velocity_violated=true_diag.get('velocity_violated') if true_diag else None,
         true_diag_acceleration_violated=true_diag.get('acceleration_violated') if true_diag else None,

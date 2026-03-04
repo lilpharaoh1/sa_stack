@@ -112,7 +112,10 @@ class SecondStagePlanner:
 
     def solve(self, frenet_state, warm_states, warm_controls,
               road_left, road_right, obstacles,
-              analyse_duals: bool = False, step_label: int = 0):
+              analyse_duals: bool = False, step_label: int = 0,
+              ref_controls: Optional[np.ndarray] = None,
+              w_agency: float = 1.0,
+              agency_only: bool = False):
         """Solve the NLP using CasADi + IPOPT.
 
         Bicycle model in Frenet frame:
@@ -131,6 +134,16 @@ class SecondStagePlanner:
             analyse_duals: If True, extract and log collision constraint
                 dual variables after solving.
             step_label: Simulation step number for log messages.
+            ref_controls: (H, 2) believed controls [a, delta] for
+                agency-preserving intervention.  When provided, an
+                additional cost term ``w_agency * Σ[(a-ref_a)² +
+                (δ-ref_δ)²]`` is added to the objective.
+            w_agency: Weight on the agency-preserving term.  Only used
+                when *ref_controls* is not None.
+            agency_only: If True, the cost function contains *only* the
+                agency term (deviation from *ref_controls*).  All tracking
+                and control regularisation terms are omitted.  Requires
+                *ref_controls* to be provided.
 
         Returns:
             (nlp_states, nlp_controls, success, debug_info) --
@@ -168,16 +181,24 @@ class SecondStagePlanner:
 
             # --- Cost function ---
             cost = 0.0
-            for k in range(H + 1):
-                # Reference s: where vehicle would be at timestep k driving at target speed
-                ref_s = min(s0 + v_goal * k * dt, s_max)
-                cost += w_s * (S[0, k] - ref_s)**2
-                cost += w_d * S[1, k]**2
-                cost += w_phi * S[2, k]**2
-                cost += w_v * (S[3, k] - v_goal)**2
-            for k in range(H):
-                cost += w_a * U[0, k]**2
-                cost += w_delta * U[1, k]**2
+            if not agency_only:
+                for k in range(H + 1):
+                    # Reference s: where vehicle would be at timestep k driving at target speed
+                    ref_s = min(s0 + v_goal * k * dt, s_max)
+                    cost += w_s * (S[0, k] - ref_s)**2
+                    cost += w_d * S[1, k]**2
+                    cost += w_phi * S[2, k]**2
+                    cost += w_v * (S[3, k] - v_goal)**2
+                for k in range(H):
+                    cost += w_a * U[0, k]**2
+                    cost += w_delta * U[1, k]**2
+
+            # Agency-preserving term: penalise deviation from believed controls
+            if ref_controls is not None:
+                for k in range(H):
+                    cost += w_agency * (U[0, k] - ref_controls[k, 0])**2
+                    cost += w_agency * (U[1, k] - ref_controls[k, 1])**2
+
             opti.minimize(cost)
 
             # --- Initial state constraint ---

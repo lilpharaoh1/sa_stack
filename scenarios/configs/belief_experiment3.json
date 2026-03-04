@@ -34,7 +34,7 @@
       "count": [1, 2],
       "spawn": {
         "box": {
-          "center": [45, -2.5],
+          "center": [35, -2.5],
           "length": 20.0,
           "width": 3.5,
           "heading": 0.0

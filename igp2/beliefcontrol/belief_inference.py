@@ -18,7 +18,6 @@ from igp2.core.agentstate import AgentState
 from igp2.beliefcontrol.frenet import FrenetFrame
 from igp2.beliefcontrol.first_stage import FirstStagePlanner
 from igp2.beliefcontrol.second_stage import SecondStagePlanner
-from igp2.beliefcontrol.secondstage_intervention import SecondStageIntervention
 from igp2.beliefcontrol.plotting import InferencePlotter, InterventionPlotter
 from igp2.beliefcontrol.planning_utils import (
     milp_to_nlp_warmstart as _milp_to_nlp_warmstart,
@@ -146,25 +145,9 @@ class BeliefInference:
             n_obs_max=policy.first_stage._n_obs_max,
         )
 
-        # Minimum-intervention optimizer (same params as second stage)
-        # policy_only bypasses the intervention NLP entirely (uses MILP→NLP)
+        # Intervention configuration
         self._intervention_type = intervention_type
-        self._intervention = None
-        if intervention_type not in ('none', 'policy_only'):
-            self._intervention = SecondStageIntervention(
-                horizon=self._horizon,
-                dt=self._dt,
-                ego_length=self._ego_length,
-                ego_width=self._ego_width,
-                wheelbase=self._wheelbase,
-                collision_margin=self._collision_margin,
-                frenet=self._frenet,
-                params=policy.nlp_params,
-                n_obs_max=policy.first_stage._n_obs_max,
-                target_speed=self._target_speed,
-                mode=intervention_type,
-                w_agency=w_agency,
-            )
+        self._w_agency = w_agency
 
         # History buffer
         self._history: List[HistoryEntry] = []
@@ -820,46 +803,76 @@ class BeliefInference:
             logger.info("  Intervention (policy_only): reused true policy result")
             return
 
-        # --- All other modes: believed trajectory + intervention NLP ---
+        # --- agency_only / combined: full MILP → NLP with true obstacles ---
 
-        # Build believed obstacles (only visible agents)
+        # 3. Plan believed trajectory (reference for agency term)
         visible_aids = {aid for aid, vis in believed_config.items() if vis}
         believed_obstacles = self._predict_obstacles_cv(
             other_agent_states, visible_aids)
 
-        # 3. Two-stage plan for believed trajectory from current state
         self._first_stage.reset()
         milp_states = self._first_stage.solve(
             frenet_state, road_left, road_right, believed_obstacles)
 
-        if milp_states is None:
-            logger.info("  Believed config: {%s} -- MILP failed, skipping intervention", cfg_str)
+        ref_controls = None
+        nlp_states = None
+
+        if milp_states is not None:
+            warm_states, warm_controls = self._milp_to_nlp_warmstart(
+                milp_states, frenet_state)
+
+            self._second_stage.reset()
+            nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
+                frenet_state, warm_states, warm_controls,
+                road_left, road_right, believed_obstacles)
+
+            if not nlp_ok:
+                nlp_states = warm_states
+                nlp_controls = warm_controls
+
+            ref_controls = nlp_controls
+        else:
+            logger.info("  Believed config: {%s} -- believed MILP failed, "
+                        "falling back to pure tracking", cfg_str)
+
+        # 4. Full MILP → NLP with true obstacles + agency term
+        self._first_stage.reset()
+        true_milp_states = self._first_stage.solve(
+            frenet_state, road_left, road_right, true_obstacles)
+
+        if true_milp_states is None:
+            logger.info("  Believed config: {%s} -- true MILP failed, skipping intervention", cfg_str)
             self._last_intervention = None
             return
 
-        warm_states, warm_controls = self._milp_to_nlp_warmstart(
-            milp_states, frenet_state)
+        true_warm_states, true_warm_controls = self._milp_to_nlp_warmstart(
+            true_milp_states, frenet_state)
 
         self._second_stage.reset()
-        nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
-            frenet_state, warm_states, warm_controls,
-            road_left, road_right, believed_obstacles)
+        opt_states, opt_controls, success, _ = self._second_stage.solve(
+            frenet_state, true_warm_states, true_warm_controls,
+            road_left, road_right, true_obstacles,
+            ref_controls=ref_controls,
+            w_agency=self._w_agency,
+            agency_only=(self._intervention_type == 'agency_only'))
 
-        if not nlp_ok:
-            # Fall back to MILP warmstart as reference
-            nlp_states = warm_states
-            nlp_controls = warm_controls
-
-        # 5. Solve intervention NLP from current state
-        opt_states, opt_controls, success, intervention = self._intervention.solve(
-            frenet_state, nlp_states, nlp_controls,
-            road_left, road_right, true_obstacles)
+        if not success:
+            intervention = np.zeros_like(true_warm_controls)
+            opt_states = true_warm_states
+            opt_controls = true_warm_controls
+            ref_controls = ref_controls if ref_controls is not None else true_warm_controls
+            nlp_states = nlp_states if nlp_states is not None else true_warm_states
+        else:
+            if ref_controls is None:
+                ref_controls = opt_controls
+                nlp_states = opt_states
+            intervention = opt_controls - ref_controls
 
         # 6. Store results
         self._last_intervention = {
             'believed_config': believed_config,
             'ref_states': nlp_states,
-            'ref_controls': nlp_controls,
+            'ref_controls': ref_controls,
             'opt_states': opt_states,
             'opt_controls': opt_controls,
             'intervention': intervention,
@@ -871,7 +884,7 @@ class BeliefInference:
         if self._intervention_plotter is not None and ego_position is not None:
             self._intervention_plotter.update(
                 ref_states=nlp_states,
-                ref_controls=nlp_controls,
+                ref_controls=ref_controls,
                 opt_states=opt_states,
                 opt_controls=opt_controls,
                 intervention=intervention,

@@ -72,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-plot", action="store_true",
                         help="Disable the BeliefAgent plotter")
     parser.add_argument("--intervention-type", type=str, default="none",
-                        choices=["none", "agency_only", "combined", "warmstart_only", "policy_only"],
+                        choices=["none", "agency_only", "combined", "policy_only"],
                         help="Intervention scheme for the ego agent (default: none)")
     parser.add_argument("--inference-type", type=str, default="naive",
                         choices=["naive"],
@@ -197,7 +197,21 @@ def run_single_experiment(config: dict,
                 print(f"{'='*60}\n")
                 break
 
-            # Stop if true policy optimisation failed
+            # Stop if true policy MILP failed
+            if record.true_diag_milp_ok is not None and not record.true_diag_milp_ok:
+                result.failed = True
+                result.failure_step = t
+                result.wall_time_seconds = time.time() - t0
+                result.failure_reason = "MILP infeasible"
+
+                print(f"\n{'='*60}")
+                print(f"  TRUE POLICY MILP FAILED at step {t}")
+                print(f"  Ego position: {record.ego_position}")
+                print(f"  Wall time: {result.wall_time_seconds:.1f}s")
+                print(f"{'='*60}\n")
+                break
+
+            # Stop if true policy NLP failed
             if record.true_diag_nlp_ok is not None and not record.true_diag_nlp_ok:
                 result.failed = True
                 result.failure_step = t
@@ -222,7 +236,7 @@ def run_single_experiment(config: dict,
                 result.failure_reason = "; ".join(reasons) if reasons else "NLP infeasible (unknown cause)"
 
                 print(f"\n{'='*60}")
-                print(f"  TRUE POLICY FAILED at step {t}")
+                print(f"  TRUE POLICY NLP FAILED at step {t}")
                 print(f"  Reason: {result.failure_reason}")
                 print(f"  Ego position: {record.ego_position}")
                 print(f"  Wall time: {result.wall_time_seconds:.1f}s")

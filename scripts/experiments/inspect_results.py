@@ -88,6 +88,15 @@ def print_episode(result: ExperimentResult, idx: int = None, show_steps: bool = 
         print(f"      mean={arr.mean():.3f}m  std={arr.std():.3f}m  "
               f"min={arr.min():.3f}m  max={arr.max():.3f}m")
 
+    # MILP convergence
+    milp_flags = [s.true_diag_milp_ok for s in result.steps
+                  if s.true_diag_milp_ok is not None]
+    if milp_flags:
+        n_ok = sum(milp_flags)
+        if n_ok < len(milp_flags):
+            print(f"    MILP convergence: {n_ok}/{len(milp_flags)} "
+                  f"({100*n_ok/len(milp_flags):.1f}%)")
+
     # NLP convergence
     nlp_flags = [s.true_diag_nlp_ok for s in result.steps
                  if s.true_diag_nlp_ok is not None]
@@ -245,6 +254,18 @@ def inspect_batch(data: dict, show_steps: bool = False):
         print(f"    mean={arr.mean():.3f}m  std={arr.std():.3f}m  "
               f"min={arr.min():.3f}m  max={arr.max():.3f}m")
         print()
+
+    # Aggregate MILP convergence
+    all_milp = []
+    for r in results:
+        for s in r.steps:
+            if s.true_diag_milp_ok is not None:
+                all_milp.append(s.true_diag_milp_ok)
+    if all_milp:
+        n_ok = sum(all_milp)
+        if n_ok < len(all_milp):
+            print(f"  MILP convergence: {n_ok}/{len(all_milp)} "
+                  f"({100*n_ok/len(all_milp):.1f}%)")
 
     # Aggregate NLP convergence
     all_nlp = []

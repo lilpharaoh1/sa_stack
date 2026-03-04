@@ -183,6 +183,7 @@ class TwoStagePolicy:
         self._prev_nlp_controls: Optional[np.ndarray] = None
         self._last_rollout: Optional[np.ndarray] = None
         self._last_milp_rollout: Optional[np.ndarray] = None
+        self._last_frenet_state: Optional[np.ndarray] = None
         self._ref_start_idx: int = 0
         self._step_count: int = 0
 
@@ -236,6 +237,7 @@ class TwoStagePolicy:
         self._advance_reference_window(state.position)
 
         frenet_state = self._state_to_frenet(state)
+        self._last_frenet_state = frenet_state.copy()
 
         s_values = np.array([frenet_state[0] + frenet_state[3] *
                              np.cos(frenet_state[2]) * k * dt
@@ -256,7 +258,25 @@ class TwoStagePolicy:
         t_milp = time.time() - t_milp_start
 
         if milp_states is None:
-            logger.warning("[Step %4d] MILP: FAILED (%.1fms)", self._step_count, t_milp*1000)
+            tag = f" ({self.label})" if self.label else ""
+            logger.warning("[Step %4d]%s MILP: FAILED (%.1fms)",
+                           self._step_count, tag, t_milp*1000)
+            self._last_diagnostics = {
+                'step': self._step_count,
+                'milp_ok': False,
+                'nlp_ok': False,
+                'nlp_status': 'SKIPPED',
+                't_milp': t_milp,
+                't_nlp': 0.0,
+                'velocity_violated': False,
+                'acceleration_violated': False,
+                'steering_violated': False,
+                'jerk_violated': False,
+                'steer_rate_violated': False,
+                'road_boundary_violations': [],
+                'collision_violations': [],
+                'any_violated': True,
+            }
             action = Action(acceleration=0.0, steer_angle=0.0,
                             target_speed=self._target_speed)
             return action, [np.array([state.position])], 0
@@ -339,6 +359,11 @@ class TwoStagePolicy:
     @property
     def last_milp_rollout(self) -> Optional[np.ndarray]:
         return self._last_milp_rollout
+
+    @property
+    def last_frenet_state(self) -> Optional[np.ndarray]:
+        """[s, d, phi, v] Frenet state from the most recent step."""
+        return self._last_frenet_state
 
     @property
     def last_obstacles(self) -> Optional[List]:
@@ -424,6 +449,7 @@ class TwoStagePolicy:
         self._prev_nlp_controls = None
         self._last_rollout = None
         self._last_milp_rollout = None
+        self._last_frenet_state = None
         self._last_diagnostics = None
         self._last_dual_analysis = None
         self._ref_start_idx = 0
