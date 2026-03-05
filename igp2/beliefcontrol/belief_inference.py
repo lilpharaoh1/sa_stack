@@ -255,6 +255,10 @@ class BeliefInference:
         results: List[InferenceResult] = []
         t_elapsed = 0.0
 
+        if not relevant_aids:
+            # No dynamic agents relevant — clear any stale intervention
+            self._last_intervention = None
+
         if relevant_aids:
             if self._inference_type == 'naive':
                 results, marginals, t_elapsed = self._run_naive_inference(
@@ -836,6 +840,20 @@ class BeliefInference:
                         "falling back to pure tracking", cfg_str)
 
         # 4. Full MILP → NLP with true obstacles + agency term
+        logger.info("  INTERVENTION DEBUG: type=%s, n_true_obs=%d, "
+                     "ref_controls=%s, w_agency=%.2f, frenet=[s=%.2f d=%.2f phi=%.3f v=%.2f]",
+                     self._intervention_type, len(true_obstacles),
+                     "provided" if ref_controls is not None else "None",
+                     self._w_agency,
+                     frenet_state[0], frenet_state[1],
+                     frenet_state[2], frenet_state[3])
+        if ref_controls is not None:
+            logger.info("  INTERVENTION DEBUG: ref_controls[0]=[a=%.4f, δ=%.4f], "
+                         "max|ref_a|=%.4f, max|ref_δ|=%.4f",
+                         ref_controls[0, 0], ref_controls[0, 1],
+                         np.max(np.abs(ref_controls[:, 0])),
+                         np.max(np.abs(ref_controls[:, 1])))
+
         self._first_stage.reset()
         true_milp_states = self._first_stage.solve(
             frenet_state, road_left, road_right, true_obstacles)
@@ -845,8 +863,18 @@ class BeliefInference:
             self._last_intervention = None
             return
 
+        logger.info("  INTERVENTION DEBUG: true MILP OK, "
+                     "milp d range=[%.3f, %.3f]",
+                     float(np.min(true_milp_states[:, 1])),
+                     float(np.max(true_milp_states[:, 1])))
+
         true_warm_states, true_warm_controls = self._milp_to_nlp_warmstart(
             true_milp_states, frenet_state)
+
+        logger.info("  INTERVENTION DEBUG: warm_controls[0]=[a=%.4f, δ=%.4f], "
+                     "max|warm_δ|=%.4f",
+                     true_warm_controls[0, 0], true_warm_controls[0, 1],
+                     np.max(np.abs(true_warm_controls[:, 1])))
 
         self._second_stage.reset()
         opt_states, opt_controls, success, _ = self._second_stage.solve(
@@ -855,6 +883,17 @@ class BeliefInference:
             ref_controls=ref_controls,
             w_agency=self._w_agency,
             agency_only=(self._intervention_type == 'agency_only'))
+
+        logger.info("  INTERVENTION DEBUG: NLP success=%s", success)
+        if success:
+            logger.info("  INTERVENTION DEBUG: opt_controls[0]=[a=%.4f, δ=%.4f], "
+                         "max|opt_a|=%.4f, max|opt_δ|=%.4f, "
+                         "opt d range=[%.3f, %.3f]",
+                         opt_controls[0, 0], opt_controls[0, 1],
+                         np.max(np.abs(opt_controls[:, 0])),
+                         np.max(np.abs(opt_controls[:, 1])),
+                         float(np.min(opt_states[:, 1])),
+                         float(np.max(opt_states[:, 1])))
 
         if not success:
             intervention = np.zeros_like(true_warm_controls)

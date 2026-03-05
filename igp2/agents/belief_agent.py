@@ -742,11 +742,30 @@ class BeliefAgent(Agent):
                     interv = self._belief_inference.last_intervention
                     if interv is not None and interv['success']:
                         opt_controls = interv['opt_controls']
+                        old_action = action
                         action = Action(
                             acceleration=float(opt_controls[0, 0]),
                             steer_angle=float(opt_controls[0, 1]),
                             target_speed=self._human_policy.target_speed,
                         )
+                        logger.info(
+                            "[Step %4d] INTERVENTION OVERRIDE: "
+                            "human=[a=%.4f, δ=%.4f] → interv=[a=%.4f, δ=%.4f]  "
+                            "Δa=%.4f  Δδ=%.4f",
+                            self._step_count,
+                            old_action.acceleration, old_action.steer_angle,
+                            action.acceleration, action.steer_angle,
+                            action.acceleration - old_action.acceleration,
+                            action.steer_angle - old_action.steer_angle,
+                        )
+                    elif interv is not None:
+                        logger.info(
+                            "[Step %4d] INTERVENTION SKIPPED: success=%s",
+                            self._step_count, interv['success'])
+                    else:
+                        logger.info(
+                            "[Step %4d] NO INTERVENTION (last_intervention is None)",
+                            self._step_count)
 
         # Merge policy/plot timings set by policy()
         timing.update(self.last_step_timing)
