@@ -1,10 +1,11 @@
 """
-Minimal belief-conditioned agent.
+Belief-conditioned planning agent.
 
-Extends Agent directly with:
-- A beliefs dict for storing assumptions about other agents
-- An update_beliefs() hook called each timestep
-- A policy() hook that delegates to a configurable control policy
+Extends Agent with:
+- A latent belief state (BeliefState) over other agents
+- Dual human/true policy execution (belief-filtered vs ground-truth)
+- Belief inference via inverse planning (Boltzmann posteriors)
+- Intervention override when hidden agents are detected
 - A reference path to the goal computed via A* open-loop maneuvers
 - Internal trajectory prediction for other agents (bicycle model forward sim)
 """
@@ -285,10 +286,10 @@ class BeliefAgent(Agent):
     to the goal (same as TrafficAgent) and stores it as a list of
     (Lane, waypoints) tuples.
 
-    The simulation loop calls next_action() each step, which:
-      1. Calls update_beliefs(observation) to revise beliefs
-      2. Calls policy(observation) to produce an action via the
-         configured control policy.
+    Each step, ``next_action()`` runs:
+      1. Predicts other agent trajectories (belief-filtered + ground-truth)
+      2. Runs human (belief) and true (ground-truth) policies
+      3. Runs belief inference, updates beliefs, applies intervention if needed
 
     The control policy is selected via ``policy_type``:
 
@@ -344,8 +345,10 @@ class BeliefAgent(Agent):
         self._human_agent_trajectories: Dict[int, np.ndarray] = {}
         self._true_agent_trajectories: Dict[int, np.ndarray] = {}
 
-        # Unified latent belief state (populated in set_agents, seeded from config)
+        # Human's beliefs (static, from config — drives human policy)
         self._belief: BeliefState = BeliefState()
+        # Robot's estimate of the human's beliefs (updated by inference)
+        self._inferred_belief: BeliefState = BeliefState()
         self._agent_beliefs_config = agent_beliefs or {}  # raw config to apply in set_agents
         logger.info("BeliefAgent %d: agent_beliefs config = %s",
                      agent_id, agent_beliefs)
@@ -471,12 +474,17 @@ class BeliefAgent(Agent):
 
     @property
     def belief(self) -> BeliefState:
-        """Unified latent belief state about all traffic agents."""
+        """Human's beliefs about other agents (static, from config)."""
         return self._belief
 
     @property
+    def inferred_belief(self) -> BeliefState:
+        """Robot's estimate of the human's beliefs (updated by inference)."""
+        return self._inferred_belief
+
+    @property
     def agent_beliefs(self) -> Dict[int, AgentBelief]:
-        """Backwards-compatible view derived from self._belief."""
+        """Backwards-compatible view of human beliefs (static)."""
         return {
             aid: AgentBelief(
                 visible=not state.hidden.mode,
@@ -491,11 +499,11 @@ class BeliefAgent(Agent):
         return self._reference_path
 
     def update_beliefs(self, observation: Observation):
-        """Update belief uncertainties from latest inference results.
+        """Update the robot's estimate of the human's beliefs.
 
-        Propagates marginals from the inference module into the unified
-        belief state so that the mode (hidden/visible decision) reflects
-        the latest posterior.
+        Propagates inference marginals into ``_inferred_belief``.
+        The human's own beliefs (``_belief``) are never modified —
+        they stay fixed from the config.
 
         Args:
             observation: Current observation with frame and scenario_map.
@@ -504,7 +512,7 @@ class BeliefAgent(Agent):
             return
         marginals = self._belief_inference.last_marginals
         for aid, p_hidden in marginals.items():
-            agent_belief = self._belief.get(aid)
+            agent_belief = self._inferred_belief.get(aid)
             if agent_belief is not None:
                 agent_belief.hidden.p = p_hidden
 
@@ -523,8 +531,9 @@ class BeliefAgent(Agent):
         self._other_agents = {aid: a for aid, a in agents.items()
                               if aid != self.agent_id}
 
-        # Build belief state
+        # Build human beliefs (static) and robot's estimate (updated by inference)
         self._belief = BeliefState()
+        self._inferred_belief = BeliefState()
         for aid in self._other_agents:
             cfg = self._agent_beliefs_config.get(aid, {})
             # Also try string key (JSON keys are strings)
@@ -538,6 +547,10 @@ class BeliefAgent(Agent):
                                     _VEL_ERROR_MIN, _VEL_ERROR_MAX))
 
             self._belief.agents[aid] = AgentBeliefState(
+                hidden=BernoulliBeliefVariable(p=hidden_p),
+                velocity_error=GaussianBeliefVariable(mean=vel_err, std=0.5),
+            )
+            self._inferred_belief.agents[aid] = AgentBeliefState(
                 hidden=BernoulliBeliefVariable(p=hidden_p),
                 velocity_error=GaussianBeliefVariable(mean=vel_err, std=0.5),
             )
@@ -559,7 +572,7 @@ class BeliefAgent(Agent):
         """
         dt = 1.0 / self._fps
         # Compute horizon from the policy if available
-        policy = self._human_policy
+        policy = self._human_policy or self._true_policy
         if hasattr(policy, '_horizon') and hasattr(policy, '_dt'):
             horizon_time = policy._horizon * policy._dt + 1.0
         else:
@@ -608,15 +621,13 @@ class BeliefAgent(Agent):
 
         # --- Build agent sets for each policy ---
 
-        # Human: belief-filtered other agents
+        # Human: belief-filtered other agents (skip hidden)
         human_other_agents = {}
-        hidden_agents = []
         for aid, s in observation.frame.items():
             if aid == self.agent_id:
                 continue
             agent_belief = self._belief.get(aid)
             if agent_belief is not None and agent_belief.hidden.mode:
-                hidden_agents.append(aid)
                 continue
             human_other_agents[aid] = s
 
@@ -729,26 +740,28 @@ class BeliefAgent(Agent):
 
     def next_action(self, observation: Observation,
                     prediction: TrajectoryPrediction = None) -> Action:
-        """Compute next action: predict agents, run human + true policies.
+        """Compute next action for this step.
 
-        Both a human (belief-conditioned) and true (ground-truth) optimisation
-        are performed.  The action returned comes from the **human** policy.
-        The true policy results are stored for diagnostics.
+        Flow:
+          1. Predict other agent trajectories (belief-filtered + ground-truth)
+          2. Run human (belief) and true (ground-truth) policies
+          3. Run belief inference, update belief state, apply intervention
+
+        The beliefs used for prediction and policy come from the previous
+        step's inference.  After this step's inference completes, beliefs
+        are updated so the next step sees current posteriors.
 
         Args:
             observation: Current observation.
             prediction: Unused, kept for interface compatibility.
 
         Returns:
-            Belief-conditioned action (from the human policy).
+            Action to execute (human policy, possibly overridden by intervention).
         """
-        if len(self.reference_path) == 0:
-            pass
-
         self._step_count += 1
         timing: Dict[str, float] = {}
 
-        # Predict trajectories for both policies
+        # 1. Predict trajectories for both policies
         if self._other_agents:
             if self._human_enabled:
                 t0 = _time.perf_counter()
@@ -761,97 +774,118 @@ class BeliefAgent(Agent):
                 observation.frame, use_beliefs=False)
             timing['true_predict'] = _time.perf_counter() - t0
 
-        self.update_beliefs(observation)
+        # 2. Run human + true policies
         action = self.policy(observation)
         self._last_human_action = action
 
-        # Run belief inference (after policy so we have the ego's action)
-        if self._belief_inference is not None and self._human_policy is not None:
-            frenet = self._human_policy.frenet_frame
-            if frenet is not None:
-                ego_state = observation.frame.get(self.agent_id)
-                if ego_state is not None:
-                    frenet_state = self._human_policy._state_to_frenet(ego_state)
-                    other_states = {
-                        aid: s for aid, s in observation.frame.items()
-                        if aid != self.agent_id
-                    }
-                    # Pass raw human action (before intervention override)
-                    human_action_tuple = None
-                    if action is not None:
-                        human_action_tuple = (float(action.acceleration),
-                                              float(action.steer_angle))
-                    # Pass the true policy's obstacles so intervention uses
-                    # the same prediction (not CV fallback)
-                    true_obs = self._true_policy.last_obstacles
-                    # Pass the true policy's last NLP result so policy_only
-                    # can reuse it directly instead of re-solving
-                    true_result = None
-                    if (self._true_policy._prev_nlp_states is not None and
-                            self._true_policy._prev_nlp_controls is not None):
-                        true_result = (self._true_policy._prev_nlp_states,
-                                       self._true_policy._prev_nlp_controls)
-                    # Pass the human policy's last NLP result so the
-                    # intervention plotter can show believed vs true
-                    human_result = None
-                    if (self._human_policy._prev_nlp_states is not None and
-                            self._human_policy._prev_nlp_controls is not None):
-                        human_result = (self._human_policy._prev_nlp_states,
-                                        self._human_policy._prev_nlp_controls)
-                    # Extract dual analysis from the true policy for
-                    # dual-based relevance detection
-                    active_agents = None
-                    if isinstance(self._true_policy, TwoStagePolicy):
-                        active_agents = self._true_policy.last_dual_analysis
+        # 3. Run inference, update beliefs, apply intervention
+        action = self._run_inference(observation, action, timing)
 
-                    t0 = _time.perf_counter()
-                    self._belief_inference.step(
-                        frenet_state, other_states, self._step_count,
-                        ego_position=np.array(ego_state.position),
-                        human_action=human_action_tuple,
-                        true_obstacles=true_obs,
-                        true_policy_result=true_result,
-                        human_policy_result=human_result,
-                        active_agents=active_agents)
-                    timing['belief_inference'] = _time.perf_counter() - t0
-
-                    # Propagate inference marginals into belief state
-                    self.update_beliefs(observation)
-
-                    # Override action with intervention if a hidden agent was
-                    # detected and the intervention NLP succeeded.
-                    interv = self._belief_inference.last_intervention
-                    if interv is not None and interv['success']:
-                        opt_controls = interv['opt_controls']
-                        old_action = action
-                        action = Action(
-                            acceleration=float(opt_controls[0, 0]),
-                            steer_angle=float(opt_controls[0, 1]),
-                            target_speed=self._human_policy.target_speed,
-                        )
-                        logger.info(
-                            "[Step %4d] INTERVENTION OVERRIDE: "
-                            "human=[a=%.4f, δ=%.4f] → interv=[a=%.4f, δ=%.4f]  "
-                            "Δa=%.4f  Δδ=%.4f",
-                            self._step_count,
-                            old_action.acceleration, old_action.steer_angle,
-                            action.acceleration, action.steer_angle,
-                            action.acceleration - old_action.acceleration,
-                            action.steer_angle - old_action.steer_angle,
-                        )
-                    elif interv is not None:
-                        logger.info(
-                            "[Step %4d] INTERVENTION SKIPPED: success=%s",
-                            self._step_count, interv['success'])
-                    else:
-                        logger.info(
-                            "[Step %4d] NO INTERVENTION (last_intervention is None)",
-                            self._step_count)
-
-        # Merge policy/plot timings set by policy()
         timing.update(self.last_step_timing)
         self.last_step_timing = timing
         self._last_executed_action = action
+        return action
+
+    def _run_inference(self, observation: Observation, action: Action,
+                       timing: Dict[str, float]) -> Action:
+        """Run belief inference and apply intervention if needed.
+
+        Called after policy() so the human action is available for the
+        inference history buffer.  Updates ``self._inferred_belief``
+        (the robot's estimate) and overrides the action if intervention
+        succeeds.  The human's beliefs (``self._belief``) are untouched.
+
+        Args:
+            observation: Current observation.
+            action: Human policy action (pre-intervention).
+            timing: Timing dict, updated in place.
+
+        Returns:
+            Action to execute (original or intervention override).
+        """
+        if self._belief_inference is None or self._human_policy is None:
+            return action
+
+        frenet = self._human_policy.frenet_frame
+        if frenet is None:
+            return action
+
+        ego_state = observation.frame.get(self.agent_id)
+        if ego_state is None:
+            return action
+
+        frenet_state = self._human_policy._state_to_frenet(ego_state)
+        other_states = {
+            aid: s for aid, s in observation.frame.items()
+            if aid != self.agent_id
+        }
+
+        # Collect policy results for inference
+        human_action_tuple = None
+        if action is not None:
+            human_action_tuple = (float(action.acceleration),
+                                  float(action.steer_angle))
+
+        true_result = None
+        if (self._true_policy._prev_nlp_states is not None and
+                self._true_policy._prev_nlp_controls is not None):
+            true_result = (self._true_policy._prev_nlp_states,
+                           self._true_policy._prev_nlp_controls)
+
+        human_result = None
+        if (self._human_policy._prev_nlp_states is not None and
+                self._human_policy._prev_nlp_controls is not None):
+            human_result = (self._human_policy._prev_nlp_states,
+                            self._human_policy._prev_nlp_controls)
+
+        active_agents = None
+        if isinstance(self._true_policy, TwoStagePolicy):
+            active_agents = self._true_policy.last_dual_analysis
+
+        # Run inference step
+        t0 = _time.perf_counter()
+        self._belief_inference.step(
+            frenet_state, other_states, self._step_count,
+            ego_position=np.array(ego_state.position),
+            human_action=human_action_tuple,
+            true_obstacles=self._true_policy.last_obstacles,
+            true_policy_result=true_result,
+            human_policy_result=human_result,
+            active_agents=active_agents)
+        timing['belief_inference'] = _time.perf_counter() - t0
+
+        # Propagate inference marginals into belief state
+        self.update_beliefs(observation)
+
+        # Apply intervention override
+        interv = self._belief_inference.last_intervention
+        if interv is not None and interv['success']:
+            opt_controls = interv['opt_controls']
+            old_action = action
+            action = Action(
+                acceleration=float(opt_controls[0, 0]),
+                steer_angle=float(opt_controls[0, 1]),
+                target_speed=self._human_policy.target_speed,
+            )
+            logger.info(
+                "[Step %4d] INTERVENTION OVERRIDE: "
+                "human=[a=%.4f, δ=%.4f] → interv=[a=%.4f, δ=%.4f]  "
+                "Δa=%.4f  Δδ=%.4f",
+                self._step_count,
+                old_action.acceleration, old_action.steer_angle,
+                action.acceleration, action.steer_angle,
+                action.acceleration - old_action.acceleration,
+                action.steer_angle - old_action.steer_angle,
+            )
+        elif interv is not None:
+            logger.info(
+                "[Step %4d] INTERVENTION SKIPPED: success=%s",
+                self._step_count, interv['success'])
+        else:
+            logger.info(
+                "[Step %4d] NO INTERVENTION (last_intervention is None)",
+                self._step_count)
+
         return action
 
     def reset(self):
@@ -859,6 +893,7 @@ class BeliefAgent(Agent):
         super().reset()
         self._vehicle = KinematicVehicle(self._initial_state, self.metadata, self._fps)
         self._belief = BeliefState()
+        self._inferred_belief = BeliefState()
         self._human_agent_trajectories = {}
         self._true_agent_trajectories = {}
         self._step_count = 0
