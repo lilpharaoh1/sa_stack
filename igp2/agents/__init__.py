@@ -6,5 +6,9 @@ from .traffic_agent import TrafficAgent
 from .keyboard_agent import KeyboardAgent
 from .shared_autonomy_agent import SharedAutonomyAgent
 from .mcts_agent import MCTSAgent
-from .belief_agent import BeliefAgent, AgentBelief
+from .belief_agent import (
+    BeliefAgent, AgentBelief,
+    BernoulliBeliefVariable, GaussianBeliefVariable,
+    AgentBeliefState, BeliefState,
+)
 

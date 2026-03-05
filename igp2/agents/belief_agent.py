@@ -11,7 +11,7 @@ Extends Agent directly with:
 
 import logging
 import time as _time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
@@ -53,6 +53,55 @@ class AgentBelief:
     def __post_init__(self):
         self.velocity_error = float(np.clip(
             self.velocity_error, _VEL_ERROR_MIN, _VEL_ERROR_MAX))
+
+
+@dataclass
+class BernoulliBeliefVariable:
+    """Binary latent variable with Bernoulli uncertainty.
+
+    Attributes:
+        p: P(variable = True). E.g., for 'hidden', p = P(hidden).
+        threshold: Decision boundary for deriving the mode.
+    """
+    p: float = 0.0
+    threshold: float = 0.5
+
+    @property
+    def mode(self) -> bool:
+        """Most likely value: True if p >= threshold."""
+        return self.p >= self.threshold
+
+
+@dataclass
+class GaussianBeliefVariable:
+    """Continuous latent variable with Gaussian uncertainty.
+
+    Attributes:
+        mean: Current estimate (MAP = mean for Gaussian).
+        std: Standard deviation of the estimate.
+    """
+    mean: float = 0.0
+    std: float = 1.0
+
+    @property
+    def mode(self) -> float:
+        return self.mean
+
+
+@dataclass
+class AgentBeliefState:
+    """Full belief state the ego holds about one traffic agent."""
+    hidden: BernoulliBeliefVariable
+    velocity_error: GaussianBeliefVariable
+
+
+@dataclass
+class BeliefState:
+    """Ego agent's latent belief about all traffic agents in the scene."""
+    agents: Dict[int, AgentBeliefState] = field(default_factory=dict)
+
+    def get(self, agent_id: int) -> Optional[AgentBeliefState]:
+        return self.agents.get(agent_id)
 
 
 # ---------------------------------------------------------------------------
@@ -295,8 +344,8 @@ class BeliefAgent(Agent):
         self._human_agent_trajectories: Dict[int, np.ndarray] = {}
         self._true_agent_trajectories: Dict[int, np.ndarray] = {}
 
-        # Per-agent belief profiles (populated in set_agents, seeded from config)
-        self._agent_beliefs: Dict[int, AgentBelief] = {}
+        # Unified latent belief state (populated in set_agents, seeded from config)
+        self._belief: BeliefState = BeliefState()
         self._agent_beliefs_config = agent_beliefs or {}  # raw config to apply in set_agents
         logger.info("BeliefAgent %d: agent_beliefs config = %s",
                      agent_id, agent_beliefs)
@@ -421,9 +470,20 @@ class BeliefAgent(Agent):
         return f"BeliefAgent(ID={self.agent_id}, policy={self._policy_type})"
 
     @property
+    def belief(self) -> BeliefState:
+        """Unified latent belief state about all traffic agents."""
+        return self._belief
+
+    @property
     def agent_beliefs(self) -> Dict[int, AgentBelief]:
-        """Per-agent belief profiles."""
-        return self._agent_beliefs
+        """Backwards-compatible view derived from self._belief."""
+        return {
+            aid: AgentBelief(
+                visible=not state.hidden.mode,
+                velocity_error=state.velocity_error.mode,
+            )
+            for aid, state in self._belief.agents.items()
+        }
 
     @property
     def reference_path(self) -> List[Tuple[Lane, np.ndarray]]:
@@ -431,14 +491,22 @@ class BeliefAgent(Agent):
         return self._reference_path
 
     def update_beliefs(self, observation: Observation):
-        """Update beliefs from the current observation.
+        """Update belief uncertainties from latest inference results.
 
-        Override this to implement belief tracking logic.
+        Propagates marginals from the inference module into the unified
+        belief state so that the mode (hidden/visible decision) reflects
+        the latest posterior.
 
         Args:
             observation: Current observation with frame and scenario_map.
         """
-        pass
+        if self._belief_inference is None:
+            return
+        marginals = self._belief_inference.last_marginals
+        for aid, p_hidden in marginals.items():
+            agent_belief = self._belief.get(aid)
+            if agent_belief is not None:
+                agent_belief.hidden.p = p_hidden
 
     def set_agents(self, agents: Dict[int, Any]):
         """Register the other agents in the scene and build belief profiles.
@@ -455,14 +523,24 @@ class BeliefAgent(Agent):
         self._other_agents = {aid: a for aid, a in agents.items()
                               if aid != self.agent_id}
 
-        # Build belief profiles
-        self._agent_beliefs = {}
+        # Build belief state
+        self._belief = BeliefState()
         for aid in self._other_agents:
             cfg = self._agent_beliefs_config.get(aid, {})
             # Also try string key (JSON keys are strings)
             if not cfg:
                 cfg = self._agent_beliefs_config.get(str(aid), {})
-            self._agent_beliefs[aid] = AgentBelief(**cfg)
+
+            visible = cfg.get('visible', True)
+            hidden_p = 0.0 if visible else 1.0
+
+            vel_err = float(np.clip(cfg.get('velocity_error', 0.0),
+                                    _VEL_ERROR_MIN, _VEL_ERROR_MAX))
+
+            self._belief.agents[aid] = AgentBeliefState(
+                hidden=BernoulliBeliefVariable(p=hidden_p),
+                velocity_error=GaussianBeliefVariable(mean=vel_err, std=0.5),
+            )
 
     def _predict_agent_trajectories(self, frame: Dict[int, AgentState],
                                      use_beliefs: bool = True) -> Dict[int, np.ndarray]:
@@ -493,10 +571,10 @@ class BeliefAgent(Agent):
             if not getattr(agent, 'alive', True):
                 continue
             if use_beliefs:
-                belief = self._agent_beliefs.get(aid)
-                if belief is not None and not belief.visible:
+                agent_belief = self._belief.get(aid)
+                if agent_belief is not None and agent_belief.hidden.mode:
                     continue
-                vel_err = belief.velocity_error if belief is not None else 0.0
+                vel_err = agent_belief.velocity_error.mode if agent_belief is not None else 0.0
             else:
                 vel_err = 0.0
             traj = _simulate_agent_trajectory(agent, frame, n_steps, dt,
@@ -536,8 +614,8 @@ class BeliefAgent(Agent):
         for aid, s in observation.frame.items():
             if aid == self.agent_id:
                 continue
-            belief = self._agent_beliefs.get(aid)
-            if belief is not None and not belief.visible:
+            agent_belief = self._belief.get(aid)
+            if agent_belief is not None and agent_belief.hidden.mode:
                 hidden_agents.append(aid)
                 continue
             human_other_agents[aid] = s
@@ -635,7 +713,7 @@ class BeliefAgent(Agent):
                 true_rollout=true_rollout,
                 true_milp_trajectory=true_milp,
                 all_other_agents=true_other_agents,
-                agent_beliefs=self._agent_beliefs,
+                agent_beliefs=self.agent_beliefs,
                 true_obstacles=true_obstacles,
                 true_frenet=true_frenet,
             )
@@ -737,6 +815,9 @@ class BeliefAgent(Agent):
                         active_agents=active_agents)
                     timing['belief_inference'] = _time.perf_counter() - t0
 
+                    # Propagate inference marginals into belief state
+                    self.update_beliefs(observation)
+
                     # Override action with intervention if a hidden agent was
                     # detected and the intervention NLP succeeded.
                     interv = self._belief_inference.last_intervention
@@ -777,7 +858,7 @@ class BeliefAgent(Agent):
         """Reset agent to initialisation defaults."""
         super().reset()
         self._vehicle = KinematicVehicle(self._initial_state, self.metadata, self._fps)
-        self._agent_beliefs = {}
+        self._belief = BeliefState()
         self._human_agent_trajectories = {}
         self._true_agent_trajectories = {}
         self._step_count = 0

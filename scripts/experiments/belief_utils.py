@@ -363,7 +363,7 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
     intervention_success = None
 
     belief_inference = getattr(ego_agent, '_belief_inference', None)
-    agent_beliefs = getattr(ego_agent, '_agent_beliefs', {})
+    agent_beliefs = getattr(ego_agent, 'agent_beliefs', {})
 
     # Ground-truth visibility from configured beliefs
     if agent_beliefs:
