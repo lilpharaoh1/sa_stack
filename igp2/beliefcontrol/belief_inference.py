@@ -625,20 +625,19 @@ class BeliefInference:
                     step_count, len(relevant_aids), aids_str,
                     n_configs, window_steps, elapsed)
 
-        # Boltzmann rational-action model for belief inference:
+        # Recursive Bayesian belief update at the config level:
         #
         # b     = full belief config (e.g. {1:V, 2:H})
         # τ_obs = observed driver trajectory
         # τ*(b) = optimal trajectory under belief b (from two-stage planner)
         #
-        # Energy:    E(b) = cost(τ_obs, τ*(b))
-        #                  = pos_error + w_vel * vel_error
-        # Likelihood (Boltzmann): P(τ_obs | b) ∝ exp(-β · E(b))
-        # Posterior (uniform prior): P(b | τ_obs) = P(τ_obs | b) / Z
-        #   where Z = Σ_b exp(-β · E(b))   (partition function)
+        # Energy:      E(b) = cost(τ_obs, τ*(b))
+        # Likelihood:  L(b) = exp(-β · E(b)) / Z_L       (Boltzmann)
+        # Prior:       π_{t-1}(b) = previous step's posterior
+        #              (initialised uniform: 1/2^N)
+        # Posterior:   P_t(b) ∝ L(b) · π_{t-1}(b)
         #
-        # Marginal posterior that agent i is hidden:
-        #   P(h_i | τ_obs) = Σ_{b : i hidden in b} P(b | τ_obs)
+        # Marginal:    P(h_i | τ_{0:t}) = Σ_{b : i hidden} P_t(b)
         #
         # β (inverse temperature) controls rationality: β→∞ assumes perfectly
         # rational driver, β→0 gives uniform distribution over beliefs.
@@ -651,15 +650,27 @@ class BeliefInference:
             else 1e10
             for r in results
         ])
-        log_probs = -beta * energies
-        log_probs -= np.max(log_probs)  # numerical stability (shift by log Z')
-        boltzmann_probs = np.exp(log_probs)
-        Z = np.sum(boltzmann_probs)
-        boltzmann_probs = boltzmann_probs / Z if Z > 0 else np.zeros(len(results))
+        log_likelihoods = -beta * energies
+        log_likelihoods -= np.max(log_likelihoods)  # numerical stability
+        likelihoods = np.exp(log_likelihoods)
+        Z_L = np.sum(likelihoods)
+        likelihoods = likelihoods / Z_L if Z_L > 0 else np.zeros(len(results))
 
-        # Store for external access
+        # Prior: use previous step's posterior, or uniform if first step / reset
+        n = len(results)
+        if len(self._last_config_probs) == n:
+            prior = np.array(self._last_config_probs)
+        else:
+            prior = np.ones(n) / n
+
+        # Posterior: P_t(b) ∝ L(b) · π_{t-1}(b)
+        posterior = likelihoods * prior
+        Z_post = np.sum(posterior)
+        posterior = posterior / Z_post if Z_post > 0 else np.ones(n) / n
+
+        # Store for external access and next step's prior
         self._last_energies = energies.tolist()
-        self._last_config_probs = boltzmann_probs.tolist()
+        self._last_config_probs = posterior.tolist()
 
         best_energy = np.min(energies) if len(energies) > 0 else float('inf')
         for i, r in enumerate(results):
@@ -674,20 +685,20 @@ class BeliefInference:
             else:
                 status = "OK"
             marker = "  <-- best" if energies[i] == best_energy and r.milp_ok else ""
-            logger.info("  {%s}: E=%.4f (pos=%.4f vel=%.4f)  P(b|tau)=%.3f  [%s]%s",
-                        cfg_str, energies[i], r.pos_cost, r.vel_cost,
-                        boltzmann_probs[i], status, marker)
+            logger.info("  {%s}: E=%.4f  L=%.3f  prior=%.3f  P_t=%.3f  [%s]%s",
+                        cfg_str, energies[i], likelihoods[i], prior[i],
+                        posterior[i], status, marker)
 
-        # Marginal posterior: P(h_i | τ_obs) = Σ_{b : i hidden in b} P(b | τ_obs)
+        # Marginal posterior: P(h_i) = Σ_{b : i hidden in b} P_t(b)
         marginals = {}
-        if results and len(boltzmann_probs) > 0:
+        if results and len(posterior) > 0:
             for i, r in enumerate(results):
                 for aid, vis in r.config.items():
                     if aid not in marginals:
                         marginals[aid] = 0.0
                     if not vis:
-                        marginals[aid] += boltzmann_probs[i]
-            logger.info("  P(h_i|tau): %s", ", ".join(
+                        marginals[aid] += posterior[i]
+            logger.info("  P(h_i|tau_0:t): %s", ", ".join(
                 f"{aid}={marginals[aid]:.3f}" for aid in sorted(marginals)))
         return marginals
 
