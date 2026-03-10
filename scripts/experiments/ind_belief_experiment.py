@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
                         choices=["none", "agency_only", "combined", "policy_only"],
                         help="Intervention scheme for the ego agent (default: none)")
     parser.add_argument("--inference-type", type=str, default="naive",
-                        choices=["naive"],
+                        choices=["naive", "mcts"],
                         help="Belief inference strategy (default: naive)")
     parser.add_argument("--relevance-method", type=str, default="dual",
                         choices=["corridor", "dual"],
@@ -159,6 +159,8 @@ def run_single_experiment(config: dict,
     prev_true_trajectories = None
 
     for t in range(max_steps):
+        # if t > 12:
+        #     time.sleep(12)
         t_step_start = time.perf_counter()
         obs, acts = carla_sim.step()
         carla_step_total = time.perf_counter() - t_step_start

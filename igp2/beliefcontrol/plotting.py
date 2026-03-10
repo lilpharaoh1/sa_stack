@@ -1490,3 +1490,842 @@ class InterventionPlotter:
         self._draw_all()
         self._fig.canvas.blit(self._fig.bbox)
         self._fig.canvas.flush_events()
+
+
+# ---------------------------------------------------------------------------
+# MCTSTreePlotter
+# ---------------------------------------------------------------------------
+
+_MAX_TREE_NODES = 2000
+_MAX_TREE_EDGES = 2000
+
+
+class MCTSTreePlotter:
+    """Live debug plot showing the MCTS tree structure.
+
+    Three-panel layout in Frenet coordinates:
+
+    - **Left** (s vs d): each node is a dot, edges connect parent→child.
+      Colour by depth, size by visit count.
+    - **Top-right** (s vs phi): heading vs arc-length.
+    - **Bottom-right** (s vs v): speed vs arc-length.
+
+    Road boundaries are drawn as horizontal lines on the s-d panel.
+
+    Args:
+        frenet: FrenetFrame for coordinate info.
+        horizon: Planning horizon (max depth).
+        dt: Planning timestep.
+    """
+
+    def __init__(self, frenet, horizon: int, dt: float):
+        self._frenet = frenet
+        self._horizon = horizon
+        self._dt = dt
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax_sd: Optional[plt.Axes] = None
+        self._ax_sphi: Optional[plt.Axes] = None
+        self._ax_sv: Optional[plt.Axes] = None
+
+    def _init(self):
+        plt.ion()
+        self._fig = plt.figure(figsize=(14, 8))
+        gs = self._fig.add_gridspec(2, 2, width_ratios=[2, 1])
+        self._ax_sd = self._fig.add_subplot(gs[:, 0])
+        self._ax_sphi = self._fig.add_subplot(gs[0, 1])
+        self._ax_sv = self._fig.add_subplot(gs[1, 1])
+
+        self._ax_sd.set_xlabel('s (arc-length)', fontsize=9)
+        self._ax_sd.set_ylabel('d (lateral)', fontsize=9)
+        self._ax_sd.set_title('MCTS Tree: s vs d', fontsize=10)
+        self._ax_sd.grid(True, alpha=0.3)
+
+        self._ax_sphi.set_xlabel('s', fontsize=9)
+        self._ax_sphi.set_ylabel('phi (rad)', fontsize=9)
+        self._ax_sphi.set_title('s vs heading', fontsize=10)
+        self._ax_sphi.grid(True, alpha=0.3)
+
+        self._ax_sv.set_xlabel('s', fontsize=9)
+        self._ax_sv.set_ylabel('v (m/s)', fontsize=9)
+        self._ax_sv.set_title('s vs speed', fontsize=10)
+        self._ax_sv.grid(True, alpha=0.3)
+
+        self._fig.tight_layout()
+
+    def update(self, root, road_left: np.ndarray, road_right: np.ndarray,
+               step: int):
+        """Redraw tree from the MCTS root node.
+
+        Args:
+            root: MCTSNode root of the search tree.
+            road_left: (H+1,) left road boundary.
+            road_right: (H+1,) right road boundary.
+            step: Simulation step number.
+        """
+        if root is None:
+            return
+
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        ax_sd = self._ax_sd
+        ax_sphi = self._ax_sphi
+        ax_sv = self._ax_sv
+
+        # Clear previous
+        ax_sd.cla()
+        ax_sphi.cla()
+        ax_sv.cla()
+
+        ax_sd.set_xlabel('s (arc-length)', fontsize=9)
+        ax_sd.set_ylabel('d (lateral)', fontsize=9)
+        ax_sd.grid(True, alpha=0.3)
+        ax_sphi.set_xlabel('s', fontsize=9)
+        ax_sphi.set_ylabel('phi (rad)', fontsize=9)
+        ax_sphi.grid(True, alpha=0.3)
+        ax_sv.set_xlabel('s', fontsize=9)
+        ax_sv.set_ylabel('v (m/s)', fontsize=9)
+        ax_sv.grid(True, alpha=0.3)
+
+        # BFS to collect all nodes and edges
+        node_s, node_d, node_phi, node_v = [], [], [], []
+        node_depth, node_visits = [], []
+        edge_s, edge_d = [], []
+        edge_sphi_s, edge_sphi_phi = [], []
+        edge_sv_s, edge_sv_v = [], []
+
+        queue = [root]
+        n_nodes = 0
+        while queue and n_nodes < _MAX_TREE_NODES:
+            node = queue.pop(0)
+            s, d, phi, v = node.state
+            node_s.append(s)
+            node_d.append(d)
+            node_phi.append(phi)
+            node_v.append(v)
+            node_depth.append(node.depth)
+            node_visits.append(node.visit_count)
+            n_nodes += 1
+
+            for child in node.children.values():
+                if child is None:
+                    continue
+                cs, cd, cphi, cv = child.state
+                # Edges as line segments (parent→child)
+                edge_s.extend([s, cs, None])
+                edge_d.extend([d, cd, None])
+                edge_sphi_s.extend([s, cs, None])
+                edge_sphi_phi.extend([phi, cphi, None])
+                edge_sv_s.extend([s, cs, None])
+                edge_sv_v.extend([v, cv, None])
+                queue.append(child)
+
+        if not node_s:
+            return
+
+        node_s = np.array(node_s)
+        node_d = np.array(node_d)
+        node_phi = np.array(node_phi)
+        node_v = np.array(node_v)
+        node_depth = np.array(node_depth)
+        node_visits = np.array(node_visits, dtype=float)
+
+        # Normalise visit counts for marker size
+        max_vis = max(node_visits.max(), 1)
+        sizes = 3 + 30 * (node_visits / max_vis)
+
+        # Normalise depth for colour
+        cmap = plt.cm.viridis
+        max_d = max(node_depth.max(), 1)
+        colours = cmap(node_depth / max_d)
+
+        # --- s vs d panel ---
+        # Road boundaries
+        s_bounds = np.linspace(node_s.min(), node_s.max(), len(road_left))
+        ax_sd.plot(s_bounds, road_left[:len(s_bounds)],
+                   'k--', linewidth=1.5, alpha=0.6, label='road left')
+        ax_sd.plot(s_bounds, road_right[:len(s_bounds)],
+                   'k--', linewidth=1.5, alpha=0.6, label='road right')
+
+        # Edges
+        ax_sd.plot(edge_s, edge_d, color=(0.7, 0.7, 0.7), linewidth=0.4,
+                   alpha=0.5, zorder=1)
+        # Nodes
+        ax_sd.scatter(node_s, node_d, c=colours, s=sizes, zorder=3,
+                      edgecolors='none', alpha=0.8)
+        # Root marker
+        ax_sd.scatter([node_s[0]], [node_d[0]], c='red', s=80, zorder=5,
+                      marker='*', edgecolors='black', linewidths=0.5)
+
+        # --- s vs phi panel ---
+        ax_sphi.plot(edge_sphi_s, edge_sphi_phi,
+                     color=(0.7, 0.7, 0.7), linewidth=0.4, alpha=0.5, zorder=1)
+        ax_sphi.scatter(node_s, node_phi, c=colours, s=sizes, zorder=3,
+                        edgecolors='none', alpha=0.8)
+        ax_sphi.scatter([node_s[0]], [node_phi[0]], c='red', s=80, zorder=5,
+                        marker='*', edgecolors='black', linewidths=0.5)
+
+        # --- s vs v panel ---
+        ax_sv.plot(edge_sv_s, edge_sv_v,
+                   color=(0.7, 0.7, 0.7), linewidth=0.4, alpha=0.5, zorder=1)
+        ax_sv.scatter(node_s, node_v, c=colours, s=sizes, zorder=3,
+                      edgecolors='none', alpha=0.8)
+        ax_sv.scatter([node_s[0]], [node_v[0]], c='red', s=80, zorder=5,
+                      marker='*', edgecolors='black', linewidths=0.5)
+
+        # Titles with stats
+        ax_sd.set_title(
+            f'MCTS Tree (step={step})  |  {n_nodes} nodes, '
+            f'max_depth={int(node_depth.max())}/{self._horizon}',
+            fontsize=10)
+        ax_sphi.set_title(
+            f'phi range: [{node_phi.min():.3f}, {node_phi.max():.3f}] rad',
+            fontsize=9)
+        ax_sv.set_title(
+            f'v range: [{node_v.min():.2f}, {node_v.max():.2f}] m/s',
+            fontsize=9)
+
+        self._fig.tight_layout()
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()
+
+
+# ---------------------------------------------------------------------------
+# MCTSTrajectoryPlotter
+# ---------------------------------------------------------------------------
+
+_MAX_MCTS_LINES = 50
+_MAX_MCTS_VEHICLES = 10
+
+
+class MCTSTrajectoryPlotter:
+    """Live debug plot for MCTS trajectory generation.
+
+    Four-panel layout:
+
+    - **Top** (map): all MCTS trajectories in world coordinates, coloured
+      by belief category.  Blue = all visible, red = any hidden,
+      orange = unclear/empty config.  A dot marks the endpoint of each
+      trajectory.  Other agents are drawn with bounding boxes.
+    - **Upper-middle** (velocity): speed profiles over time, same colouring.
+    - **Lower-middle** (steering): steering angle profiles over time.
+    - **Bottom** (cost): horizontal bar chart of trajectory costs.
+
+    Uses pre-allocated artist pools with blitting for efficiency.
+
+    Args:
+        scenario_map: The road layout to draw.
+        reference_waypoints: Concatenated A* reference path (N, 2).
+        frenet: FrenetFrame for (s, d) → world conversion.
+        dt: Planning timestep in seconds.
+        ego_length: Ego vehicle length (m).
+        ego_width: Ego vehicle width (m).
+    """
+
+    # Belief category colours
+    _COLOUR_VISIBLE = (0.12, 0.47, 0.71)   # blue  — all agents visible
+    _COLOUR_HIDDEN  = (0.84, 0.15, 0.16)   # red   — any hidden agent
+    _COLOUR_UNCLEAR = (1.0,  0.60, 0.05)   # orange — unclear / empty config
+
+    @staticmethod
+    def _belief_colour(config: Dict[int, bool]) -> tuple:
+        """Return colour based on belief category."""
+        if not config:
+            return MCTSTrajectoryPlotter._COLOUR_UNCLEAR
+        if all(config.values()):
+            return MCTSTrajectoryPlotter._COLOUR_VISIBLE
+        if any(not v for v in config.values()):
+            return MCTSTrajectoryPlotter._COLOUR_HIDDEN
+        return MCTSTrajectoryPlotter._COLOUR_UNCLEAR
+
+    def __init__(self,
+                 scenario_map: Map,
+                 reference_waypoints: np.ndarray,
+                 frenet: 'FrenetFrame',
+                 dt: float = 0.1,
+                 ego_length: float = 4.5,
+                 ego_width: float = 1.8):
+        self._scenario_map = scenario_map
+        self._reference_waypoints = reference_waypoints
+        self._frenet = frenet
+        self._dt = dt
+        self._ego_length = ego_length
+        self._ego_width = ego_width
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax_map: Optional[plt.Axes] = None
+        self._ax_vel: Optional[plt.Axes] = None
+        self._ax_steer: Optional[plt.Axes] = None
+        self._ax_cost: Optional[plt.Axes] = None
+        self._background = None
+
+        # Pre-allocated pools
+        self._traj_lines: List[Line2D] = []
+        self._traj_endpoints: List[Line2D] = []
+        self._vel_lines: List[Line2D] = []
+        self._steer_lines: List[Line2D] = []
+        self._cost_labels: List[plt.Text] = []
+        self._vehicle_patches: List[MplPolygon] = []
+        self._vehicle_labels: List[plt.Text] = []
+        self._ego_patch: Optional[MplPolygon] = None
+
+    def _init(self):
+        plt.ion()
+        self._fig, (self._ax_map, self._ax_vel,
+                    self._ax_steer, self._ax_cost) = plt.subplots(
+            4, 1, figsize=(13, 14),
+            gridspec_kw={'height_ratios': [3, 1, 1, 1]},
+        )
+        ax = self._ax_map
+        vel_ax = self._ax_vel
+        steer_ax = self._ax_steer
+        cost_ax = self._ax_cost
+
+        # --- Static map ---
+        plot_map(self._scenario_map, ax=ax, markings=True)
+        if len(self._reference_waypoints) > 0:
+            ax.plot(self._reference_waypoints[:, 0],
+                    self._reference_waypoints[:, 1],
+                    color=(0.5, 0.5, 0.5), linewidth=1, linestyle='--',
+                    alpha=0.5, zorder=2)
+        ax.set_aspect('equal')
+
+        # --- Pre-allocate trajectory lines (map + velocity + steering) ---
+        empty = ([], [])
+        self._traj_lines = []
+        self._traj_endpoints = []
+        self._vel_lines = []
+        self._steer_lines = []
+        self._cost_labels = []
+        for _ in range(_MAX_MCTS_LINES):
+            l, = ax.plot(*empty, linewidth=1, zorder=4)
+            l.set_visible(False)
+            self._traj_lines.append(l)
+
+            ep, = ax.plot(*empty, marker='o', markersize=4, linestyle='None',
+                          zorder=5)
+            ep.set_visible(False)
+            self._traj_endpoints.append(ep)
+
+            vl, = vel_ax.plot(*empty, linewidth=1, zorder=4)
+            vl.set_visible(False)
+            self._vel_lines.append(vl)
+
+            sl, = steer_ax.plot(*empty, linewidth=1, zorder=4)
+            sl.set_visible(False)
+            self._steer_lines.append(sl)
+
+            t = ax.text(0, 0, '', fontsize=5.5, ha='left', va='bottom',
+                        alpha=0.85, visible=False, zorder=8,
+                        bbox=dict(boxstyle='round,pad=0.12',
+                                  facecolor='white', alpha=0.65,
+                                  edgecolor='none'))
+            self._cost_labels.append(t)
+
+        # --- Vehicle patches ---
+        dummy = np.zeros((4, 2))
+        self._vehicle_patches = []
+        self._vehicle_labels = []
+        for _ in range(_MAX_MCTS_VEHICLES):
+            p = MplPolygon(dummy, closed=True, visible=False,
+                           linewidth=1.5, zorder=7)
+            ax.add_patch(p)
+            self._vehicle_patches.append(p)
+
+            t = ax.text(0, 0, '', fontsize=7, ha='center', va='bottom',
+                        fontweight='bold', visible=False, zorder=9,
+                        bbox=dict(boxstyle='round,pad=0.15',
+                                  facecolor='white', alpha=0.8,
+                                  edgecolor='none'))
+            self._vehicle_labels.append(t)
+
+        # Ego patch
+        self._ego_patch = MplPolygon(
+            dummy, closed=True, visible=False,
+            facecolor=(0.1, 0.1, 0.1, 0.3), edgecolor='black',
+            linewidth=1.5, zorder=7)
+        ax.add_patch(self._ego_patch)
+
+        # --- Velocity panel ---
+        vel_ax.set_xlabel('Time (s)', fontsize=8)
+        vel_ax.set_ylabel('Speed (m/s)', fontsize=8)
+        vel_ax.tick_params(labelsize=7)
+        vel_ax.grid(True, alpha=0.3)
+
+        # --- Steering panel ---
+        steer_ax.set_xlabel('Time (s)', fontsize=8)
+        steer_ax.set_ylabel('Steering (rad)', fontsize=8)
+        steer_ax.tick_params(labelsize=7)
+        steer_ax.grid(True, alpha=0.3)
+
+        # --- Cost panel ---
+        cost_ax.set_xlabel('Position cost (L2)', fontsize=8)
+        cost_ax.tick_params(labelsize=7)
+        cost_ax.grid(True, axis='x', alpha=0.3)
+
+        self._fig.tight_layout()
+        self._fig.canvas.draw()
+        self._background = self._fig.canvas.copy_from_bbox(self._fig.bbox)
+
+    def _hide_all(self):
+        for l in self._traj_lines:
+            l.set_data([], [])
+            l.set_visible(False)
+        for ep in self._traj_endpoints:
+            ep.set_data([], [])
+            ep.set_visible(False)
+        for l in self._vel_lines:
+            l.set_data([], [])
+            l.set_visible(False)
+        for l in self._steer_lines:
+            l.set_data([], [])
+            l.set_visible(False)
+        for t in self._cost_labels:
+            t.set_visible(False)
+        for p in self._vehicle_patches:
+            p.set_visible(False)
+        for t in self._vehicle_labels:
+            t.set_visible(False)
+        if self._ego_patch is not None:
+            self._ego_patch.set_visible(False)
+
+    def _draw_all(self):
+        ax = self._ax_map
+        vel_ax = self._ax_vel
+        steer_ax = self._ax_steer
+
+        for l in self._traj_lines:
+            if l.get_visible():
+                ax.draw_artist(l)
+        for ep in self._traj_endpoints:
+            if ep.get_visible():
+                ax.draw_artist(ep)
+        for t in self._cost_labels:
+            if t.get_visible():
+                ax.draw_artist(t)
+        for p in self._vehicle_patches:
+            if p.get_visible():
+                ax.draw_artist(p)
+        for t in self._vehicle_labels:
+            if t.get_visible():
+                ax.draw_artist(t)
+        if self._ego_patch is not None and self._ego_patch.get_visible():
+            ax.draw_artist(self._ego_patch)
+
+        for l in self._vel_lines:
+            if l.get_visible():
+                vel_ax.draw_artist(l)
+        for l in self._steer_lines:
+            if l.get_visible():
+                steer_ax.draw_artist(l)
+
+    @staticmethod
+    def _belief_key(config: Dict[int, bool]) -> str:
+        """Canonical string key for a belief config."""
+        return ", ".join(f"{aid}:{'V' if v else 'H'}"
+                         for aid, v in sorted(config.items()))
+
+    def update(self, results: list, ego_position: np.ndarray,
+               ego_heading: float, step: int,
+               other_agent_states: Optional[Dict] = None,
+               marginals: Optional[Dict[int, float]] = None):
+        """Redraw the MCTS trajectory debug plot.
+
+        Args:
+            results: List of InferenceResult from MCTS inference,
+                sorted by cost.
+            ego_position: [x, y] ego world position.
+            ego_heading: Ego world heading (radians).
+            step: Simulation step number.
+            other_agent_states: Dict mapping agent_id -> AgentState.
+            marginals: Dict mapping agent_id -> P(hidden | τ_obs).
+        """
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        ax = self._ax_map
+        vel_ax = self._ax_vel
+        steer_ax = self._ax_steer
+        cost_ax = self._ax_cost
+
+        margin = 40.0
+        ax.set_xlim(ego_position[0] - margin, ego_position[0] + margin)
+        ax.set_ylim(ego_position[1] - margin, ego_position[1] + margin)
+
+        self._fig.canvas.restore_region(self._background)
+        self._hide_all()
+
+        dt = self._dt
+
+        # --- Draw trajectories (map + velocity + steering) ---
+        max_time = 0.0
+        max_speed = 0.0
+        max_steer = 0.0
+
+        belief_best_idx: Dict[str, int] = {}
+        for i, r in enumerate(results):
+            key = self._belief_key(r.config)
+            if key not in belief_best_idx:
+                belief_best_idx[key] = i
+
+        for i, r in enumerate(results):
+            if i >= _MAX_MCTS_LINES:
+                break
+
+            colour = self._belief_colour(r.config)
+            is_overall_best = (i == 0)
+            lw = 1.2
+            alpha = 1.0
+            zorder = 6 if is_overall_best else 4
+
+            l = self._traj_lines[i]
+            ep = self._traj_endpoints[i]
+            vl = self._vel_lines[i]
+            sl = self._steer_lines[i]
+
+            if r.planned_sd is not None:
+                # Map panel — trajectory line
+                world = self._frenet.frenet_to_world_batch(
+                    r.planned_sd[:, 0], r.planned_sd[:, 1])
+                l.set_data(world[:, 0], world[:, 1])
+                l.set_color(colour)
+                l.set_linewidth(lw)
+                l.set_alpha(alpha)
+                l.set_zorder(zorder)
+                l.set_linestyle('-')
+                l.set_visible(True)
+
+                # Endpoint marker
+                end_x, end_y = world[-1]
+                ep.set_data([end_x], [end_y])
+                ep.set_color(colour)
+                ep.set_zorder(zorder + 1)
+                ep.set_visible(True)
+
+                # Cost label at end of best-for-belief trajectories
+                key = self._belief_key(r.config)
+                if i == belief_best_idx.get(key):
+                    t = self._cost_labels[i]
+                    t.set_position((end_x + 0.5, end_y + 0.5))
+                    t.set_text(f"{{{key}}}\ncost={r.pos_cost:.2f}")
+                    t.set_color(colour)
+                    t.set_visible(True)
+
+                # Velocity panel
+                if r.planned_vel is not None:
+                    speed = np.sqrt(r.planned_vel[:, 0]**2 +
+                                    r.planned_vel[:, 1]**2)
+                    t_arr = np.arange(len(speed)) * dt
+                    vl.set_data(t_arr, speed)
+                    vl.set_color(colour)
+                    vl.set_linewidth(lw)
+                    vl.set_alpha(alpha)
+                    vl.set_linestyle('-')
+                    vl.set_visible(True)
+
+                    max_time = max(max_time, float(t_arr[-1]) if len(t_arr) else 0)
+                    max_speed = max(max_speed, float(np.max(speed)) if len(speed) else 0)
+
+                # Steering panel
+                if r.nlp_controls is not None and len(r.nlp_controls) > 0:
+                    steer_vals = r.nlp_controls[:, 1]  # delta column
+                    t_arr_s = np.arange(len(steer_vals)) * dt
+                    sl.set_data(t_arr_s, steer_vals)
+                    sl.set_color(colour)
+                    sl.set_linewidth(lw)
+                    sl.set_alpha(alpha)
+                    sl.set_linestyle('-')
+                    sl.set_visible(True)
+
+                    max_time = max(max_time, float(t_arr_s[-1]) if len(t_arr_s) else 0)
+                    max_steer = max(max_steer, float(np.max(np.abs(steer_vals))))
+
+        # Velocity axis limits
+        vel_ax.set_xlim(-0.1, max_time + 0.5)
+        vel_ax.set_ylim(-0.5, max_speed + 1.0)
+
+        # Steering axis limits
+        steer_ax.set_xlim(-0.1, max_time + 0.5)
+        steer_ax.set_ylim(-max_steer - 0.05, max_steer + 0.05)
+
+        # --- Cost bar chart (redrawn each frame — small enough) ---
+        cost_ax.cla()
+        cost_ax.set_xlabel('Position cost (L2)', fontsize=8)
+        cost_ax.tick_params(labelsize=7)
+        cost_ax.grid(True, axis='x', alpha=0.3)
+
+        if results:
+            # Show up to top 15 trajectories
+            n_bars = min(len(results), 15)
+            bar_labels = []
+            bar_costs = []
+            bar_colours = []
+            for i in range(n_bars):
+                r = results[i]
+                key = self._belief_key(r.config)
+                is_best = (i == belief_best_idx.get(key, -1))
+                label = f"{{{key}}}" if is_best else f"#{i}"
+                bar_labels.append(label)
+                bar_costs.append(r.pos_cost if np.isfinite(r.pos_cost) else 0)
+                bar_colours.append(self._belief_colour(r.config))
+
+            y_pos = np.arange(n_bars)
+            cost_ax.barh(y_pos, bar_costs, color=bar_colours, alpha=0.8,
+                         edgecolor='none', height=0.7)
+            cost_ax.set_yticks(y_pos)
+            cost_ax.set_yticklabels(bar_labels, fontsize=6)
+            cost_ax.invert_yaxis()
+
+        # --- Vehicles ---
+        pi = 0
+        if other_agent_states:
+            if marginals is None:
+                marginals = {}
+            cmap = plt.cm.coolwarm
+            for aid, agent_state in other_agent_states.items():
+                if pi >= _MAX_MCTS_VEHICLES:
+                    break
+                meta = getattr(agent_state, 'metadata', None)
+                vl = meta.length if meta else 4.5
+                vw = meta.width if meta else 1.8
+
+                corners = calculate_multiple_bboxes(
+                    [agent_state.position[0]], [agent_state.position[1]],
+                    vl, vw, agent_state.heading)[0]
+
+                p = self._vehicle_patches[pi]
+                p.set_xy(corners)
+
+                if aid < 0:
+                    p.set_facecolor((0.1, 0.1, 0.1, 0.6))
+                    p.set_edgecolor((0.0, 0.0, 0.0, 0.8))
+                else:
+                    p_hidden = marginals.get(aid, 0.5)
+                    color = cmap(p_hidden)
+                    p.set_facecolor((*color[:3], 0.5))
+                    p.set_edgecolor((*color[:3], 0.9))
+                p.set_linewidth(1.5)
+                p.set_visible(True)
+
+                t = self._vehicle_labels[pi]
+                t.set_position((agent_state.position[0],
+                                agent_state.position[1] + vw / 2 + 1.5))
+                if aid < 0:
+                    t.set_text("")
+                elif aid in marginals:
+                    t.set_text(f"Agent {aid}\nP(h)={marginals[aid]:.2f}")
+                else:
+                    t.set_text(f"Agent {aid}")
+                t.set_color((0.15, 0.15, 0.15))
+                t.set_visible(True)
+                pi += 1
+
+        # Ego
+        ego_corners = calculate_multiple_bboxes(
+            [ego_position[0]], [ego_position[1]],
+            self._ego_length, self._ego_width, ego_heading)[0]
+        self._ego_patch.set_xy(ego_corners)
+        self._ego_patch.set_visible(True)
+
+        # --- Legend (fixed colour categories) ---
+        legend_handles = [
+            Line2D([0], [0], color=self._COLOUR_VISIBLE, linewidth=2,
+                   label='All visible'),
+            Line2D([0], [0], color=self._COLOUR_HIDDEN, linewidth=2,
+                   label='Has hidden'),
+            Line2D([0], [0], color=self._COLOUR_UNCLEAR, linewidth=2,
+                   label='Unclear'),
+        ]
+        ax.legend(handles=legend_handles, loc='upper right', fontsize=6,
+                  framealpha=0.8, title='Belief category', title_fontsize=7)
+
+        # --- Title ---
+        n_trajs = len(results)
+        n_configs = len(belief_best_idx)
+        best_cost = results[0].pos_cost if results else float('inf')
+        ax.set_title(
+            f"MCTS Trajectories  step={step}  |  "
+            f"{n_trajs} trajectories, {n_configs} unique beliefs  |  "
+            f"best cost={best_cost:.3f}",
+            fontsize=10)
+
+        self._draw_all()
+        self._fig.canvas.blit(self._fig.bbox)
+        self._fig.canvas.flush_events()
+
+
+# ---------------------------------------------------------------------------
+# MCTSBeliefPlotter
+# ---------------------------------------------------------------------------
+
+class MCTSBeliefPlotter:
+    """Live plot showing per-agent hidden probabilities from MCTS reasoning.
+
+    Two-panel layout:
+
+    - **Top**: bar chart of P(hidden | τ_obs) per agent, with a
+      horizontal threshold line showing the hidden-detection boundary.
+    - **Bottom**: time-series of P(hidden) for each tracked agent,
+      showing how beliefs evolve over successive inference steps.
+
+    Args:
+        hidden_threshold: P(hidden) above which an agent is declared
+            hidden. Drawn as a horizontal reference line.
+        max_history: Number of past steps to show in the time series.
+    """
+
+    _AGENT_COLOURS = [
+        (0.12, 0.47, 0.71),
+        (1.0,  0.50, 0.05),
+        (0.17, 0.63, 0.17),
+        (0.84, 0.15, 0.16),
+        (0.58, 0.40, 0.74),
+        (0.55, 0.34, 0.29),
+        (0.89, 0.47, 0.76),
+        (0.50, 0.50, 0.50),
+    ]
+
+    def __init__(self,
+                 hidden_threshold: float = 0.6,
+                 max_history: int = 100):
+        self._hidden_threshold = hidden_threshold
+        self._max_history = max_history
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax_bar: Optional[plt.Axes] = None
+        self._ax_ts: Optional[plt.Axes] = None
+
+        # History tracking
+        self._history_steps: List[int] = []
+        self._history_marginals: Dict[int, List[float]] = {}  # aid -> [p_hidden, ...]
+        self._agent_colour_map: Dict[int, tuple] = {}
+
+    def _get_agent_colour(self, aid: int) -> tuple:
+        if aid not in self._agent_colour_map:
+            idx = len(self._agent_colour_map)
+            self._agent_colour_map[aid] = (
+                self._AGENT_COLOURS[idx % len(self._AGENT_COLOURS)])
+        return self._agent_colour_map[aid]
+
+    def _init(self):
+        plt.ion()
+        self._fig, (self._ax_bar, self._ax_ts) = plt.subplots(
+            2, 1, figsize=(10, 7),
+            gridspec_kw={'height_ratios': [1, 1.5]},
+        )
+        self._fig.tight_layout(pad=3.0)
+
+    def reset(self):
+        """Clear history."""
+        self._history_steps = []
+        self._history_marginals = {}
+
+    def update(self, marginals: Dict[int, float], step: int,
+               n_trajectories: int = 0, n_beliefs: int = 0):
+        """Redraw the MCTS belief plot.
+
+        Args:
+            marginals: {agent_id: P(hidden | τ_obs)} from MCTS inference.
+            step: Simulation step number.
+            n_trajectories: Number of MCTS trajectories generated.
+            n_beliefs: Number of unique belief configs found.
+        """
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        # Update history
+        self._history_steps.append(step)
+        for aid, p_h in marginals.items():
+            if aid < 0:
+                continue
+            if aid not in self._history_marginals:
+                # Backfill with 0.5 (unknown) for previous steps
+                self._history_marginals[aid] = [0.5] * (len(self._history_steps) - 1)
+            self._history_marginals[aid].append(p_h)
+
+        # Agents seen before but not in current marginals → assume unchanged
+        for aid in list(self._history_marginals.keys()):
+            if aid not in marginals:
+                prev = self._history_marginals[aid][-1] if self._history_marginals[aid] else 0.5
+                self._history_marginals[aid].append(prev)
+
+        # Trim history
+        if len(self._history_steps) > self._max_history:
+            excess = len(self._history_steps) - self._max_history
+            self._history_steps = self._history_steps[excess:]
+            for aid in self._history_marginals:
+                self._history_marginals[aid] = self._history_marginals[aid][excess:]
+
+        bar_ax = self._ax_bar
+        ts_ax = self._ax_ts
+
+        # ===== Top panel: bar chart =====
+        bar_ax.cla()
+        bar_ax.set_ylabel('P(hidden | τ_obs)', fontsize=9)
+        bar_ax.set_ylim(0, 1.05)
+        bar_ax.grid(True, axis='y', alpha=0.3)
+
+        # Threshold line
+        bar_ax.axhline(y=self._hidden_threshold, color='grey',
+                        linestyle='--', linewidth=1.2, alpha=0.7,
+                        label=f'Threshold ({self._hidden_threshold:.1f})')
+
+        dynamic_aids = sorted(aid for aid in marginals if aid >= 0)
+        if dynamic_aids:
+            x_pos = np.arange(len(dynamic_aids))
+            heights = [marginals[aid] for aid in dynamic_aids]
+            colours = [self._get_agent_colour(aid) for aid in dynamic_aids]
+
+            bars = bar_ax.bar(x_pos, heights, color=colours, alpha=0.85,
+                              edgecolor='black', linewidth=0.8, width=0.6)
+
+            # Annotate each bar
+            for j, (aid, h) in enumerate(zip(dynamic_aids, heights)):
+                status = "HIDDEN" if h > self._hidden_threshold else "visible"
+                bar_ax.text(j, h + 0.02, f"{h:.2f}\n({status})",
+                            ha='center', va='bottom', fontsize=7,
+                            fontweight='bold' if h > self._hidden_threshold else 'normal',
+                            color='red' if h > self._hidden_threshold else 'black')
+
+            bar_ax.set_xticks(x_pos)
+            bar_ax.set_xticklabels([f"Agent {aid}" for aid in dynamic_aids],
+                                    fontsize=8)
+        bar_ax.legend(loc='upper right', fontsize=7, framealpha=0.8)
+        bar_ax.set_title(
+            f"MCTS Belief Inference  step={step}  |  "
+            f"{n_trajectories} trajs, {n_beliefs} beliefs",
+            fontsize=10)
+
+        # ===== Bottom panel: time series =====
+        ts_ax.cla()
+        ts_ax.set_xlabel('Simulation step', fontsize=9)
+        ts_ax.set_ylabel('P(hidden | τ_obs)', fontsize=9)
+        ts_ax.set_ylim(-0.05, 1.05)
+        ts_ax.grid(True, alpha=0.3)
+
+        # Threshold line
+        ts_ax.axhline(y=self._hidden_threshold, color='grey',
+                       linestyle='--', linewidth=1.2, alpha=0.7)
+
+        # Shade hidden region
+        ts_ax.axhspan(self._hidden_threshold, 1.05, alpha=0.06,
+                       color='red', zorder=0)
+        ts_ax.axhspan(-0.05, self._hidden_threshold, alpha=0.06,
+                       color='green', zorder=0)
+
+        steps = self._history_steps
+        for aid in sorted(self._history_marginals.keys()):
+            vals = self._history_marginals[aid]
+            colour = self._get_agent_colour(aid)
+            n = min(len(steps), len(vals))
+            ts_ax.plot(steps[:n], vals[:n],
+                       color=colour, linewidth=1.8, alpha=0.9,
+                       marker='o', markersize=3,
+                       label=f"Agent {aid}")
+
+        ts_ax.legend(loc='upper left', fontsize=7, framealpha=0.8)
+
+        self._fig.tight_layout(pad=2.0)
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()

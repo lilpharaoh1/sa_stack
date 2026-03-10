@@ -18,7 +18,10 @@ from igp2.core.agentstate import AgentState
 from igp2.beliefcontrol.frenet import FrenetFrame
 from igp2.beliefcontrol.first_stage import FirstStagePlanner
 from igp2.beliefcontrol.second_stage import SecondStagePlanner
-from igp2.beliefcontrol.plotting import InferencePlotter, InterventionPlotter
+from igp2.beliefcontrol.plotting import (
+    InferencePlotter, InterventionPlotter,
+    MCTSTrajectoryPlotter, MCTSBeliefPlotter, MCTSTreePlotter,
+)
 from igp2.beliefcontrol.planning_utils import (
     milp_to_nlp_warmstart as _milp_to_nlp_warmstart,
     sample_road_boundaries as _sample_road_boundaries_util,
@@ -27,7 +30,7 @@ from igp2.beliefcontrol.planning_utils import (
 
 logger = logging.getLogger(__name__)
 
-INFERENCE_TYPES = ('naive',)
+INFERENCE_TYPES = ('naive', 'mcts')
 
 
 @dataclass
@@ -83,7 +86,18 @@ class BeliefInference:
                  w_agency: float = 1.0,
                  inference_type: str = 'naive',
                  relevance_method: str = 'dual',
-                 plot: bool = True):
+                 plot: bool = True,
+                 # MCTS-specific parameters
+                 mcts_n_simulations: int = 5000,
+                 mcts_exploration_constant: float = 10.0,
+                 mcts_n_accel_levels: int = 21,
+                 mcts_n_steer_levels: int = 21,
+                 mcts_max_trajectories: int = 25,
+                 mcts_gamma: float = 0.99,
+                 mcts_collision_penalty: float = 100.0,
+                 mcts_clearance_threshold: float = 4.0,
+                 mcts_rollout_policy: str = 'heuristic',
+                 mcts_activity_threshold: float = 1e-3):
         if relevance_method not in self.RELEVANCE_METHODS:
             raise ValueError(
                 f"Unknown relevance_method {relevance_method!r}. "
@@ -173,6 +187,46 @@ class BeliefInference:
                     ego_length=self._ego_length, ego_width=self._ego_width,
                     collision_margin=self._collision_margin)
 
+        # MCTS planner (only created when needed)
+        self._mcts_planner = None
+        if inference_type == 'mcts':
+            from igp2.beliefcontrol.mcts_planner import MCTSPlanner
+            self._mcts_planner = MCTSPlanner(
+                horizon=self._horizon,
+                dt=self._dt,
+                ego_length=self._ego_length,
+                ego_width=self._ego_width,
+                wheelbase=self._wheelbase,
+                collision_margin=self._collision_margin,
+                target_speed=self._target_speed,
+                frenet=self._frenet,
+                nlp_params=policy.nlp_params,
+                n_simulations=mcts_n_simulations,
+                exploration_constant=mcts_exploration_constant,
+                n_accel_levels=mcts_n_accel_levels,
+                n_steer_levels=mcts_n_steer_levels,
+                max_trajectories=mcts_max_trajectories,
+                gamma=mcts_gamma,
+                collision_penalty=mcts_collision_penalty,
+                clearance_threshold=mcts_clearance_threshold,
+                rollout_policy=mcts_rollout_policy,
+                activity_threshold=mcts_activity_threshold,
+            )
+
+        # MCTS debug plotters
+        self._mcts_traj_plotter: Optional[MCTSTrajectoryPlotter] = None
+        self._mcts_belief_plotter: Optional[MCTSBeliefPlotter] = None
+        self._mcts_tree_plotter: Optional[MCTSTreePlotter] = None
+        if plot and inference_type == 'mcts' and self._frenet is not None:
+            self._mcts_traj_plotter = MCTSTrajectoryPlotter(
+                scenario_map, policy.reference_waypoints, self._frenet,
+                dt=self._dt,
+                ego_length=self._ego_length, ego_width=self._ego_width)
+            self._mcts_belief_plotter = MCTSBeliefPlotter(
+                hidden_threshold=self._hidden_threshold)
+            self._mcts_tree_plotter = MCTSTreePlotter(
+                self._frenet, self._horizon, self._dt)
+
     def reset(self):
         """Clear history and results."""
         self._history = []
@@ -183,6 +237,8 @@ class BeliefInference:
         self._last_intervention = None
         self._first_stage.reset()
         self._second_stage.reset()
+        if self._mcts_belief_plotter is not None:
+            self._mcts_belief_plotter.reset()
 
     def step(self, frenet_state: np.ndarray,
              other_agent_states: Dict[int, AgentState],
@@ -243,6 +299,12 @@ class BeliefInference:
         hist_frenet = self._history[start_idx].frenet_state
         hist_agents = self._history[start_idx].other_agent_states
 
+        # Previous action (for rate-limit continuity at the MCTS root)
+        if start_idx > 0:
+            prev_human_action = self._history[start_idx - 1].human_action
+        else:
+            prev_human_action = None
+
         # Forward-simulate human-intended trajectory from window start
         observed_sd = self._simulate_human_trajectory(start_idx, len(self._history) - 1,
                                                       sim_steps_per_plan_step)
@@ -266,6 +328,14 @@ class BeliefInference:
                     current_frenet=frenet_state,
                     relevant_aids=relevant_aids,
                     step_count=step_count)
+            elif self._inference_type == 'mcts':
+                results, marginals, t_elapsed = self._run_mcts_inference(
+                    hist_frenet, hist_agents, observed_sd,
+                    current_frenet=frenet_state,
+                    relevant_aids=relevant_aids,
+                    step_count=step_count,
+                    prev_action=prev_human_action,
+                    true_obstacles=true_obstacles)
             else:
                 raise ValueError(f"Unknown inference type: {self._inference_type}")
 
@@ -301,6 +371,37 @@ class BeliefInference:
                 other_agent_states=other_agent_states,
                 marginals=marginals if relevant_aids else {},
                 ego_heading=ego_heading)
+
+        # 7. Update MCTS-specific debug plots
+        if (self._mcts_traj_plotter is not None
+                and ego_position is not None and results):
+            if not relevant_aids:
+                w = self._frenet.frenet_to_world(
+                    frenet_state[0], frenet_state[1], heading=frenet_state[2])
+                ego_heading = w['heading']
+            self._mcts_traj_plotter.update(
+                results, ego_position, ego_heading, step_count,
+                other_agent_states=other_agent_states,
+                marginals=marginals if relevant_aids else {})
+
+        if self._mcts_belief_plotter is not None and relevant_aids:
+            n_beliefs = len({
+                MCTSTrajectoryPlotter._belief_key(r.config)
+                for r in results
+            }) if results else 0
+            self._mcts_belief_plotter.update(
+                marginals, step_count,
+                n_trajectories=len(results),
+                n_beliefs=n_beliefs)
+
+        if (self._mcts_tree_plotter is not None
+                and self._mcts_planner is not None
+                and self._mcts_planner._last_root is not None):
+            self._mcts_tree_plotter.update(
+                self._mcts_planner._last_root,
+                getattr(self, '_last_road_left', np.zeros(1)),
+                getattr(self, '_last_road_right', np.zeros(1)),
+                step_count)
 
     def _run_naive_inference(self, hist_frenet: np.ndarray,
                              hist_agents: Dict[int, AgentState],
@@ -397,6 +498,100 @@ class BeliefInference:
         # Print results and get marginal posteriors
         marginals = self._print_results(results, step_count, relevant_aids,
                                         t_elapsed, self._warmup_steps)
+
+        return results, marginals, t_elapsed
+
+    def _run_mcts_inference(self, hist_frenet: np.ndarray,
+                            hist_agents: Dict[int, AgentState],
+                            observed_sd: np.ndarray,
+                            current_frenet: np.ndarray,
+                            relevant_aids: List[int],
+                            step_count: int,
+                            prev_action: Optional[tuple] = None,
+                            true_obstacles: Optional[list] = None,
+                            ) -> tuple:
+        """MCTS-based belief inference.
+
+        1. Build obstacles with ALL agents visible
+        2. Run MCTS search → k trajectory-belief pairs
+        3. Score each against observed trajectory (L2 cost)
+        4. Boltzmann posterior over trajectory-belief pairs
+        5. Best trajectory provides NLP warm-start
+
+        Returns:
+            (results, marginals, elapsed_time)
+        """
+        # Sample road boundaries from the historical start state
+        s_values = np.array([
+            hist_frenet[0] + hist_frenet[3] * np.cos(hist_frenet[2]) * k * self._dt
+            for k in range(self._horizon + 1)
+        ])
+        s_values = np.clip(s_values, 0.0, self._frenet.total_length)
+        road_left, road_right = self._sample_road_boundaries(s_values)
+
+        # Use the same obstacle predictions as the true policy (full
+        # simulated trajectories) when available; fall back to CV.
+        if true_obstacles is not None:
+            obstacles = true_obstacles
+        else:
+            all_dynamic_aids = {aid for aid in hist_agents if aid >= 0}
+            obstacles = self._predict_obstacles_cv(hist_agents, all_dynamic_aids)
+
+        t_start = time.perf_counter()
+
+        # Run MCTS
+        trajectory_belief_pairs = self._mcts_planner.search(
+            hist_frenet, road_left, road_right, obstacles,
+            prev_action=prev_action)
+
+        # Store for tree plotter
+        self._last_road_left = road_left
+        self._last_road_right = road_right
+
+        t_mcts = time.perf_counter() - t_start
+
+        # Score each trajectory against observed human trajectory
+        results: List[InferenceResult] = []
+        for tbp in trajectory_belief_pairs:
+            # Convert MCTS [s, d, phi, v] → [s, d, vs, vd] for cost comparison
+            planned_sdvv = np.column_stack([
+                tbp.states[:, 0],                                   # s
+                tbp.states[:, 1],                                   # d
+                tbp.states[:, 3] * np.cos(tbp.states[:, 2]),        # vs
+                tbp.states[:, 3] * np.sin(tbp.states[:, 2]),        # vd
+            ])
+
+            pos_cost, vel_cost = self._trajectory_cost(
+                observed_sd, planned_sdvv)
+
+            # Filter belief to only include relevant agents
+            config = {}
+            for aid in relevant_aids:
+                config[aid] = tbp.implied_belief.get(aid, True)
+
+            results.append(InferenceResult(
+                config=config,
+                pos_cost=pos_cost,
+                vel_cost=vel_cost,
+                planned_sd=planned_sdvv[:, :2],
+                planned_vel=planned_sdvv[:, 2:4],
+                milp_ok=True,
+                nlp_ok=False,  # MCTS trajectories are coarse, not NLP-refined
+                nlp_states=tbp.states,
+                nlp_controls=tbp.controls,
+            ))
+
+        # Sort by position cost
+        results.sort(key=lambda r: r.pos_cost)
+
+        t_elapsed = time.perf_counter() - t_start
+
+        # Print results and get marginal posteriors
+        marginals = self._print_results(results, step_count, relevant_aids,
+                                        t_elapsed, self._warmup_steps)
+
+        logger.info("  MCTS timing: search=%.3fs, total=%.3fs",
+                     t_mcts, t_elapsed)
 
         return results, marginals, t_elapsed
 
@@ -658,7 +853,7 @@ class BeliefInference:
 
         # Prior: use previous step's posterior, or uniform if first step / reset
         n = len(results)
-        if len(self._last_config_probs) == n:
+        if False: # len(self._last_config_probs) == n: # EMRAN change this back later
             prior = np.array(self._last_config_probs)
         else:
             prior = np.ones(n) / n
@@ -818,39 +1013,53 @@ class BeliefInference:
             logger.info("  Intervention (policy_only): reused true policy result")
             return
 
-        # --- agency_only / combined: full MILP → NLP with true obstacles ---
+        # --- agency_only / combined ---
 
-        # 3. Plan believed trajectory (reference for agency term)
-        visible_aids = {aid for aid, vis in believed_config.items() if vis}
-        believed_obstacles = self._predict_obstacles_cv(
-            other_agent_states, visible_aids)
-
-        self._first_stage.reset()
-        milp_states = self._first_stage.solve(
-            frenet_state, road_left, road_right, believed_obstacles)
-
-        ref_controls = None
-        nlp_states = None
-
-        if milp_states is not None:
-            warm_states, warm_controls = self._milp_to_nlp_warmstart(
-                milp_states, frenet_state)
-
-            self._second_stage.reset()
-            nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
-                frenet_state, warm_states, warm_controls,
-                road_left, road_right, believed_obstacles)
-
-            if not nlp_ok:
-                nlp_states = warm_states
-                nlp_controls = warm_controls
-
-            ref_controls = nlp_controls
+        if self._inference_type == 'mcts' and self._last_results:
+            # MCTS path: use the best MCTS trajectory directly as the
+            # believed reference and NLP warm-start.  This replaces the
+            # two MILP→NLP solves with a single NLP warm-started from MCTS.
+            best = self._last_results[0]
+            ref_controls = best.nlp_controls
+            nlp_states = best.nlp_states
+            warm_states = best.nlp_states
+            warm_controls = best.nlp_controls
+            logger.info("  MCTS warm-start: using best trajectory "
+                        "(cost=%.4f) for single NLP solve", best.pos_cost)
         else:
-            logger.info("  Believed config: {%s} -- believed MILP failed, "
-                        "falling back to pure tracking", cfg_str)
+            # Naive path: full MILP → NLP for believed trajectory
+            visible_aids = {aid for aid, vis in believed_config.items() if vis}
+            believed_obstacles = self._predict_obstacles_cv(
+                other_agent_states, visible_aids)
 
-        # 4. Full MILP → NLP with true obstacles + agency term
+            self._first_stage.reset()
+            milp_states = self._first_stage.solve(
+                frenet_state, road_left, road_right, believed_obstacles)
+
+            ref_controls = None
+            nlp_states = None
+            warm_states = None
+            warm_controls = None
+
+            if milp_states is not None:
+                warm_states, warm_controls = self._milp_to_nlp_warmstart(
+                    milp_states, frenet_state)
+
+                self._second_stage.reset()
+                nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
+                    frenet_state, warm_states, warm_controls,
+                    road_left, road_right, believed_obstacles)
+
+                if not nlp_ok:
+                    nlp_states = warm_states
+                    nlp_controls = warm_controls
+
+                ref_controls = nlp_controls
+            else:
+                logger.info("  Believed config: {%s} -- believed MILP failed, "
+                            "falling back to pure tracking", cfg_str)
+
+        # 4. Single NLP with true obstacles (+ optional agency term)
         logger.info("  INTERVENTION DEBUG: type=%s, n_true_obs=%d, "
                      "ref_controls=%s, w_agency=%.2f, frenet=[s=%.2f d=%.2f phi=%.3f v=%.2f]",
                      self._intervention_type, len(true_obstacles),
@@ -865,22 +1074,33 @@ class BeliefInference:
                          np.max(np.abs(ref_controls[:, 0])),
                          np.max(np.abs(ref_controls[:, 1])))
 
-        self._first_stage.reset()
-        true_milp_states = self._first_stage.solve(
-            frenet_state, road_left, road_right, true_obstacles)
+        if self._inference_type == 'mcts' and warm_states is not None:
+            # MCTS path: use MCTS trajectory directly as NLP warm-start
+            # (no MILP needed — MCTS already provides [s,d,phi,v] + [a,delta])
+            true_warm_states = warm_states
+            true_warm_controls = warm_controls
+            logger.info("  INTERVENTION DEBUG: MCTS warm-start for NLP, "
+                         "d range=[%.3f, %.3f]",
+                         float(np.min(true_warm_states[:, 1])),
+                         float(np.max(true_warm_states[:, 1])))
+        else:
+            # Naive path: MILP first, then warm-start NLP
+            self._first_stage.reset()
+            true_milp_states = self._first_stage.solve(
+                frenet_state, road_left, road_right, true_obstacles)
 
-        if true_milp_states is None:
-            logger.info("  Believed config: {%s} -- true MILP failed, skipping intervention", cfg_str)
-            self._last_intervention = None
-            return
+            if true_milp_states is None:
+                logger.info("  Believed config: {%s} -- true MILP failed, skipping intervention", cfg_str)
+                self._last_intervention = None
+                return
 
-        logger.info("  INTERVENTION DEBUG: true MILP OK, "
-                     "milp d range=[%.3f, %.3f]",
-                     float(np.min(true_milp_states[:, 1])),
-                     float(np.max(true_milp_states[:, 1])))
+            logger.info("  INTERVENTION DEBUG: true MILP OK, "
+                         "milp d range=[%.3f, %.3f]",
+                         float(np.min(true_milp_states[:, 1])),
+                         float(np.max(true_milp_states[:, 1])))
 
-        true_warm_states, true_warm_controls = self._milp_to_nlp_warmstart(
-            true_milp_states, frenet_state)
+            true_warm_states, true_warm_controls = self._milp_to_nlp_warmstart(
+                true_milp_states, frenet_state)
 
         logger.info("  INTERVENTION DEBUG: warm_controls[0]=[a=%.4f, δ=%.4f], "
                      "max|warm_δ|=%.4f",

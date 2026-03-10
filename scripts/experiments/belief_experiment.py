@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
                         choices=["none", "agency_only", "combined", "policy_only"],
                         help="Intervention scheme for the ego agent (default: none)")
     parser.add_argument("--inference-type", type=str, default="naive",
-                        choices=["naive"],
+                        choices=["naive", "mcts"],
                         help="Belief inference strategy (default: naive)")
     parser.add_argument("--relevance-method", type=str, default="dual",
                         choices=["corridor", "dual"],
