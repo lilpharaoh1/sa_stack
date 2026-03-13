@@ -28,6 +28,31 @@
     },
     "human": true
   },
-  "dynamic_groups": [],
-  "static_groups": []
+  "dynamic_groups": [
+    {
+      "agent_type": "TrafficAgent",
+      "count": [1, 2],
+      "spawn": {
+        "box": {
+          "center": [35, -2.5],
+          "length": 20.0,
+          "width": 3.5,
+          "heading": 0.0
+        },
+        "velocity": [5.0, 10.0]
+      },
+      "goal": {
+        "box": {
+          "center": [200.0, -2.5],
+          "length": 5,
+          "width": 7,
+          "heading": 0.0
+        }
+      },
+      "open_loop": true,
+      "belief": {"visible": false, "velocity_error": 0.0}
+    }
+  ],
+  "static_groups": [
+  ]
 }

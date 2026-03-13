@@ -1501,16 +1501,10 @@ _MAX_TREE_EDGES = 2000
 
 
 class MCTSTreePlotter:
-    """Live debug plot showing the MCTS tree structure.
+    """Live debug plot showing per-belief-config Q values.
 
-    Three-panel layout in Frenet coordinates:
-
-    - **Left** (s vs d): each node is a dot, edges connect parent→child.
-      Colour by depth, size by visit count.
-    - **Top-right** (s vs phi): heading vs arc-length.
-    - **Bottom-right** (s vs v): speed vs arc-length.
-
-    Road boundaries are drawn as horizontal lines on the s-d panel.
+    One s-vs-v panel per belief configuration θ, coloured by Q_θ
+    (the parent's Q for the action leading to each node under that config).
 
     Args:
         frenet: FrenetFrame for coordinate info.
@@ -1524,168 +1518,140 @@ class MCTSTreePlotter:
         self._dt = dt
 
         self._fig: Optional[plt.Figure] = None
-        self._ax_sd: Optional[plt.Axes] = None
-        self._ax_sphi: Optional[plt.Axes] = None
-        self._ax_sv: Optional[plt.Axes] = None
+        self._ax_cfg: List[plt.Axes] = []
+        self._cbars: List = []
+        self._n_cfg_panels: int = 0
 
-    def _init(self):
+    @staticmethod
+    def _cfg_label(cfg: tuple) -> str:
+        if not cfg:
+            return "no agents"
+        return ", ".join('V' if v else 'H' for v in cfg)
+
+    def _init(self, n_configs: int):
+        if self._fig is not None and plt.fignum_exists(self._fig.number):
+            plt.close(self._fig)
+
+        n = max(n_configs, 1)
+        self._n_cfg_panels = n
+
         plt.ion()
-        self._fig = plt.figure(figsize=(14, 8))
-        gs = self._fig.add_gridspec(2, 2, width_ratios=[2, 1])
-        self._ax_sd = self._fig.add_subplot(gs[:, 0])
-        self._ax_sphi = self._fig.add_subplot(gs[0, 1])
-        self._ax_sv = self._fig.add_subplot(gs[1, 1])
+        ncols = min(n, 4)
+        nrows = (n + ncols - 1) // ncols
+        self._fig, axes = plt.subplots(nrows, ncols,
+                                       figsize=(5 * ncols, 4 * nrows),
+                                       squeeze=False)
+        self._ax_cfg = [axes[i // ncols][i % ncols] for i in range(n)]
+        # Hide unused axes
+        for i in range(n, nrows * ncols):
+            axes[i // ncols][i % ncols].set_visible(False)
 
-        self._ax_sd.set_xlabel('s (arc-length)', fontsize=9)
-        self._ax_sd.set_ylabel('d (lateral)', fontsize=9)
-        self._ax_sd.set_title('MCTS Tree: s vs d', fontsize=10)
-        self._ax_sd.grid(True, alpha=0.3)
+        for ax in self._ax_cfg:
+            ax.set_xlabel('s', fontsize=9)
+            ax.set_ylabel('v (m/s)', fontsize=9)
+            ax.grid(True, alpha=0.3)
 
-        self._ax_sphi.set_xlabel('s', fontsize=9)
-        self._ax_sphi.set_ylabel('phi (rad)', fontsize=9)
-        self._ax_sphi.set_title('s vs heading', fontsize=10)
-        self._ax_sphi.grid(True, alpha=0.3)
-
-        self._ax_sv.set_xlabel('s', fontsize=9)
-        self._ax_sv.set_ylabel('v (m/s)', fontsize=9)
-        self._ax_sv.set_title('s vs speed', fontsize=10)
-        self._ax_sv.grid(True, alpha=0.3)
-
+        self._cbars = []
         self._fig.tight_layout()
 
     def update(self, root, road_left: np.ndarray, road_right: np.ndarray,
                step: int):
-        """Redraw tree from the MCTS root node.
-
-        Args:
-            root: MCTSNode root of the search tree.
-            road_left: (H+1,) left road boundary.
-            road_right: (H+1,) right road boundary.
-            step: Simulation step number.
-        """
         if root is None:
             return
 
-        if self._fig is None or not plt.fignum_exists(self._fig.number):
-            self._init()
+        # BFS — collect nodes and per-config Q values
+        node_s, node_v, node_visits = [], [], []
+        node_q_per_cfg: List[Dict] = []
+        edge_s, edge_v = [], []
+        all_seen_cfgs = set()
 
-        ax_sd = self._ax_sd
-        ax_sphi = self._ax_sphi
-        ax_sv = self._ax_sv
-
-        # Clear previous
-        ax_sd.cla()
-        ax_sphi.cla()
-        ax_sv.cla()
-
-        ax_sd.set_xlabel('s (arc-length)', fontsize=9)
-        ax_sd.set_ylabel('d (lateral)', fontsize=9)
-        ax_sd.grid(True, alpha=0.3)
-        ax_sphi.set_xlabel('s', fontsize=9)
-        ax_sphi.set_ylabel('phi (rad)', fontsize=9)
-        ax_sphi.grid(True, alpha=0.3)
-        ax_sv.set_xlabel('s', fontsize=9)
-        ax_sv.set_ylabel('v (m/s)', fontsize=9)
-        ax_sv.grid(True, alpha=0.3)
-
-        # BFS to collect all nodes and edges
-        node_s, node_d, node_phi, node_v = [], [], [], []
-        node_depth, node_visits = [], []
-        edge_s, edge_d = [], []
-        edge_sphi_s, edge_sphi_phi = [], []
-        edge_sv_s, edge_sv_v = [], []
-
-        queue = [root]
+        queue = [(root, None)]
         n_nodes = 0
         while queue and n_nodes < _MAX_TREE_NODES:
-            node = queue.pop(0)
-            s, d, phi, v = node.state
+            node, incoming_q_dict = queue.pop(0)
+            s = float(node.state[0])
+            v = float(node.state[1]) if len(node.state) == 2 else float(node.state[3])
             node_s.append(s)
-            node_d.append(d)
-            node_phi.append(phi)
             node_v.append(v)
-            node_depth.append(node.depth)
-            node_visits.append(node.visit_count)
+            node_visits.append(node.total_visits())
+
+            if incoming_q_dict is not None:
+                node_q_per_cfg.append(dict(incoming_q_dict))
+                all_seen_cfgs.update(incoming_q_dict.keys())
+            else:
+                root_q = {}
+                for q_dict in node.Q.values():
+                    for cfg, q_val in q_dict.items():
+                        if cfg not in root_q or q_val > root_q[cfg]:
+                            root_q[cfg] = q_val
+                        all_seen_cfgs.add(cfg)
+                node_q_per_cfg.append(root_q)
             n_nodes += 1
 
-            for child in node.children.values():
+            for act, child in node.children.items():
                 if child is None:
                     continue
-                cs, cd, cphi, cv = child.state
-                # Edges as line segments (parent→child)
+                cs = float(child.state[0])
+                cv = float(child.state[1]) if len(child.state) == 2 else float(child.state[3])
                 edge_s.extend([s, cs, None])
-                edge_d.extend([d, cd, None])
-                edge_sphi_s.extend([s, cs, None])
-                edge_sphi_phi.extend([phi, cphi, None])
-                edge_sv_s.extend([s, cs, None])
-                edge_sv_v.extend([v, cv, None])
-                queue.append(child)
+                edge_v.extend([v, cv, None])
+                child_q_dict = dict(node.Q.get(act, {}))
+                queue.append((child, child_q_dict))
 
         if not node_s:
             return
 
-        node_s = np.array(node_s)
-        node_d = np.array(node_d)
-        node_phi = np.array(node_phi)
-        node_v = np.array(node_v)
-        node_depth = np.array(node_depth)
-        node_visits = np.array(node_visits, dtype=float)
+        sorted_cfgs = sorted(all_seen_cfgs) if all_seen_cfgs else [()]
+        n_configs = len(sorted_cfgs)
 
-        # Normalise visit counts for marker size
+        if (self._fig is None
+                or not plt.fignum_exists(self._fig.number)
+                or self._n_cfg_panels != n_configs):
+            self._init(n_configs)
+
+        for cb in self._cbars:
+            try:
+                cb.remove()
+            except Exception:
+                pass
+        self._cbars = []
+
+        for ax in self._ax_cfg:
+            ax.cla()
+
+        node_s = np.array(node_s)
+        node_v = np.array(node_v)
+        node_visits = np.array(node_visits, dtype=float)
         max_vis = max(node_visits.max(), 1)
         sizes = 3 + 30 * (node_visits / max_vis)
 
-        # Normalise depth for colour
-        cmap = plt.cm.viridis
-        max_d = max(node_depth.max(), 1)
-        colours = cmap(node_depth / max_d)
+        for panel_idx, cfg in enumerate(sorted_cfgs):
+            ax = self._ax_cfg[panel_idx]
+            ax.set_xlabel('s', fontsize=9)
+            ax.set_ylabel('v (m/s)', fontsize=9)
+            ax.grid(True, alpha=0.3)
 
-        # --- s vs d panel ---
-        # Road boundaries
-        s_bounds = np.linspace(node_s.min(), node_s.max(), len(road_left))
-        ax_sd.plot(s_bounds, road_left[:len(s_bounds)],
-                   'k--', linewidth=1.5, alpha=0.6, label='road left')
-        ax_sd.plot(s_bounds, road_right[:len(s_bounds)],
-                   'k--', linewidth=1.5, alpha=0.6, label='road right')
+            q_vals = np.array([nq.get(cfg, 0.0) for nq in node_q_per_cfg])
 
-        # Edges
-        ax_sd.plot(edge_s, edge_d, color=(0.7, 0.7, 0.7), linewidth=0.4,
-                   alpha=0.5, zorder=1)
-        # Nodes
-        ax_sd.scatter(node_s, node_d, c=colours, s=sizes, zorder=3,
-                      edgecolors='none', alpha=0.8)
-        # Root marker
-        ax_sd.scatter([node_s[0]], [node_d[0]], c='red', s=80, zorder=5,
-                      marker='*', edgecolors='black', linewidths=0.5)
+            ax.plot(edge_s, edge_v,
+                    color=(0.7, 0.7, 0.7), linewidth=0.4, alpha=0.5, zorder=1)
+            sc = ax.scatter(node_s, node_v, c=q_vals, cmap='RdYlGn',
+                            s=sizes, zorder=3, edgecolors='none', alpha=0.8)
+            ax.scatter([node_s[0]], [node_v[0]], c='red', s=80, zorder=5,
+                       marker='*', edgecolors='black', linewidths=0.5)
 
-        # --- s vs phi panel ---
-        ax_sphi.plot(edge_sphi_s, edge_sphi_phi,
-                     color=(0.7, 0.7, 0.7), linewidth=0.4, alpha=0.5, zorder=1)
-        ax_sphi.scatter(node_s, node_phi, c=colours, s=sizes, zorder=3,
-                        edgecolors='none', alpha=0.8)
-        ax_sphi.scatter([node_s[0]], [node_phi[0]], c='red', s=80, zorder=5,
-                        marker='*', edgecolors='black', linewidths=0.5)
+            ax.set_title(
+                f'θ=({self._cfg_label(cfg)})  '
+                f'Q: [{q_vals.min():.1f}, {q_vals.max():.1f}]',
+                fontsize=9)
 
-        # --- s vs v panel ---
-        ax_sv.plot(edge_sv_s, edge_sv_v,
-                   color=(0.7, 0.7, 0.7), linewidth=0.4, alpha=0.5, zorder=1)
-        ax_sv.scatter(node_s, node_v, c=colours, s=sizes, zorder=3,
-                      edgecolors='none', alpha=0.8)
-        ax_sv.scatter([node_s[0]], [node_v[0]], c='red', s=80, zorder=5,
-                      marker='*', edgecolors='black', linewidths=0.5)
+            cb = self._fig.colorbar(sc, ax=ax, fraction=0.046,
+                                    pad=0.04, label='Q_θ')
+            self._cbars.append(cb)
 
-        # Titles with stats
-        ax_sd.set_title(
-            f'MCTS Tree (step={step})  |  {n_nodes} nodes, '
-            f'max_depth={int(node_depth.max())}/{self._horizon}',
+        self._fig.suptitle(
+            f'Per-belief Q  step={step}  |  {n_nodes} nodes',
             fontsize=10)
-        ax_sphi.set_title(
-            f'phi range: [{node_phi.min():.3f}, {node_phi.max():.3f}] rad',
-            fontsize=9)
-        ax_sv.set_title(
-            f'v range: [{node_v.min():.2f}, {node_v.max():.2f}] m/s',
-            fontsize=9)
-
         self._fig.tight_layout()
         self._fig.canvas.draw()
         self._fig.canvas.flush_events()
@@ -2160,19 +2126,22 @@ class MCTSTrajectoryPlotter:
 # ---------------------------------------------------------------------------
 
 class MCTSBeliefPlotter:
-    """Live plot showing per-agent hidden probabilities from MCTS reasoning.
+    """Live plot showing per-agent hidden probabilities from MCTS tree.
+
+    Computes marginal P(hidden) for each agent directly from the root
+    node's per-config Q values using the Boltzmann posterior, the same
+    way BeliefState does it in the MCTS planner.
 
     Two-panel layout:
 
-    - **Top**: bar chart of P(hidden | τ_obs) per agent, with a
-      horizontal threshold line showing the hidden-detection boundary.
-    - **Bottom**: time-series of P(hidden) for each tracked agent,
-      showing how beliefs evolve over successive inference steps.
+    - **Top**: bar chart of P(hidden) per agent.
+    - **Bottom**: time-series of P(hidden) for each tracked agent.
 
     Args:
         hidden_threshold: P(hidden) above which an agent is declared
             hidden. Drawn as a horizontal reference line.
         max_history: Number of past steps to show in the time series.
+        beta: Boltzmann rationality parameter (matches planner).
     """
 
     _AGENT_COLOURS = [
@@ -2221,18 +2190,39 @@ class MCTSBeliefPlotter:
         self._history_steps = []
         self._history_marginals = {}
 
-    def update(self, marginals: Dict[int, float], step: int,
-               n_trajectories: int = 0, n_beliefs: int = 0):
+    @staticmethod
+    def _compute_marginals_from_belief(belief) -> Dict[int, float]:
+        """Compute P(hidden) per agent from the belief state posterior.
+
+        Uses the same approach as BeliefState.marginals():
+        P(visible_i) = sum_{cfg where cfg[i]==1} P(cfg)
+        P(hidden_i)  = 1 - P(visible_i)
+        """
+        marginals = {}
+        for i, aid in enumerate(belief.agent_ids):
+            p_visible = sum(prob for cfg, prob in belief.probs.items()
+                            if cfg[i] == 1)
+            marginals[aid] = 1.0 - p_visible
+        return marginals
+
+    def update(self, belief, step: int,
+               n_trajectories: int = 0):
         """Redraw the MCTS belief plot.
 
         Args:
-            marginals: {agent_id: P(hidden | τ_obs)} from MCTS inference.
+            belief: BeliefState with updated posterior over configs.
             step: Simulation step number.
             n_trajectories: Number of MCTS trajectories generated.
-            n_beliefs: Number of unique belief configs found.
         """
+        if belief is None or not belief.agent_ids:
+            return
+
         if self._fig is None or not plt.fignum_exists(self._fig.number):
             self._init()
+
+        # Compute marginals from belief posterior
+        marginals = self._compute_marginals_from_belief(belief)
+        n_beliefs = len(belief.configs)
 
         # Update history
         self._history_steps.append(step)
@@ -2240,17 +2230,14 @@ class MCTSBeliefPlotter:
             if aid < 0:
                 continue
             if aid not in self._history_marginals:
-                # Backfill with 0.5 (unknown) for previous steps
                 self._history_marginals[aid] = [0.5] * (len(self._history_steps) - 1)
             self._history_marginals[aid].append(p_h)
 
-        # Agents seen before but not in current marginals → assume unchanged
         for aid in list(self._history_marginals.keys()):
             if aid not in marginals:
                 prev = self._history_marginals[aid][-1] if self._history_marginals[aid] else 0.5
                 self._history_marginals[aid].append(prev)
 
-        # Trim history
         if len(self._history_steps) > self._max_history:
             excess = len(self._history_steps) - self._max_history
             self._history_steps = self._history_steps[excess:]
@@ -2262,11 +2249,10 @@ class MCTSBeliefPlotter:
 
         # ===== Top panel: bar chart =====
         bar_ax.cla()
-        bar_ax.set_ylabel('P(hidden | τ_obs)', fontsize=9)
+        bar_ax.set_ylabel('P(hidden)', fontsize=9)
         bar_ax.set_ylim(0, 1.05)
         bar_ax.grid(True, axis='y', alpha=0.3)
 
-        # Threshold line
         bar_ax.axhline(y=self._hidden_threshold, color='grey',
                         linestyle='--', linewidth=1.2, alpha=0.7,
                         label=f'Threshold ({self._hidden_threshold:.1f})')
@@ -2277,10 +2263,9 @@ class MCTSBeliefPlotter:
             heights = [marginals[aid] for aid in dynamic_aids]
             colours = [self._get_agent_colour(aid) for aid in dynamic_aids]
 
-            bars = bar_ax.bar(x_pos, heights, color=colours, alpha=0.85,
-                              edgecolor='black', linewidth=0.8, width=0.6)
+            bar_ax.bar(x_pos, heights, color=colours, alpha=0.85,
+                       edgecolor='black', linewidth=0.8, width=0.6)
 
-            # Annotate each bar
             for j, (aid, h) in enumerate(zip(dynamic_aids, heights)):
                 status = "HIDDEN" if h > self._hidden_threshold else "visible"
                 bar_ax.text(j, h + 0.02, f"{h:.2f}\n({status})",
@@ -2291,24 +2276,32 @@ class MCTSBeliefPlotter:
             bar_ax.set_xticks(x_pos)
             bar_ax.set_xticklabels([f"Agent {aid}" for aid in dynamic_aids],
                                     fontsize=8)
+
+        # Show per-config posterior probabilities as text
+        cfg_strs = []
+        for cfg in sorted(belief.probs.keys()):
+            label = ",".join('V' if v else 'H' for v in cfg)
+            cfg_strs.append(f"({label})={belief.probs[cfg]:.3f}")
+        bar_ax.text(0.98, 0.02, "  ".join(cfg_strs),
+                    transform=bar_ax.transAxes, fontsize=6,
+                    ha='right', va='bottom', alpha=0.7,
+                    family='monospace')
+
         bar_ax.legend(loc='upper right', fontsize=7, framealpha=0.8)
         bar_ax.set_title(
-            f"MCTS Belief Inference  step={step}  |  "
-            f"{n_trajectories} trajs, {n_beliefs} beliefs",
+            f"Belief Marginals  step={step}  |  "
+            f"{n_trajectories} trajs, {n_beliefs} configs",
             fontsize=10)
 
         # ===== Bottom panel: time series =====
         ts_ax.cla()
         ts_ax.set_xlabel('Simulation step', fontsize=9)
-        ts_ax.set_ylabel('P(hidden | τ_obs)', fontsize=9)
+        ts_ax.set_ylabel('P(hidden)', fontsize=9)
         ts_ax.set_ylim(-0.05, 1.05)
         ts_ax.grid(True, alpha=0.3)
 
-        # Threshold line
         ts_ax.axhline(y=self._hidden_threshold, color='grey',
                        linestyle='--', linewidth=1.2, alpha=0.7)
-
-        # Shade hidden region
         ts_ax.axhspan(self._hidden_threshold, 1.05, alpha=0.06,
                        color='red', zorder=0)
         ts_ax.axhspan(-0.05, self._hidden_threshold, alpha=0.06,
@@ -2327,5 +2320,199 @@ class MCTSBeliefPlotter:
         ts_ax.legend(loc='upper left', fontsize=7, framealpha=0.8)
 
         self._fig.tight_layout(pad=2.0)
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()
+
+
+# ===================================================================
+# MCTSNodePlotter — visited nodes on road layout, coloured by value
+# ===================================================================
+
+_MAX_NODE_DOTS = 5000
+
+
+class MCTSNodePlotter:
+    """Live plot of MCTS visited nodes on the road map, coloured by value.
+
+    Two panels:
+
+    - **Left**: road layout with nodes plotted in world coordinates,
+      coloured by Bellman value.  Edges connect parent to child.
+    - **Right**: colourbar legend for the value scale.
+
+    Args:
+        scenario_map: Road layout to draw.
+        reference_waypoints: Concatenated A* reference path (N, 2).
+        frenet: FrenetFrame for (s, d) → world conversion.
+        ego_length: Ego vehicle length (m).
+        ego_width: Ego vehicle width (m).
+    """
+
+    def __init__(self,
+                 scenario_map: Map,
+                 reference_waypoints: np.ndarray,
+                 frenet: 'FrenetFrame',
+                 ego_length: float = 4.5,
+                 ego_width: float = 1.8):
+        self._scenario_map = scenario_map
+        self._reference_waypoints = reference_waypoints
+        self._frenet = frenet
+        self._ego_length = ego_length
+        self._ego_width = ego_width
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax: Optional[plt.Axes] = None
+
+    def _init(self):
+        plt.ion()
+        self._fig, self._ax = plt.subplots(1, 1, figsize=(14, 8))
+        ax = self._ax
+
+        plot_map(self._scenario_map, ax=ax, markings=True)
+        if len(self._reference_waypoints) > 0:
+            ax.plot(self._reference_waypoints[:, 0],
+                    self._reference_waypoints[:, 1],
+                    color=(0.5, 0.5, 0.5), linewidth=1, linestyle='--',
+                    alpha=0.4, zorder=2)
+        ax.set_aspect('equal')
+        ax.set_title('MCTS Nodes (coloured by value)', fontsize=10)
+        self._fig.tight_layout()
+
+    def update(self, root, step: int,
+               other_agent_states: Optional[Dict[int, AgentState]] = None):
+        """Redraw nodes from the MCTS root.
+
+        Args:
+            root: MCTSNode root of the search tree.
+            step: Simulation step number.
+            other_agent_states: Optional dict of other agents to draw.
+        """
+        if root is None:
+            return
+
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        ax = self._ax
+        ax.cla()
+
+        # Redraw static elements
+        plot_map(self._scenario_map, ax=ax, markings=True)
+        if len(self._reference_waypoints) > 0:
+            ax.plot(self._reference_waypoints[:, 0],
+                    self._reference_waypoints[:, 1],
+                    color=(0.5, 0.5, 0.5), linewidth=1, linestyle='--',
+                    alpha=0.4, zorder=2)
+
+        # BFS to collect nodes
+        xs, ys, values, visits = [], [], [], []
+        edge_xs, edge_ys = [], []
+        queue = [(root, None)]  # (node, parent_q_for_this_node)
+        n_nodes = 0
+
+        while queue and n_nodes < _MAX_NODE_DOTS:
+            node, incoming_q = queue.pop(0)
+            n_nodes += 1
+
+            # Support both (s, v) and (s, d, phi, v) node states
+            s = float(node.state[0])
+            d = float(node.state[1]) if len(node.state) > 2 else 0.0
+            w = self._frenet.frenet_to_world(s, d)
+            nx, ny = w['x'], w['y']
+
+            xs.append(nx)
+            ys.append(ny)
+            # Use parent's Q for the action leading here, so colliding
+            # nodes reflect the penalty.  Root uses best outgoing Q.
+            if incoming_q is not None:
+                values.append(incoming_q)
+            else:
+                best_q = 0.0
+                for q_dict in node.Q.values():
+                    for q_val in q_dict.values():
+                        if q_val > best_q or best_q == 0.0:
+                            best_q = q_val
+                values.append(best_q)
+            visits.append(node.total_visits())
+
+            for act, child in node.children.items():
+                if child is None or child.total_visits() == 0:
+                    continue
+                cs = float(child.state[0])
+                cd = float(child.state[1]) if len(child.state) > 2 else 0.0
+                cw = self._frenet.frenet_to_world(cs, cd)
+                edge_xs.append([nx, cw['x']])
+                edge_ys.append([ny, cw['y']])
+                # Best Q the parent has for the action leading to this child
+                child_q = 0.0
+                q_dict = node.Q.get(act, {})
+                if q_dict:
+                    child_q = max(q_dict.values())
+                queue.append((child, child_q))
+
+        if not xs:
+            ax.set_title(f'Step {step}: no nodes', fontsize=10)
+            self._fig.canvas.draw()
+            self._fig.canvas.flush_events()
+            return
+
+        # Draw edges
+        for ex, ey in zip(edge_xs, edge_ys):
+            ax.plot(ex, ey, color='grey', linewidth=0.3, alpha=0.3, zorder=3)
+
+        # Draw nodes coloured by value
+        values_arr = np.array(values)
+        visits_arr = np.array(visits)
+        sizes = np.clip(visits_arr / max(visits_arr.max(), 1) * 40, 3, 60)
+
+        sc = ax.scatter(xs, ys, c=values_arr, cmap='RdYlGn',
+                        s=sizes, zorder=5, edgecolors='black',
+                        linewidths=0.3, alpha=0.8)
+
+
+        # Draw other agents
+        if other_agent_states:
+            for aid, agent_state in other_agent_states.items():
+                if aid < 0:
+                    continue
+                pos = agent_state.position
+                heading = float(agent_state.heading)
+                meta = agent_state.metadata
+                length = float(meta.length) if meta else 4.0
+                width = float(meta.width) if meta else 1.8
+                corners = calculate_multiple_bboxes(
+                    np.array([float(pos[0])]),
+                    np.array([float(pos[1])]),
+                    np.array([length]),
+                    np.array([width]),
+                    np.array([heading]))[0]
+                patch = MplPolygon(
+                    corners, closed=True,
+                    facecolor=(0.9, 0.3, 0.3, 0.4),
+                    edgecolor=(0.7, 0.1, 0.1), linewidth=1.5, zorder=7)
+                ax.add_patch(patch)
+                ax.text(float(pos[0]), float(pos[1]) + width * 0.8,
+                        f'{aid}', fontsize=7, ha='center', va='bottom',
+                        fontweight='bold', zorder=9)
+
+        # Draw ego position (root node)
+        root_s = float(root.state[0])
+        root_d = float(root.state[1]) if len(root.state) > 2 else 0.0
+        root_w = self._frenet.frenet_to_world(root_s, root_d)
+        ax.plot(root_w['x'], root_w['y'], marker='*', color='blue',
+                markersize=15, zorder=10)
+
+        # Zoom in on ego vehicle (root node)
+        margin = 40.0
+        ax.set_xlim(root_w['x'] - margin, root_w['x'] + margin)
+        ax.set_ylim(root_w['y'] - margin, root_w['y'] + margin)
+
+        ax.set_aspect('equal')
+        ax.set_title(f'Step {step}: {n_nodes} nodes  |  '
+                      f'value range [{values_arr.min():.1f}, '
+                      f'{values_arr.max():.1f}]',
+                      fontsize=10)
+
+        self._fig.tight_layout()
         self._fig.canvas.draw()
         self._fig.canvas.flush_events()

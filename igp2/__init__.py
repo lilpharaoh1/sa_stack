@@ -11,6 +11,7 @@ from .recognition import *
 from .agents import *
 from .planning import *
 from .agents.mcts_agent import MCTSAgent
+from .agents.mcts_belief_agent import MCTSBeliefAgent
 from igp2 import data
 
 from igp2 import carlasim

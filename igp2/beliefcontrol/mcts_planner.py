@@ -1,19 +1,30 @@
-"""MCTS trajectory planner in Frenet coordinates with bicycle dynamics.
+"""MCTS trajectory planner with per-belief Q values.
 
-Generates diverse coarse trajectories via Monte Carlo Tree Search, then
-derives implied belief configurations from per-agent reward decomposition.
-Each trajectory is linked to a belief about which agents the driver can
-see, based on which agents' collision/clearance terms were active.
+Generates coarse trajectories via Monte Carlo Tree Search using
+**longitudinal-only (1-D)** dynamics along the Frenet s-axis.
+Each node stores per-belief Q values Q_θ(s, a) for every latent
+configuration θ ∈ Θ, enabling Bayesian belief inference over the
+human driver's latent visibility parameters.
 
-Adapted from TreeIRL (Tomov et al., 2025) for belief-driven assistive
-driving with optimisation warm-starting.
+Assumptions
+-----------
+* State is (s, v) — lateral offset d and heading phi are always 0.
+* Actions are scalar accelerations a — no steering.
+* Dynamics: s' = s + v·dt,  v' = clamp(v + a·dt, v_min, v_max).
+* Collision checking is 1-D along s (longitudinal gap only).
+* Road boundary checks are disabled (always on centreline).
+* Output states/controls are zero-padded to (s, d=0, phi=0, v)
+  and (a, delta=0) for downstream compatibility.
+
+See ``per_belief_mcts_spec.md`` for the full specification.
 """
 
+import itertools
 import logging
 import math
 import random
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Set
 
 import numpy as np
 
@@ -25,113 +36,167 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class TrajectoryBeliefPair:
-    """A coarse trajectory with its implied belief configuration."""
+class MCTSTrajectory:
+    """A coarse trajectory produced by MCTS planning."""
 
-    states: np.ndarray                  # (H+1, 4) [s, d, phi, v]
-    controls: np.ndarray                # (H, 2)   [a, delta]
-    implied_belief: Dict[int, bool]     # {agent_id: visible}
-    mcts_reward: float                  # cumulative discounted reward
-    obstacle_rewards: Dict[int, float]  # per-agent cumulative reward
+    states: np.ndarray      # (K+1, 4) [s, d=0, phi=0, v]  coarse, padded for compat
+    controls: np.ndarray    # (K, 2)   [a, delta=0]         coarse, padded for compat
+    mcts_reward: float      # cumulative discounted reward
+
+
+class BeliefState:
+    """Belief distribution over latent visibility configurations.
+
+    Each configuration θ = (d¹, d², ..., dⁿ) where dⁱ ∈ {0, 1}
+    indicates whether the human believes participant i is present.
+    """
+
+    def __init__(self, agent_ids: List[int]):
+        self._agent_ids = sorted(agent_ids)
+        n = len(agent_ids)
+        if n == 0:
+            self._configs: List[tuple] = [()]
+        else:
+            self._configs = list(itertools.product((0, 1), repeat=n))
+        self._probs: Dict[tuple, float] = {
+            cfg: 1.0 / len(self._configs) for cfg in self._configs
+        }
+
+    @property
+    def configs(self) -> List[tuple]:
+        return self._configs
+
+    @property
+    def agent_ids(self) -> List[int]:
+        return self._agent_ids
+
+    @property
+    def probs(self) -> Dict[tuple, float]:
+        return self._probs
+
+    def visible_aids(self, theta: tuple) -> Set[int]:
+        """Return the set of agent IDs visible under configuration θ."""
+        return {self._agent_ids[i] for i, v in enumerate(theta) if v == 1}
+
+    def sample(self) -> tuple:
+        """Sample a θ from the current belief distribution."""
+        configs = list(self._probs.keys())
+        probs = [self._probs[c] for c in configs]
+        idx = np.random.choice(len(configs), p=probs)
+        return configs[idx]
+
+    def most_likely(self) -> tuple:
+        """Return θ* = argmax_θ b(θ)."""
+        return max(self._probs, key=self._probs.get)
+
+    def update(self, likelihood: Dict[tuple, float]):
+        """Bayesian update: b_new(θ) ∝ likelihood(θ) * b_old(θ)."""
+        for cfg in self._configs:
+            self._probs[cfg] *= likelihood.get(cfg, 1e-10)
+        total = sum(self._probs.values())
+        if total > 1e-30:
+            for cfg in self._configs:
+                self._probs[cfg] /= total
+        else:
+            # Collapsed — reset to uniform
+            uniform = 1.0 / len(self._configs)
+            for cfg in self._configs:
+                self._probs[cfg] = uniform
+
+    def marginals(self) -> Dict[int, float]:
+        """P(agent i visible) for each agent."""
+        result = {}
+        for i, aid in enumerate(self._agent_ids):
+            p = sum(prob for cfg, prob in self._probs.items() if cfg[i] == 1)
+            result[aid] = p
+        return result
 
 
 class MCTSNode:
-    """Node in the MCTS search tree.
+    """Node in the per-belief MCTS tree.
 
-    Each node stores a Frenet state ``[s, d, phi, v]`` at a particular
-    depth (timestep) and tracks visit statistics for UCB1 selection.
-    Per-obstacle reward accumulators support belief derivation.
+    Stores per-action, per-θ Q values and shared per-action visit counts.
+    Actions are scalar accelerations (float).
     """
 
     __slots__ = (
         'state', 'depth', 'parent', 'action', 'prev_action',
-        'children', 'visit_count', 'total_reward',
-        'obstacle_reward_totals', '_untried',
+        'children', '_untried',
+        'action_visits',   # Dict[float, int]
+        'Q',               # Dict[float, Dict[theta, float]]
+        'colliding',       # True if this state collides with an obstacle
     )
 
     def __init__(self,
                  state: np.ndarray,
                  depth: int,
                  parent: Optional['MCTSNode'] = None,
-                 action: Optional[Tuple[float, float]] = None,
-                 prev_action: Optional[Tuple[float, float]] = None):
-        self.state = state              # [s, d, phi, v]
+                 action: Optional[float] = None,
+                 prev_action: Optional[float] = None,
+                 colliding: bool = False):
+        self.state = state          # (s, v)
         self.depth = depth
         self.parent = parent
-        self.action = action            # (a, delta) that led here
-        self.prev_action = prev_action  # parent's action (for rate limits)
-        self.children: Dict[Tuple[float, float], 'MCTSNode'] = {}
-        self.visit_count: int = 0
-        self.total_reward: float = 0.0
-        self.obstacle_reward_totals: Dict[int, float] = {}
-        self._untried: Optional[List[Tuple[float, float]]] = None
-
-    @property
-    def q_value(self) -> float:
-        if self.visit_count == 0:
-            return 0.0
-        return self.total_reward / self.visit_count
+        self.action = action        # scalar accel
+        self.prev_action = prev_action
+        self.children: Dict[float, 'MCTSNode'] = {}
+        self._untried: Optional[List[float]] = None
+        self.action_visits: Dict[float, int] = {}
+        self.Q: Dict[float, Dict[tuple, float]] = {}
+        self.colliding = colliding  # node is reachable but not expandable
 
     def is_terminal(self, horizon: int) -> bool:
-        return self.depth >= horizon
+        return self.depth >= horizon or self.colliding
 
-    def untried_actions(self, all_actions: List[Tuple[float, float]],
-                        planner: 'MCTSPlanner') -> List[Tuple[float, float]]:
-        """Return actions not yet expanded, filtering by rate limits.
+    def total_visits(self) -> int:
+        return sum(self.action_visits.values()) if self.action_visits else 0
 
-        Actions mapped to ``None`` in ``self.children`` were tried but
-        found infeasible — they are excluded.
-        """
+    def untried_actions(self, all_actions: List[float],
+                        planner: 'MCTSPlanner') -> List[float]:
+        """Return actions not yet expanded, filtering by jerk limits."""
         if self._untried is None:
-            valid = []
-            for act in all_actions:
-                if act not in self.children:
-                    if planner._check_rate_limits(self.action, act):
-                        valid.append(act)
-            self._untried = valid
+            self._untried = [
+                a for a in all_actions
+                if a not in self.children
+                and planner._check_rate_limits(self.action, a)
+            ]
         else:
-            # Remove any that have since been expanded (including None sentinels)
             self._untried = [a for a in self._untried
                              if a not in self.children]
         return self._untried
 
-    def is_fully_expanded(self, all_actions: List[Tuple[float, float]],
+    def is_fully_expanded(self, all_actions: List[float],
                           planner: 'MCTSPlanner') -> bool:
         return len(self.untried_actions(all_actions, planner)) == 0
 
-    def best_child_ucb(self, c: float) -> Optional['MCTSNode']:
-        """Select child with highest UCB1 score.
+    def best_action_ucb(self, theta: tuple, c: float) -> Optional[float]:
+        """Select action maximising UCB1 with Q_θ values.
 
-        Skips ``None`` sentinels (infeasible actions).
+        UCB = Q_θ(s, a) + c * sqrt(ln(N_total) / N(s, a))
         """
-        log_n = math.log(self.visit_count + 1)
+        total_n = self.total_visits()
+        if total_n == 0:
+            return None
+
+        log_n = math.log(total_n)
+        best_action = None
         best_score = -float('inf')
-        best_child = None
-        for child in self.children.values():
+
+        for action, child in self.children.items():
             if child is None:
                 continue
-            if child.visit_count == 0:
+            n = self.action_visits.get(action, 0)
+            if n == 0:
                 score = float('inf')
             else:
-                exploit = child.total_reward / child.visit_count
-                explore = c * math.sqrt(log_n / child.visit_count)
-                score = exploit + explore
-            # Tie-breaking
-            score += random.uniform(0, 1e-6)
+                q = self.Q.get(action, {}).get(theta, 0.0)
+                explore = c * math.sqrt(log_n / n)
+                score = q + explore
+            score += random.uniform(0, 1e-6)  # tie-break
             if score > best_score:
                 best_score = score
-                best_child = child
-        return best_child
-
-    def best_child_visit(self) -> Optional['MCTSNode']:
-        """Select child with highest visit count (for extraction).
-
-        Skips ``None`` sentinels (infeasible actions).
-        """
-        valid = [c for c in self.children.values() if c is not None]
-        if not valid:
-            return None
-        return max(valid, key=lambda c: c.visit_count)
+                best_action = action
+        return best_action
 
 
 # ---------------------------------------------------------------------------
@@ -139,45 +204,32 @@ class MCTSNode:
 # ---------------------------------------------------------------------------
 
 class MCTSPlanner:
-    """MCTS trajectory planner in Frenet coordinates with bicycle dynamics.
+    """Longitudinal-only MCTS planner with per-belief Q values.
 
-    Uses the same bicycle kinematic model and constraints as
-    :class:`SecondStagePlanner` but evaluates trajectories via a reward
-    function rather than solving an NLP.  The reward decomposes per-agent
-    collision/clearance contributions to derive implied belief
-    configurations.
+    Uses 1-D point-mass dynamics along the Frenet s-axis (d=0, phi=0).
+    Actions are scalar accelerations.  Stores per-θ Q values at each
+    node for Bayesian belief inference.
 
     Args:
-        horizon: Number of planning steps.
-        dt: Planning timestep (s).
-        ego_length: Ego vehicle length (m).
-        ego_width: Ego vehicle width (m).
-        wheelbase: Bicycle model wheelbase (m).
+        horizon: Planning steps (fine resolution).
+        dt: Fine planning timestep (s).
+        ego_length / ego_width / wheelbase: Vehicle geometry.
         collision_margin: Safety margin around obstacles (m).
         target_speed: Desired cruising speed (m/s).
         frenet: FrenetFrame for coordinate transforms.
-        nlp_params: Dict of NLP parameters (bounds and weights).
-        n_simulations: Number of MCTS iterations.
-        exploration_constant: UCB1 exploration parameter c.
-        n_accel_levels: Discretisation levels for acceleration.
-        n_steer_levels: Discretisation levels for steering angle.
-        max_trajectories: Maximum distinct trajectories to extract (k).
-        gamma: Discount factor for cumulative reward.
-        collision_penalty: Penalty scale for ellipse violation.
-        clearance_threshold: Ellipse g-value below which clearance
-            reward is applied (g < threshold means "close").
-        rollout_policy: Default policy for simulation phase
-            (``'heuristic'`` or ``'random'``).
-        activity_threshold: Minimum |cumulative obstacle reward| to
-            consider an agent "visible" in the implied belief.
+        nlp_params: Dict overriding SecondStagePlanner.DEFAULTS.
+        n_simulations: MCTS iterations.
+        exploration_constant: UCB1 c parameter.
+        n_accel_levels: Number of discrete acceleration levels.
+        n_steer_levels: Ignored (kept for interface compatibility).
+        max_trajectories: Trajectories to extract after search.
+        gamma: Discount factor.
+        collision_penalty: Penalty for longitudinal collision.
+        clearance_threshold: Unused (kept for interface compatibility).
+        beta: Rationality parameter for Boltzmann belief update.
+        rollout_policy: Unused (kept for interface compatibility).
     """
 
-    # How much coarser the MCTS timestep is compared to the NLP dt.
-    # E.g. COARSENESS_FACTOR=5 with NLP dt=0.1s → MCTS dt=0.5s.
-    # This gives larger per-step rate-limit budgets and fewer steps
-    # to cover the same time horizon, making the discrete action grid
-    # practical while still producing trajectories over the full
-    # planning window.
     COARSENESS_FACTOR: int = 5
 
     def __init__(self,
@@ -190,42 +242,35 @@ class MCTSPlanner:
                  target_speed: float,
                  frenet,
                  nlp_params: dict,
-                 n_simulations: int = 5000,
+                 n_simulations: int = 800,
                  exploration_constant: float = 10.0,
-                 n_accel_levels: int = 21,
+                 n_accel_levels: int = 13,
                  n_steer_levels: int = 21,
                  max_trajectories: int = 25,
                  gamma: float = 0.99,
-                 collision_penalty: float = 100.0,
+                 collision_penalty: float = 1000000.0,
                  clearance_threshold: float = 4.0,
-                 rollout_policy: str = 'heuristic',
-                 activity_threshold: float = 1e-3):
+                 beta: float = 1.0,
+                 rollout_policy: str = 'heuristic'):
 
-        # Apply coarseness: larger dt, fewer horizon steps, same time span
         self._coarseness = self.COARSENESS_FACTOR
-        self._dt_fine = dt                          # original NLP dt
-        self._dt = dt * self._coarseness            # coarse MCTS dt
+        self._dt_fine = dt
+        self._dt = dt * self._coarseness
         self._horizon = max(1, horizon // self._coarseness)
+        self._horizon_fine = horizon
 
         self._ego_length = ego_length
         self._ego_width = ego_width
         self._half_L = ego_length / 2.0
-        self._half_W = ego_width / 2.0
-        self._wheelbase = wheelbase
         self._collision_margin = collision_margin
         self._target_speed = target_speed
         self._frenet = frenet
         self._gamma = gamma
         self._collision_penalty = collision_penalty
-        self._clearance_threshold = clearance_threshold
-        self._rollout_policy = rollout_policy
-        self._activity_threshold = activity_threshold
+        self._beta = beta
         self._n_simulations = n_simulations
         self._exploration_constant = exploration_constant
         self._max_trajectories = max_trajectories
-
-        # Store original (fine) horizon for obstacle indexing
-        self._horizon_fine = horizon
 
         # NLP parameters (bounds and weights)
         from igp2.beliefcontrol.second_stage import SecondStagePlanner
@@ -235,963 +280,585 @@ class MCTSPlanner:
 
         self._a_min = self._params['a_min']
         self._a_max = self._params['a_max']
-        self._delta_max = self._params['delta_max']
-        self._delta_rate_max = self._params['delta_rate_max']
         self._jerk_max = self._params['jerk_max']
         self._v_min = self._params['v_min']
         self._v_max = self._params['v_max']
         self._w_s = self._params['w_s']
-        self._w_d = self._params['w_d']
         self._w_v = self._params['w_v']
         self._w_a = self._params['w_a']
-        self._w_delta = self._params['w_delta']
-        self._w_phi = self._params['w_phi']
 
-        # Rate limits per coarse step (proportionally larger)
+        # Jerk limit per coarse step
         self._jerk_limit = self._jerk_max * self._dt
-        self._delta_rate_limit = self._delta_rate_max * self._dt
 
-        # Build discrete action set
-        self._actions = self._build_action_set(n_accel_levels, n_steer_levels)
+        # Discrete action set: 1-D acceleration grid
+        self._actions = self._build_action_set(n_accel_levels)
 
-        logger.info("MCTSPlanner: coarseness=%d, dt_fine=%.3f, dt_coarse=%.3f, "
-                     "horizon_fine=%d, horizon_coarse=%d, "
-                     "jerk_limit=%.4f/step, delta_rate_limit=%.4f/step, "
-                     "n_actions=%d",
-                     self._coarseness, self._dt_fine, self._dt,
-                     horizon, self._horizon,
-                     self._jerk_limit, self._delta_rate_limit,
-                     len(self._actions))
-
-        # Stored after each search for debug visualisation
         self._last_root: Optional[MCTSNode] = None
 
-    # ------------------------------------------------------------------
-    # Action space
-    # ------------------------------------------------------------------
+        logger.info("MCTSPlanner (1-D): coarseness=%d, dt=%.3f/%.3f, "
+                     "horizon=%d/%d, actions=%d, beta=%.2f",
+                     self._coarseness, self._dt_fine, self._dt,
+                     self._horizon, horizon, len(self._actions), beta)
 
-    def _build_action_set(self, n_accel: int, n_steer: int
-                          ) -> List[Tuple[float, float]]:
-        """Build discrete (a, delta) action set."""
+    # ==================================================================
+    # Action space (1-D: accelerations only)
+    # ==================================================================
+
+    def _build_action_set(self, n_accel: int) -> List[float]:
         accels = np.linspace(self._a_min, self._a_max, n_accel)
-        steers = np.linspace(-self._delta_max, self._delta_max, n_steer)
-
-        # Ensure (0, 0) is always on the grid
-        has_zero_a = any(abs(a) < 1e-12 for a in accels)
-        has_zero_d = any(abs(d) < 1e-12 for d in steers)
-        if not has_zero_a:
+        if not any(abs(a) < 1e-12 for a in accels):
             accels = np.sort(np.append(accels, 0.0))
-            logger.debug("  action grid: 0.0 NOT in accel linspace — injected")
-        if not has_zero_d:
-            steers = np.sort(np.append(steers, 0.0))
-            logger.debug("  action grid: 0.0 NOT in steer linspace — injected")
+        return [round(float(a), 4) for a in accels]
 
-        logger.debug("  accel grid (%d): %s", len(accels),
-                      np.array2string(accels, precision=4, separator=', '))
-        logger.debug("  steer grid (%d): %s", len(steers),
-                      np.array2string(steers, precision=4, separator=', '))
-
-        actions = []
-        for a in accels:
-            for d in steers:
-                actions.append((round(float(a), 4), round(float(d), 4)))
-        return actions
-
-    def _check_rate_limits(self, prev_action: Optional[Tuple[float, float]],
-                           action: Tuple[float, float]) -> bool:
-        """Check jerk and steering-rate constraints against previous action."""
+    def _check_rate_limits(self, prev_action: Optional[float],
+                           action: float) -> bool:
         if prev_action is None:
             return True
-        a_prev, delta_prev = prev_action
-        a_new, delta_new = action
-        if abs(a_new - a_prev) > self._jerk_limit + 1e-6:
-            return False
-        if abs(delta_new - delta_prev) > self._delta_rate_limit + 1e-6:
-            return False
-        return True
+        return abs(action - prev_action) <= self._jerk_limit + 1e-6
 
-    # ------------------------------------------------------------------
-    # Bicycle dynamics (matching SecondStagePlanner exactly)
-    # ------------------------------------------------------------------
+    def _nearest_action(self, continuous_action) -> float:
+        """Map a continuous action to the nearest discrete acceleration.
+
+        Accepts either a scalar, a tuple (a,), or a tuple (a, delta)
+        for backward compatibility — only the first element is used.
+        """
+        if isinstance(continuous_action, (tuple, list)):
+            a_cont = continuous_action[0]
+        else:
+            a_cont = float(continuous_action)
+        best = self._actions[0]
+        best_dist = float('inf')
+        for act in self._actions:
+            dist = abs(act - a_cont)
+            if dist < best_dist:
+                best_dist = dist
+                best = act
+        return best
+
+    # ==================================================================
+    # 1-D longitudinal dynamics
+    # ==================================================================
 
     def _simulate_step(self, state: np.ndarray,
-                       action: Tuple[float, float],
+                       action: float,
                        road_left_k: float,
                        road_right_k: float,
                        obstacles: Optional[list] = None,
-                       belief_vector: Optional[Dict[int, bool]] = None,
                        step_k: int = 0,
-                       ) -> Tuple[np.ndarray, bool]:
-        """Forward one step of bicycle dynamics in Frenet coordinates.
+                       ) -> Tuple[np.ndarray, bool, bool, str]:
+        """Forward one step of 1-D longitudinal dynamics.
 
-        Dynamics (matching second_stage.py):
-            s' = s + v * cos(phi + delta) * dt
-            d' = d + v * sin(phi + delta) * dt
-            phi' = phi + (2*v/L) * sin(delta) * dt
-            v' = clip(v + a * dt, v_min, v_max)
+        State is (s, v).  Propagates dynamics then checks the new state
+        against all obstacles.  If the new state collides, the child
+        node is still created but marked as colliding (terminal), so
+        it receives the collision penalty but is never expanded further.
 
-        Returns:
-            (new_state, feasible) where feasible=False if road bounds
-            or collision constraints are violated.
+        Returns (new_state, feasible, colliding, reject_reason).
         """
-        s, d, phi, v = state
-        a, delta = action
+        s, v = state
         dt = self._dt
-        L = self._wheelbase
+        s_new = s + v * dt
+        v_new = max(self._v_min, min(self._v_max, v + action * dt))
 
-        s_new = s + v * math.cos(phi + delta) * dt
-        d_new = d + v * math.sin(phi + delta) * dt
-        phi_new = phi + (2.0 * v / L) * math.sin(delta) * dt
-        v_new = max(self._v_min, min(self._v_max, v + a * dt))
+        new_state = np.array([s_new, v_new])
 
-        # Wrap heading to [-pi, pi]
-        phi_new = (phi_new + math.pi) % (2.0 * math.pi) - math.pi
+        # Check all obstacles against the new state
+        colliding = False
+        if obstacles:
+            fine_k = step_k * self._coarseness
+            for obs in obstacles:
+                if self._check_longitudinal_collision(s_new, obs, fine_k):
+                    colliding = True
+                    break
 
-        new_state = np.array([s_new, d_new, phi_new, v_new])
+        return new_state, True, colliding, ''
 
-        # Check road boundaries (corner-based, matching NLP)
-        feasible = self._check_road_bounds(d_new, phi_new,
-                                           road_left_k, road_right_k)
+    # ==================================================================
+    # Evaluation (per-θ cost function) — 1-D longitudinal
+    # ==================================================================
 
-        # Check collision constraints against believed obstacles
-        if feasible and obstacles is not None:
-            feasible = self._check_collision(new_state, obstacles,
-                                             belief_vector, step_k)
+    def _step_reward_base(self, state: np.ndarray,
+                          action: float,
+                          step_k: int,
+                          s0: float) -> float:
+        """Tracking + control cost (identical for all θ).
 
-        return new_state, feasible
-
-    def _check_collision(self, state: np.ndarray, obstacles: list,
-                         belief_vector: Optional[Dict[int, bool]],
-                         step_k: int) -> bool:
-        """Return True if the state is collision-free w.r.t. believed obstacles.
-
-        Only obstacles whose agent_id maps to True in the belief_vector
-        are checked.  If belief_vector is None, no obstacles are checked
-        (all ignored).
+        Only longitudinal terms: s-tracking, v-tracking, acceleration.
+        Evaluated once at the coarse timestep.
         """
-        if belief_vector is None:
-            return True
+        s, v = state
 
-        fine_k = self._coarse_to_fine(step_k)
-        for obs in obstacles:
-            aid = obs['agent_id']
-            if not belief_vector.get(aid, False):
-                continue
-            g_min = self._min_ellipse_value(state, obs, fine_k)
-            if g_min < 1.0:
-                return False
-        return True
+        s_max = self._frenet.total_length if self._frenet else 1e6
+        ref_s = min(s0 + self._target_speed * step_k * self._dt, s_max)
 
-    def _check_road_bounds(self, d: float, phi: float,
-                           road_left: float, road_right: float) -> bool:
-        """Check all 4 ego corners stay within road boundaries."""
-        cos_phi = math.cos(phi)
-        sin_phi = math.sin(phi)
-        half_L = self._half_L
-        half_W = self._half_W
-
-        for sl, sw in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
-            c_d = d + sl * half_L * sin_phi + sw * half_W * cos_phi
-            if c_d < road_right - 1e-3 or c_d > road_left + 1e-3:
-                return False
-        return True
-
-    # ------------------------------------------------------------------
-    # Reward function with per-agent decomposition
-    # ------------------------------------------------------------------
-
-    def _coarse_to_fine(self, coarse_k: int) -> int:
-        """Map a coarse MCTS step index to the fine (NLP) step index."""
-        return coarse_k * self._coarseness
-
-    def _step_reward(self, state: np.ndarray,
-                     action: Tuple[float, float],
-                     obstacles: list,
-                     step_k: int,
-                     s0: float
-                     ) -> Tuple[float, Dict[int, float]]:
-        """Compute step reward with per-obstacle decomposition.
-
-        ``step_k`` is the coarse MCTS step index.
-
-        Returns:
-            (total_reward, obstacle_rewards_dict) where
-            obstacle_rewards_dict maps agent_id → reward component.
-        """
-        s, d, phi, v = state
-        a, delta = action
-
-        # Map coarse step to fine for reference position and obstacles
-        fine_k = self._coarse_to_fine(step_k)
-
-        # Tracking cost (negated to form reward, matching NLP cost structure)
-        s_max = self._frenet.total_length if self._frenet is not None else 1e6
-        ref_s = min(s0 + self._target_speed * fine_k * self._dt_fine, s_max)
         tracking = -(self._w_s * (s - ref_s) ** 2
-                     + self._w_d * d ** 2
-                     + self._w_phi * phi ** 2
                      + self._w_v * (v - self._target_speed) ** 2)
 
-        # Control regularisation
-        control = -(self._w_a * a ** 2 + self._w_delta * delta ** 2)
+        control = -(self._w_a * action ** 2)
+        return tracking + control
 
-        # Per-obstacle collision/clearance reward
-        obstacle_rewards: Dict[int, float] = {}
-        collision_total = 0.0
+    def _collision_cost(self, state: np.ndarray, obstacles: list,
+                        step_k: int,
+                        visible_aids: Optional[Set[int]] = None) -> float:
+        """1-D collision penalty (depends on θ via visible_aids).
 
+        Static objects (aid < 0) are always penalised.
+        Dynamic agents are only penalised if their aid is in visible_aids.
+        """
+        s = state[0]
+        fine_k = step_k * self._coarseness
+        collision = 0.0
         for obs in obstacles:
             aid = obs['agent_id']
-            g_min = self._min_ellipse_value(state, obs, fine_k)
+            if aid >= 0:
+                if visible_aids is not None and aid not in visible_aids:
+                    continue
+            if self._check_longitudinal_collision(s, obs, fine_k):
+                collision = min(collision, -self._collision_penalty)
+        return collision
 
-            if g_min < 1.0:
-                # Inside collision ellipse — large penalty
-                r_obs = -self._collision_penalty * (1.0 - g_min)
-            elif g_min < self._clearance_threshold:
-                # Close to obstacle — clearance penalty (decays with distance)
-                r_obs = -(self._clearance_threshold - g_min) / self._clearance_threshold
-            else:
-                r_obs = 0.0
+    def _step_reward(self, state: np.ndarray,
+                     action: float,
+                     obstacles: list,
+                     step_k: int,
+                     s0: float,
+                     visible_aids: Optional[Set[int]] = None) -> float:
+        """Single-step reward under a specific visibility configuration."""
+        base = self._step_reward_base(state, action, step_k, s0)
+        collision = self._collision_cost(state, obstacles, step_k, visible_aids)
+        return base + collision
 
-            obstacle_rewards[aid] = r_obs
-            collision_total += r_obs
+    def _check_longitudinal_collision(self, s_ego: float, obs: dict,
+                                      fine_k: int) -> bool:
+        """1-D collision: check if ego s overlaps obstacle s (+ margins)."""
+        k = min(fine_k, len(obs['s']) - 1)
+        s_obs = float(obs['s'][k])
+        gap = self._half_L + obs['length'] / 2.0 + self._collision_margin
+        return abs(s_ego - s_obs) < gap
 
-        total = tracking + control + collision_total
-        return total, obstacle_rewards
-
-    def _min_ellipse_value(self, state: np.ndarray, obs: dict,
-                           step_k: int) -> float:
-        """Minimum ellipse g-value across all 4 ego corners.
-
-        Uses the identical elliptical formulation from SecondStagePlanner
-        (Eiras et al. Eq. 9-10) but with plain math instead of CasADi.
-
-        g >= 1 means safe (corner outside ellipse).
-        g < 1 means collision (corner inside ellipse).
-        """
-        s, d, phi, v = state
-        half_L = self._half_L
-        half_W = self._half_W
-
-        # Ellipse semi-axes
-        a_i = obs['length'] / 2.0 + self._collision_margin
-        b_i = obs['width'] / 2.0 + self._collision_margin
-
-        # Obstacle position at step_k
-        s_arr = obs['s']
-        d_arr = obs['d']
-        k = min(step_k, len(s_arr) - 1)
-        s_obs = float(s_arr[k])
-        d_obs = float(d_arr[k])
-
-        # Obstacle heading in Frenet frame
-        if self._frenet is not None:
-            obs_s0 = float(s_arr[0])
-            _, _, _, road_angle_obs = self._frenet._interpolate(obs_s0)
-            phi_i = obs.get('heading', road_angle_obs) - road_angle_obs
-        else:
-            phi_i = 0.0
-
-        cos_phi_i = math.cos(phi_i)
-        sin_phi_i = math.sin(phi_i)
-
-        # Ego heading rotation
-        cos_phi = math.cos(phi)
-        sin_phi = math.sin(phi)
-
-        g_min = float('inf')
-        for alpha_l, alpha_w in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
-            # Corner position (Eq. 6)
-            c_s = s + alpha_l * half_L * cos_phi - alpha_w * half_W * sin_phi
-            c_d = d + alpha_l * half_L * sin_phi + alpha_w * half_W * cos_phi
-
-            # Vector from obstacle centre to corner
-            d_s = c_s - s_obs
-            d_d = c_d - d_obs
-
-            # Rotate to obstacle body frame: R(-phi_i) * d
-            d_body_x = cos_phi_i * d_s + sin_phi_i * d_d
-            d_body_y = -sin_phi_i * d_s + cos_phi_i * d_d
-
-            # Ellipse g-value (Eq. 10)
-            g = (d_body_x / a_i) ** 2 + (d_body_y / b_i) ** 2
-            if g < g_min:
-                g_min = g
-
-        return g_min
-
-    # ------------------------------------------------------------------
-    # Core MCTS loop
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Core MCTS loop (per-belief)
+    # ==================================================================
 
     def search(self, frenet_state: np.ndarray,
                road_left: np.ndarray, road_right: np.ndarray,
                obstacles: list,
-               prev_action: Optional[Tuple[float, float]] = None,
-               belief_vector: Optional[Dict[int, bool]] = None,
-               ) -> List[TrajectoryBeliefPair]:
-        """Run MCTS and return trajectory-belief pairs.
+               prev_action=None,
+               belief: Optional[BeliefState] = None,
+               human_action=None,
+               ) -> Tuple[List[MCTSTrajectory], Optional[BeliefState]]:
+        """Run per-belief MCTS search (1-D longitudinal).
 
         Args:
-            frenet_state: Initial [s, d, phi, v] state.
-            road_left: (H+1,) left road boundary at each step.
-            road_right: (H+1,) right road boundary at each step.
-            obstacles: List of obstacle dicts (all agents visible).
-            prev_action: (a, delta) action applied just before the
-                planning window, for rate-limit continuity at the root.
-            belief_vector: {agent_id: bool} — True means the obstacle
-                is considered for hard collision avoidance, False means
-                ignored.  None means ignore all obstacles.
+            frenet_state: Current ego state [s, d, phi, v] (d, phi ignored).
+            road_left / road_right: Road boundary arrays (accepted but ignored).
+            obstacles: Obstacle list (with agent_id, s, d, etc.).
+            prev_action: Previous acceleration (scalar or tuple — first
+                element used).  For rate-limit continuity.
+            belief: Current belief state (created if None).
+            human_action: Observed human action for belief update.
 
         Returns:
-            List of TrajectoryBeliefPair sorted by MCTS reward (best first).
+            (trajectories, updated_belief)
         """
+        # Extract (s, v) from the full 4-element Frenet state
         s0 = float(frenet_state[0])
-        root = MCTSNode(state=frenet_state.copy(), depth=0,
-                        action=prev_action)
+        v0 = float(frenet_state[3]) if len(frenet_state) > 3 else float(frenet_state[1])
+        state_1d = np.array([s0, v0])
 
-        logger.debug("MCTS search start: state=[s=%.2f d=%.2f phi=%.3f v=%.2f], "
-                     "horizon=%d, dt=%.3f, n_actions=%d, "
-                     "jerk_limit=%.4f, delta_rate_limit=%.4f",
-                     frenet_state[0], frenet_state[1],
-                     frenet_state[2], frenet_state[3],
-                     self._horizon, self._dt, len(self._actions),
-                     self._jerk_limit, self._delta_rate_limit)
-        logger.debug("  road bounds at k=0: left=%.3f  right=%.3f  |  "
-                     "at k=%d: left=%.3f  right=%.3f",
-                     road_left[0], road_right[0],
-                     self._horizon,
-                     road_left[min(self._horizon, len(road_left) - 1)],
-                     road_right[min(self._horizon, len(road_right) - 1)])
+        # Normalise prev_action to scalar
+        if isinstance(prev_action, (tuple, list)):
+            prev_action = float(prev_action[0])
 
-        expand_fail_count = 0
-        rollout_early_count = 0
+        root = MCTSNode(state=state_1d, depth=0, action=prev_action)
 
+        # Build belief state if not provided
+        if belief is None:
+            dynamic_aids = sorted({obs['agent_id'] for obs in obstacles
+                                   if obs['agent_id'] >= 0})
+            belief = BeliefState(dynamic_aids)
 
-        for sim_i in range(self._n_simulations):
-            # 1. Selection: traverse tree using UCB1, accumulating
-            #    step rewards along the path
-            node, path_reward, path_obs = self._select(
-                root, road_left, road_right, obstacles, s0, belief_vector)
+        all_configs = belief.configs
 
-            # 2. Expansion: add a new child if not terminal
-            expand_reward = 0.0
-            expand_obs: Dict[int, float] = {}
+        # Pre-compute visible aid sets for each θ
+        theta_visible: Dict[tuple, Set[int]] = {
+            cfg: belief.visible_aids(cfg) for cfg in all_configs
+        }
+
+        # Debug counters
+        n_expanded = 0
+        n_terminal = 0
+        n_no_untried = 0
+        n_all_infeasible = 0
+        self._reject_counts = {}
+
+        import time as _time
+        _t_select = 0.0
+        _t_expand = 0.0
+        _t_backup = 0.0
+
+        for _ in range(self._n_simulations):
+            # 1. Sample θ for this simulation
+            theta_sampled = belief.sample()
+
+            # 2. Selection: traverse using Q_θ for UCB
+            _t0 = _time.perf_counter()
+            path: List[Tuple[MCTSNode, Tuple[float, float]]] = []
+            node = root
+
+            while not node.is_terminal(self._horizon):
+                if not node.is_fully_expanded(self._actions, self):
+                    break
+                action = node.best_action_ucb(theta_sampled,
+                                              self._exploration_constant)
+                if action is None:
+                    break
+                path.append((node, action))
+                node = node.children[action]
+            _t_select += _time.perf_counter() - _t0
+
+            # 3. Expansion
+            _t0 = _time.perf_counter()
             if not node.is_terminal(self._horizon):
-                old_node = node
-                node, expand_reward, expand_obs = self._expand(
-                    node, road_left, road_right,
-                    obstacles, s0, belief_vector)
-                if node is old_node:
-                    expand_fail_count += 1
+                child, action = self._expand(node, road_left, road_right,
+                                             obstacles, s0)
+                if child is not None:
+                    n_expanded += 1
+                    path.append((node, action))
+                    # Leaf evaluation: per-θ step reward
+                    leaf_returns = {}
+                    for cfg in all_configs:
+                        leaf_returns[cfg] = self._step_reward(
+                            child.state, action, obstacles, child.depth, s0,
+                            visible_aids=theta_visible[cfg])
+                else:
+                    untried = node.untried_actions(self._actions, self)
+                    if not untried:
+                        n_no_untried += 1
+                    else:
+                        n_all_infeasible += 1
+                    leaf_returns = {cfg: 0.0 for cfg in all_configs}
+            else:
+                n_terminal += 1
+                leaf_returns = {cfg: 0.0 for cfg in all_configs}
 
-            # 3. Simulation (rollout): play out to horizon
-            # Trace first rollout from each root child
-            rollout_reward, rollout_obs = self._rollout(
-                node, road_left, road_right, obstacles, s0, belief_vector)
+            _t_expand += _time.perf_counter() - _t0
 
-            # Combine: path (selection) + expansion + rollout
-            # Discount the expansion and rollout relative to the path
-            path_depth = node.depth - (1 if expand_reward != 0.0 else 0)
-            gamma_path = self._gamma ** max(path_depth, 0)
-            gamma_expand = self._gamma ** max(node.depth - 1, 0) if expand_reward != 0.0 else 1.0
+            # 4. Backup: propagate per-θ returns up the path
+            _t0 = _time.perf_counter()
+            returns = leaf_returns
 
-            total_reward = (path_reward
-                            + gamma_expand * expand_reward
-                            + gamma_path * rollout_reward)
+            for parent_node, act in reversed(path):
+                child_node = parent_node.children[act]
 
-            # Merge per-agent obstacle rewards
-            total_obs: Dict[int, float] = dict(path_obs)
-            for aid, r in expand_obs.items():
-                total_obs[aid] = total_obs.get(aid, 0.0) + r
-            for aid, r in rollout_obs.items():
-                total_obs[aid] = total_obs.get(aid, 0.0) + r
+                # Per-θ step reward for this transition
+                step_rewards = {}
+                for cfg in all_configs:
+                    step_rewards[cfg] = self._step_reward(
+                        child_node.state, act, obstacles,
+                        child_node.depth, s0,
+                        visible_aids=theta_visible[cfg])
 
-            # 4. Backpropagation
-            self._backpropagate(node, total_reward, total_obs)
+                # Update visit count (shared across θ)
+                parent_node.action_visits[act] = \
+                    parent_node.action_visits.get(act, 0) + 1
+                n = parent_node.action_visits[act]
+
+                # Update Q for all θ (incremental mean)
+                if act not in parent_node.Q:
+                    parent_node.Q[act] = {}
+
+                new_returns = {}
+                for cfg in all_configs:
+                    total_return = step_rewards[cfg] + self._gamma * returns[cfg]
+                    old_q = parent_node.Q[act].get(cfg, 0.0)
+                    parent_node.Q[act][cfg] = old_q + (total_return - old_q) / n
+                    new_returns[cfg] = total_return
+
+                returns = new_returns
+            _t_backup += _time.perf_counter() - _t0
 
         self._last_root = root
 
-        # Tree stats
-        max_depth = 0
-        total_nodes = 0
-        queue = [root]
-        while queue:
-            n = queue.pop()
-            total_nodes += 1
-            if n.depth > max_depth:
-                max_depth = n.depth
-            for c in n.children.values():
-                if c is not None:
-                    queue.append(c)
+        _t0 = _time.perf_counter()
+        # ----- Belief update from human's observed action -----
+        if human_action is not None and root.Q:
+            belief = self._update_belief(root, belief, human_action)
 
-        logger.info("MCTS tree stats: %d nodes, max_depth=%d/%d, "
-                     "expand_fails=%d/%d",
-                     total_nodes, max_depth, self._horizon,
-                     expand_fail_count, self._n_simulations)
+        # Debug logging
+        reject_str = ", ".join(
+            f"{r}={c}" for r, c in sorted(self._reject_counts.items()))
+        n_nodes = self._count_nodes(root)
+        logger.info(
+            "MCTS debug: %d expanded, %d terminal, %d fully-expanded, "
+            "%d all-infeasible | %d tree nodes | rejects: {%s} | "
+            "road_left=[%.1f..%.1f] road_right=[%.1f..%.1f]",
+            n_expanded, n_terminal, n_no_untried, n_all_infeasible,
+            n_nodes, reject_str,
+            float(road_left.min()), float(road_left.max()),
+            float(road_right.min()), float(road_right.max()))
 
-        # Per-layer visit count breakdown
-        layer_visits: dict[int, list[int]] = {}
-        queue2 = [root]
-        while queue2:
-            n = queue2.pop()
-            layer_visits.setdefault(n.depth, []).append(n.visit_count)
-            for c in n.children.values():
-                if c is not None:
-                    queue2.append(c)
-        for depth in sorted(layer_visits.keys()):
-            visits = sorted(layer_visits[depth], reverse=True)
-            total_v = sum(visits)
-            n_layer = len(visits)
-            top5 = visits[:5]
-            logger.debug("  layer %d: %d nodes, total_visits=%d, "
-                          "top5_visits=%s",
-                          depth, n_layer, total_v, top5)
+        # Log belief state
+        if belief.agent_ids:
+            marg = belief.marginals()
+            marg_str = ", ".join(f"{aid}={p:.3f}" for aid, p in marg.items())
+            logger.info("Belief marginals: {%s}", marg_str)
 
-        # Debug: dump root children sorted by average reward
-        root_children = [(a, c) for a, c in root.children.items()
-                         if c is not None]
-        root_children.sort(key=lambda x: x[1].total_reward / max(x[1].visit_count, 1),
-                           reverse=True)
-        logger.debug("MCTS root children (%d valid / %d total):",
-                      len(root_children), len(root.children))
-        for i, (action, child) in enumerate(root_children[:10]):
-            avg_r = child.total_reward / max(child.visit_count, 1)
-            s, d, phi, v = child.state
-            fine_k = self._coarse_to_fine(1)
-            ref_s = min(s0 + self._target_speed * fine_k * self._dt_fine,
-                        self._frenet.total_length if self._frenet else 1e6)
-            r_track_s = -self._w_s * (s - ref_s) ** 2
-            r_track_d = -self._w_d * d ** 2
-            r_track_phi = -self._w_phi * phi ** 2
-            r_track_v = -self._w_v * (v - self._target_speed) ** 2
-            r_ctrl_a = -self._w_a * action[0] ** 2
-            r_ctrl_d = -self._w_delta * action[1] ** 2
-            r_obs_total = 0.0
-            for obs in obstacles:
-                g = self._min_ellipse_value(child.state, obs, fine_k)
-                if g < 1.0:
-                    r_obs_total += -self._collision_penalty * (1.0 - g)
-                elif g < self._clearance_threshold:
-                    r_obs_total += -(self._clearance_threshold - g) / self._clearance_threshold
-            logger.debug(
-                "  [%2d] a=(%.3f,%.3f) vis=%d avg_r=%.3f | "
-                "s_err=%.3f(r=%.4f) d=%.3f(r=%.4f) phi=%.4f(r=%.4f) "
-                "v_err=%.3f(r=%.4f) ctrl_a=%.4f ctrl_d=%.4f obs=%.4f",
-                i, action[0], action[1], child.visit_count, avg_r,
-                s - ref_s, r_track_s, d, r_track_d, phi, r_track_phi,
-                v - self._target_speed, r_track_v,
-                r_ctrl_a, r_ctrl_d, r_obs_total)
+        _t_belief_update = _time.perf_counter() - _t0
 
-        # Extract top-k trajectories
+        # ----- Trajectory extraction under θ* -----
+        _t0 = _time.perf_counter()
+        theta_star = belief.most_likely()
         trajectories = self._extract_trajectories(
             root, self._max_trajectories, road_left, road_right,
-            obstacles, s0, belief_vector=belief_vector)
-
-        # Sort best first
+            obstacles, s0, theta_star, theta_visible)
         trajectories.sort(key=lambda t: -t.mcts_reward)
+        _t_extract = _time.perf_counter() - _t0
 
-        # Debug: log each extracted trajectory's coverage
-        for ti, tbp in enumerate(trajectories):
-            s_range = float(tbp.states[-1, 0] - tbp.states[0, 0])
-            d_range = float(np.max(tbp.states[:, 1]) - np.min(tbp.states[:, 1]))
-            n_unique = len(set(tbp.states[:, 0].round(4)))
-
-            # logger.info(f"    traj[{ti}]: {tbp.states}")
-            # logger.info("  traj[%d]: s_range=%.2f  d_range=%.2f  "
-            #              "n_unique_s=%d/%d  reward=%.2f  belief={%s}",
-            #              ti, s_range, d_range,
-            #              n_unique, len(tbp.states), tbp.mcts_reward,
-            #              ", ".join(f"{a}:{'V' if v else 'H'}"
-            #                        for a, v in sorted(tbp.implied_belief.items())))
-
-        logger.info("MCTS search: %d simulations, %d trajectories extracted",
+        logger.info("MCTS search: %d simulations, %d trajectories",
                      self._n_simulations, len(trajectories))
-        return trajectories
+        logger.info("MCTS timing: select=%.3fs  expand=%.3fs  backup=%.3fs  "
+                     "belief_update=%.3fs  extract=%.3fs  total=%.3fs",
+                     _t_select, _t_expand, _t_backup, _t_belief_update,
+                     _t_extract,
+                     _t_select + _t_expand + _t_backup + _t_belief_update + _t_extract)
 
-    def _select(self, node: MCTSNode,
-                road_left: np.ndarray, road_right: np.ndarray,
-                obstacles: list, s0: float,
-                belief_vector: Optional[Dict[int, bool]] = None,
-                ) -> Tuple[MCTSNode, float, Dict[int, float]]:
-        """Traverse tree by UCB1 until reaching an expandable or terminal node.
+        return trajectories, belief
 
-        Returns:
-            (node, path_reward, path_obs_rewards) where path_reward is the
-            cumulative reward along the selection path (steps traversed
-            from root to the returned node).
-        """
-        path_reward = 0.0
-        path_obs_rewards: Dict[int, float] = {}
-        discount = 1.0
+    def _count_nodes(self, root: MCTSNode) -> int:
+        count = 0
+        queue = [root]
+        while queue:
+            nd = queue.pop(0)
+            count += 1
+            for child in nd.children.values():
+                if child is not None:
+                    queue.append(child)
+        return count
 
-        while not node.is_terminal(self._horizon):
-            if not node.is_fully_expanded(self._actions, self):
-                return node, path_reward, path_obs_rewards
-            child = node.best_child_ucb(self._exploration_constant)
-            if child is None:
-                # All children infeasible — treat as terminal
-                return node, path_reward, path_obs_rewards
-
-            # Accumulate step reward for this transition
-            step_r, step_obs_r = self._step_reward(
-                child.state, child.action, obstacles, child.depth, s0)
-            path_reward += discount * step_r
-            discount *= self._gamma
-            for aid, r in step_obs_r.items():
-                path_obs_rewards[aid] = path_obs_rewards.get(aid, 0.0) + r
-
-            node = child
-        return node, path_reward, path_obs_rewards
+    # ----- 1. Expansion -----
 
     def _expand(self, node: MCTSNode,
-                road_left: np.ndarray, road_right: np.ndarray,
-                obstacles: list, s0: float,
-                belief_vector: Optional[Dict[int, bool]] = None,
-                ) -> Tuple[MCTSNode, float, Dict[int, float]]:
-        """Expand one untried action from the node.
-
-        Only creates child nodes for feasible (road-boundary and
-        collision-free) actions.  Infeasible actions are discarded from
-        the untried list so they are never revisited.
-
-        Returns:
-            (child_node, step_reward, step_obs_rewards) for the
-            expansion step.  If no expansion occurs, returns
-            (node, 0.0, {}).
-        """
+                road_left, road_right, obstacles, s0,
+                ) -> Tuple[Optional[MCTSNode], Optional[Tuple[float, float]]]:
+        """Expand one untried action.  Returns (child, action) or (None, None)."""
         untried = node.untried_actions(self._actions, self)
         if not untried:
-            return node, 0.0, {}
+            return None, None
 
         random.shuffle(untried)
-
         k = node.depth
-        fine_k = self._coarse_to_fine(k + 1)
+        fine_k = (k + 1) * self._coarseness
         rl = road_left[min(fine_k, len(road_left) - 1)]
         rr = road_right[min(fine_k, len(road_right) - 1)]
 
         for action in untried:
-            new_state, feasible = self._simulate_step(
-                node.state, action, rl, rr,
-                obstacles=obstacles, belief_vector=belief_vector,
-                step_k=k + 1)
-
+            new_state, feasible, colliding, reason = self._simulate_step(
+                node.state, action, rl, rr, obstacles, k)
             if not feasible:
-                # Mark as tried so it won't be retried
-                node.children[action] = None  # sentinel
+                node.children[action] = None
+                self._reject_counts[reason] = \
+                    self._reject_counts.get(reason, 0) + 1
                 continue
 
-            child = MCTSNode(
-                state=new_state,
-                depth=k + 1,
-                parent=node,
-                action=action,
-                prev_action=node.action,
-            )
+            child = MCTSNode(state=new_state, depth=k + 1,
+                             parent=node, action=action,
+                             prev_action=node.action,
+                             colliding=colliding)
             node.children[action] = child
-
-            # Invalidate untried cache
             node._untried = None
+            return child, action
 
-            # Compute step reward for the expansion transition
-            step_r, step_obs_r = self._step_reward(
-                new_state, action, obstacles, k + 1, s0)
-            return child, step_r, step_obs_r
-
-        # All untried actions were infeasible — return stuck-state penalty
         node._untried = None
-        s, d, phi, v = node.state
-        rl_val = road_left[min(node.depth + 1, len(road_left) - 1)]
-        rr_val = road_right[min(node.depth + 1, len(road_right) - 1)]
-        logger.debug("  expand: ALL %d actions infeasible at depth=%d "
-                      "state=[s=%.2f d=%.2f phi=%.3f v=%.2f] "
-                      "road=[%.3f, %.3f]",
-                      len(untried), node.depth, s, d, phi, v,
-                      rr_val, rl_val)
-        stuck_r, stuck_obs_r = self._step_reward(
-            node.state, (0.0, 0.0), obstacles, node.depth + 1, s0)
-        return node, stuck_r, stuck_obs_r
+        return None, None
 
-    def _rollout(self, node: MCTSNode,
-                 road_left: np.ndarray, road_right: np.ndarray,
-                 obstacles: list, s0: float,
-                 belief_vector: Optional[Dict[int, bool]] = None,
-                 ) -> Tuple[float, Dict[int, float]]:
-        """Simulate from node to horizon using default policy.
+    # ----- 2. Belief update -----
 
-        Hard-enforces road boundaries and collision avoidance: if the
-        heuristic action is infeasible, tries alternative actions.  If
-        no action keeps the vehicle on the road and collision-free, the
-        rollout terminates early.
+    def _update_belief(self, root: MCTSNode, belief: BeliefState,
+                       human_action) -> BeliefState:
+        """Boltzmann belief update using root Q values and observed action.
 
-        Returns:
-            (cumulative_discounted_reward, per_agent_obstacle_rewards)
+        P(u_H | s_0, θ) = exp(β * Q_θ(s_0, u_H)) / Σ_a' exp(β * Q_θ(s_0, a'))
+        b_new(θ) ∝ P(u_H | s_0, θ) * b_old(θ)
         """
-        state = node.state.copy()
-        depth = node.depth
-        prev_action = node.action
-        cumulative_reward = 0.0
-        obs_rewards_total: Dict[int, float] = {}
-        discount = 1.0
+        # Map continuous human action to nearest discrete acceleration
+        u_h = self._nearest_action(human_action)
 
-        while depth < self._horizon:
-            k_next = depth + 1
-            fine_k = self._coarse_to_fine(k_next)
-            rl = road_left[min(fine_k, len(road_left) - 1)]
-            rr = road_right[min(fine_k, len(road_right) - 1)]
+        likelihood = {}
+        for cfg in belief.configs:
+            # Collect Q_θ(s_0, a) for all visited actions
+            q_vals = {}
+            for act, q_dict in root.Q.items():
+                if cfg in q_dict:
+                    q_vals[act] = q_dict[cfg]
 
-            # Try heuristic action first
-            action = self._rollout_action(state, prev_action, rl, rr)
-            new_state, feasible = self._simulate_step(
-                state, action, rl, rr,
-                obstacles=obstacles, belief_vector=belief_vector,
-                step_k=k_next)
+            if not q_vals:
+                likelihood[cfg] = 1.0 / len(self._actions)
+                continue
 
-            if not feasible:
-                # Heuristic failed — try all discrete actions
-                new_state, action, feasible = self._find_feasible_action(
-                    state, prev_action, rl, rr,
-                    obstacles=obstacles, belief_vector=belief_vector,
-                    step_k=k_next)
-                if not feasible:
+            # Boltzmann likelihood
+            q_human = q_vals.get(u_h, None)
+            if q_human is None:
+                # Human action wasn't explored — use minimum Q as fallback
+                q_human = min(q_vals.values()) - 1.0
 
-                    # Penalise remaining horizon steps: the vehicle is
-                    # stuck at `state` while ref_s keeps advancing each
-                    # step, so compute reward per-step with advancing k.
-                    remaining = self._horizon - depth
-                    stuck_action = (0.0, 0.0)
-                    for r_step in range(remaining):
-                        stuck_k = depth + 1 + r_step
-                        stuck_r, stuck_obs_r = self._step_reward(
-                            state, stuck_action, obstacles, stuck_k, s0)
-                        cumulative_reward += discount * stuck_r
-                        discount *= self._gamma
-                        for aid, r in stuck_obs_r.items():
-                            obs_rewards_total[aid] = (
-                                obs_rewards_total.get(aid, 0.0) + r
-                            )
-                    break
+            # Numerically stable softmax
+            max_q = max(max(q_vals.values()), q_human)
+            numerator = math.exp(self._beta * (q_human - max_q))
+            denominator = sum(math.exp(self._beta * (q - max_q))
+                              for q in q_vals.values())
+            if u_h not in q_vals:
+                denominator += numerator
 
-            # Reward
-            step_r, step_obs_r = self._step_reward(
-                new_state, action, obstacles, k_next, s0)
+            likelihood[cfg] = numerator / max(denominator, 1e-30)
 
-            cumulative_reward += discount * step_r
-            discount *= self._gamma
+        belief.update(likelihood)
+        return belief
 
-            # Accumulate per-agent rewards
-            for aid, r in step_obs_r.items():
-                obs_rewards_total[aid] = obs_rewards_total.get(aid, 0.0) + r
-
-            state = new_state
-            prev_action = action
-            depth += 1
-
-        return cumulative_reward, obs_rewards_total
-
-    def _find_feasible_action(self, state: np.ndarray,
-                              prev_action: Optional[Tuple[float, float]],
-                              road_left_k: float, road_right_k: float,
-                              obstacles: Optional[list] = None,
-                              belief_vector: Optional[Dict[int, bool]] = None,
-                              step_k: int = 0,
-                              ) -> Tuple[np.ndarray, Tuple[float, float], bool]:
-        """Try all discrete actions to find one that stays on the road
-        and is collision-free.
-
-        Returns (new_state, action, feasible).  If no action is feasible
-        returns a dummy state with feasible=False.
-        """
-        valid = [a for a in self._actions
-                 if self._check_rate_limits(prev_action, a)]
-        random.shuffle(valid)
-
-        for action in valid:
-            new_state, ok = self._simulate_step(
-                state, action, road_left_k, road_right_k,
-                obstacles=obstacles, belief_vector=belief_vector,
-                step_k=step_k)
-            if ok:
-                return new_state, action, True
-
-        return state, (0.0, 0.0), False
-
-    def _rollout_action(self, state: np.ndarray,
-                        prev_action: Optional[Tuple[float, float]],
-                        road_left_k: float = 1e6,
-                        road_right_k: float = -1e6,
-                        ) -> Tuple[float, float]:
-        """Select action during rollout phase."""
-        if self._rollout_policy == 'heuristic':
-            return self._heuristic_action(state, prev_action,
-                                          road_left_k, road_right_k)
-        else:
-            return self._random_valid_action(prev_action)
-
-    def _heuristic_action(self, state: np.ndarray,
-                          prev_action: Optional[Tuple[float, float]],
-                          road_left_k: float = 1e6,
-                          road_right_k: float = -1e6,
-                          ) -> Tuple[float, float]:
-        """Heuristic: accelerate towards target speed, steer towards centre.
-
-        Drives at target speed with minimal steering, respecting rate
-        limits relative to the previous action.  The lateral controller
-        is clamped to keep d within road boundaries.
-        """
-        _, d, phi, v = state
-
-        # Longitudinal: accelerate towards target speed
-        speed_err = self._target_speed - v
-        a_desired = np.clip(speed_err / self._dt,
-                            self._a_min, self._a_max)
-
-        # Lateral: steer towards d=0, phi=0
-        # Add boundary-aware correction — steer harder when near edges
-        d_target = 0.0
-        margin = self._half_W + 0.3  # keep some clearance from road edge
-        if d > road_left_k - margin:
-            # Too close to left boundary — steer right
-            d_target = road_left_k - margin - 0.5
-        elif d < road_right_k + margin:
-            # Too close to right boundary — steer left
-            d_target = road_right_k + margin + 0.5
-
-        # Scale gains inversely with coarse dt to prevent oscillation.
-        # At dt_fine=0.1 the base gains (2.0, 1.0) are stable; at
-        # dt_coarse=0.5 (coarseness=5) they become (0.4, 0.2).
-        k_d = 2.0 * (self._dt_fine / self._dt)
-        k_phi = 1.0 * (self._dt_fine / self._dt)
-        delta_desired = np.clip(-k_d * (d - d_target) - k_phi * phi,
-                                -self._delta_max, self._delta_max)
-
-        # Enforce rate limits
-        if prev_action is not None:
-            a_prev, delta_prev = prev_action
-            a_desired = np.clip(a_desired,
-                                a_prev - self._jerk_limit,
-                                a_prev + self._jerk_limit)
-            delta_desired = np.clip(delta_desired,
-                                    delta_prev - self._delta_rate_limit,
-                                    delta_prev + self._delta_rate_limit)
-
-        # Clip to absolute bounds
-        a_desired = np.clip(a_desired, self._a_min, self._a_max)
-        delta_desired = np.clip(delta_desired,
-                                -self._delta_max, self._delta_max)
-
-        return (float(a_desired), float(delta_desired))
-
-    def _random_valid_action(self, prev_action: Optional[Tuple[float, float]]
-                             ) -> Tuple[float, float]:
-        """Sample a random action that satisfies rate limits."""
-        valid = [a for a in self._actions
-                 if self._check_rate_limits(prev_action, a)]
-        if not valid:
-            return (0.0, 0.0)
-        return random.choice(valid)
-
-    def _backpropagate(self, node: MCTSNode,
-                       reward: float,
-                       obs_rewards: Dict[int, float]):
-        """Propagate reward up the tree."""
-        while node is not None:
-            node.visit_count += 1
-            node.total_reward += reward
-            for aid, r in obs_rewards.items():
-                node.obstacle_reward_totals[aid] = (
-                    node.obstacle_reward_totals.get(aid, 0.0) + r)
-            node = node.parent
-
-    # ------------------------------------------------------------------
+    # ==================================================================
     # Trajectory extraction
-    # ------------------------------------------------------------------
+    # ==================================================================
 
-    def _extract_trajectories(self, root: MCTSNode, k: int,
-                              road_left: np.ndarray,
-                              road_right: np.ndarray,
-                              obstacles: list,
-                              s0: float,
-                              belief_vector: Optional[Dict[int, bool]] = None,
-                              ) -> List[TrajectoryBeliefPair]:
-        """Extract top-k distinct trajectories from the MCTS tree.
+    def _extract_trajectories(self, root, k, road_left, road_right,
+                              obstacles, s0, theta_star, theta_visible):
+        """Extract top-k trajectories via greedy traversal under θ*."""
+        results: List[MCTSTrajectory] = []
 
-        Uses best-first DFS following highest visit count at each level.
-        At branch points with multiple well-visited children, forks to
-        collect diverse trajectories.
-        """
-        results: List[TrajectoryBeliefPair] = []
-        agent_ids = set()
-        for obs in obstacles:
-            aid = obs['agent_id']
-            if aid >= 0:
-                agent_ids.add(aid)
+        # Primary trajectory: greedy under θ*
+        primary = self._greedy_trajectory(
+            root, road_left, road_right, obstacles, s0,
+            theta_star, theta_visible)
+        if primary is not None:
+            results.append(primary)
 
-        # Collect all leaf-to-root paths via DFS ordered by visit count
+        # Additional trajectories: best-first DFS on visit count
         stack: List[List[MCTSNode]] = [[root]]
-
         while stack and len(results) < k:
             path = stack.pop()
             node = path[-1]
+            valid = {a: c for a, c in node.children.items() if c is not None}
 
-            # Filter out None sentinels (infeasible actions)
-            valid_children = {a: c for a, c in node.children.items()
-                              if c is not None}
-
-            if node.is_terminal(self._horizon) or not valid_children:
-                # Build trajectory from this path
+            if node.is_terminal(self._horizon) or not valid:
                 traj = self._path_to_trajectory(
-                    path, road_left, road_right, obstacles, s0, agent_ids,
-                    belief_vector=belief_vector)
+                    path, road_left, road_right, obstacles, s0,
+                    theta_star, theta_visible)
                 if traj is not None:
                     results.append(traj)
                 continue
 
-            # Sort children by visit count (descending) for best-first
-            sorted_children = sorted(
-                valid_children.values(),
-                key=lambda c: c.visit_count,
-                reverse=True)
-
-            # Push children onto stack in reverse order so highest-visit
-            # is popped first
-            for child in reversed(sorted_children):
-                if child.visit_count > 0:
+            for child in sorted(valid.values(),
+                                key=lambda c: c.parent.action_visits.get(
+                                    c.action, 0) if c.parent else 0):
+                n = node.action_visits.get(child.action, 0)
+                if n > 0:
                     stack.append(path + [child])
 
         return results
 
-    def _path_to_trajectory(self, path: List[MCTSNode],
-                            road_left: np.ndarray,
-                            road_right: np.ndarray,
-                            obstacles: list,
-                            s0: float,
-                            agent_ids: set,
-                            belief_vector: Optional[Dict[int, bool]] = None,
-                            ) -> Optional[TrajectoryBeliefPair]:
-        """Convert a tree path to a TrajectoryBeliefPair.
+    def _greedy_trajectory(self, root, road_left, road_right,
+                           obstacles, s0, theta_star, theta_visible):
+        """Greedy traversal: at each node, pick argmax_a Q_θ*(s, a)."""
+        path = [root]
+        node = root
+        while not node.is_terminal(self._horizon):
+            if not node.Q:
+                break
+            # Pick action with highest Q_θ*
+            best_action = None
+            best_q = -float('inf')
+            for act, q_dict in node.Q.items():
+                q = q_dict.get(theta_star, -float('inf'))
+                if q > best_q:
+                    best_q = q
+                    best_action = act
+            if best_action is None or best_action not in node.children:
+                break
+            child = node.children[best_action]
+            if child is None:
+                break
+            path.append(child)
+            node = child
 
-        If the path doesn't reach the horizon, extends it using the
-        rollout policy (padding).
+        return self._path_to_trajectory(
+            path, road_left, road_right, obstacles, s0,
+            theta_star, theta_visible)
+
+    def _path_to_trajectory(self, path, road_left, road_right,
+                            obstacles, s0, theta_star, theta_visible):
+        """Convert tree path to MCTSTrajectory, padding to horizon.
+
+        Internal states are (s, v).  Output is zero-padded to (s, 0, 0, v)
+        and (a, 0) for downstream compatibility.
         """
         H = self._horizon
-
-        # Collect states and actions from the path
-        states = [path[0].state.copy()]
-        controls = []
-        obs_rewards_total: Dict[int, float] = {}
-        cumulative_reward = 0.0
+        states_1d = [path[0].state.copy()]  # (s, v)
+        controls_1d = []  # scalar accelerations
+        reward = 0.0
         discount = 1.0
+        vis = theta_visible.get(theta_star)
 
         for i in range(1, len(path)):
-            node = path[i]
-            states.append(node.state.copy())
-            controls.append(node.action)
-
-            # Compute reward for this step
-            step_r, step_obs_r = self._step_reward(
-                node.state, node.action, obstacles, node.depth, s0)
-            cumulative_reward += discount * step_r
+            n = path[i]
+            states_1d.append(n.state.copy())
+            controls_1d.append(n.action)
+            reward += discount * self._step_reward(
+                n.state, n.action, obstacles, n.depth, s0,
+                visible_aids=vis)
             discount *= self._gamma
-            for aid, r in step_obs_r.items():
-                obs_rewards_total[aid] = obs_rewards_total.get(aid, 0.0) + r
 
-        # Pad to horizon if needed
+        # Pad to horizon with heuristic policy
         depth = len(path) - 1
-        state = states[-1].copy()
-        prev_action = controls[-1] if controls else None
+        state = states_1d[-1].copy()
+        prev_action = controls_1d[-1] if controls_1d else None
 
         while depth < H:
             k_next = depth + 1
-            fine_k = self._coarse_to_fine(k_next)
-            rl = road_left[min(fine_k, len(road_left) - 1)]
-            rr = road_right[min(fine_k, len(road_right) - 1)]
-
-            action = self._heuristic_action(state, prev_action, rl, rr)
-            new_state, feasible = self._simulate_step(
-                state, action, rl, rr,
-                obstacles=obstacles, belief_vector=belief_vector,
-                step_k=k_next)
-
+            action = self._heuristic_action(state, prev_action)
+            new_state, feasible, _, _ = self._simulate_step(
+                state, action, 0.0, 0.0)
             if not feasible:
-                # Try all discrete actions
-                new_state, action, feasible = self._find_feasible_action(
-                    state, prev_action, rl, rr,
-                    obstacles=obstacles, belief_vector=belief_vector,
-                    step_k=k_next)
-                if not feasible:
-                    s, d, phi, v = state
-                    logger.debug("  pad: stuck at depth=%d/%d, padding %d "
-                                  "remaining steps. state=[s=%.2f d=%.2f "
-                                  "phi=%.3f v=%.2f] road=[%.3f, %.3f]",
-                                  depth, H, H - depth, s, d, phi, v, rr, rl)
-                    # Pad remaining steps with current state and zero controls
-                    while depth < H:
-                        states.append(state.copy())
-                        controls.append((0.0, 0.0))
-                        depth += 1
-                    break
+                # In 1-D this shouldn't happen, but pad with zero accel
+                while depth < H:
+                    reward += discount * self._step_reward(
+                        state, 0.0, obstacles, depth + 1, s0,
+                        visible_aids=vis)
+                    discount *= self._gamma
+                    states_1d.append(state.copy())
+                    controls_1d.append(0.0)
+                    depth += 1
+                break
 
-            step_r, step_obs_r = self._step_reward(
-                new_state, action, obstacles, k_next, s0)
-            cumulative_reward += discount * step_r
+            reward += discount * self._step_reward(
+                new_state, action, obstacles, k_next, s0,
+                visible_aids=vis)
             discount *= self._gamma
-            for aid, r in step_obs_r.items():
-                obs_rewards_total[aid] = obs_rewards_total.get(aid, 0.0) + r
-
-            states.append(new_state)
-            controls.append(action)
+            states_1d.append(new_state)
+            controls_1d.append(action)
             state = new_state
             prev_action = action
             depth += 1
 
-        # Derive belief from per-agent obstacle rewards
-        implied_belief = self._derive_belief(obs_rewards_total, agent_ids)
+        # Pad (s, v) → (s, 0, 0, v) and accel → (accel, 0) for compat
+        padded_states = np.array([
+            [sv[0], 0.0, 0.0, sv[1]] for sv in states_1d
+        ])
+        padded_controls = np.array([
+            [a, 0.0] for a in controls_1d
+        ]) if controls_1d else np.empty((0, 2))
 
-        states_arr = np.array(states)        # (H+1, 4)
-        controls_arr = np.array(controls)    # (H, 2)
+        return MCTSTrajectory(states=padded_states, controls=padded_controls,
+                              mcts_reward=reward)
 
-        tree_depth = len(path) - 1
-        pad_depth = len(states_arr) - 1 - tree_depth
-        s_start = float(states_arr[0, 0])
-        s_end = float(states_arr[-1, 0])
-        logger.debug("  path_to_traj: tree_depth=%d  pad=%d  "
-                      "s=[%.2f → %.2f] (Δs=%.2f)  "
-                      "d=[%.3f → %.3f]  v=[%.2f → %.2f]",
-                      tree_depth, pad_depth,
-                      s_start, s_end, s_end - s_start,
-                      float(states_arr[0, 1]), float(states_arr[-1, 1]),
-                      float(states_arr[0, 3]), float(states_arr[-1, 3]))
+    # ==================================================================
+    # Helper methods
+    # ==================================================================
 
-        return TrajectoryBeliefPair(
-            states=states_arr,
-            controls=controls_arr,
-            implied_belief=implied_belief,
-            mcts_reward=cumulative_reward,
-            obstacle_rewards=obs_rewards_total,
-        )
-
-    # ------------------------------------------------------------------
-    # Belief derivation
-    # ------------------------------------------------------------------
-
-    def _derive_belief(self, obstacle_rewards: Dict[int, float],
-                       agent_ids: set) -> Dict[int, bool]:
-        """Derive implied belief from per-obstacle reward decomposition.
-
-        Agents with significant collision/clearance influence are
-        considered "visible" (the trajectory was shaped by avoiding them).
-        Agents with negligible influence are considered "hidden".
-
-        Args:
-            obstacle_rewards: {agent_id: cumulative reward} from trajectory.
-            agent_ids: Set of dynamic agent IDs to consider.
-
-        Returns:
-            {agent_id: visible} dict.
-        """
-        belief: Dict[int, bool] = {}
-        for aid in agent_ids:
-            total_influence = abs(obstacle_rewards.get(aid, 0.0))
-            belief[aid] = total_influence > self._activity_threshold
-        return belief
+    def _heuristic_action(self, state, prev_action):
+        """Simple proportional acceleration towards target speed."""
+        v = state[1]
+        a_des = np.clip((self._target_speed - v) / self._dt,
+                        self._a_min, self._a_max)
+        if prev_action is not None:
+            a_des = np.clip(a_des, prev_action - self._jerk_limit,
+                            prev_action + self._jerk_limit)
+        return float(np.clip(a_des, self._a_min, self._a_max))
