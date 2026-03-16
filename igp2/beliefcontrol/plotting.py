@@ -2516,3 +2516,162 @@ class MCTSNodePlotter:
         self._fig.tight_layout()
         self._fig.canvas.draw()
         self._fig.canvas.flush_events()
+
+
+# ===================================================================
+# MCTSInterventionPlotter — coarse tree path + NLP result on road map
+# ===================================================================
+
+class MCTSInterventionPlotter:
+    """Live plot showing the MCTS intervention on the road layout.
+
+    Shows the coarse tree traversal as dots and the NLP-refined path
+    as a solid line, both in world coordinates on the road map.
+
+    Args:
+        scenario_map: Road layout to draw.
+        reference_waypoints: Concatenated A* reference path (N, 2).
+        frenet: FrenetFrame for (s, d) → world conversion.
+        ego_length: Ego vehicle length (m).
+        ego_width: Ego vehicle width (m).
+    """
+
+    def __init__(self,
+                 scenario_map: Map,
+                 reference_waypoints: np.ndarray,
+                 frenet: 'FrenetFrame',
+                 ego_length: float = 4.5,
+                 ego_width: float = 1.8):
+        self._scenario_map = scenario_map
+        self._reference_waypoints = reference_waypoints
+        self._frenet = frenet
+        self._ego_length = ego_length
+        self._ego_width = ego_width
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax: Optional[plt.Axes] = None
+
+    def _init(self):
+        plt.ion()
+        self._fig, self._ax = plt.subplots(1, 1, figsize=(14, 8))
+        ax = self._ax
+        plot_map(self._scenario_map, ax=ax, markings=True)
+        if len(self._reference_waypoints) > 0:
+            ax.plot(self._reference_waypoints[:, 0],
+                    self._reference_waypoints[:, 1],
+                    color=(0.5, 0.5, 0.5), linewidth=1, linestyle='--',
+                    alpha=0.4, zorder=2)
+        ax.set_aspect('equal')
+        self._fig.tight_layout()
+
+    def update(self, coarse_states: np.ndarray,
+               opt_states: np.ndarray,
+               success: bool,
+               believed_config: Dict,
+               ego_position: np.ndarray,
+               ego_heading: float,
+               other_agent_states: Dict,
+               step: int):
+        """Redraw the MCTS intervention plot.
+
+        Args:
+            coarse_states: (K+1, 4) coarse trajectory [s, d, phi, v].
+            opt_states: (H+1, 4) NLP-refined trajectory [s, d, phi, v].
+            success: Whether the NLP solve succeeded.
+            believed_config: {aid: bool} believed visibility.
+            ego_position: [x, y] ego world position.
+            ego_heading: Ego heading (rad).
+            other_agent_states: {aid: AgentState}.
+            step: Simulation step number.
+        """
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        ax = self._ax
+        ax.cla()
+
+        # Redraw static elements
+        plot_map(self._scenario_map, ax=ax, markings=True)
+        if len(self._reference_waypoints) > 0:
+            ax.plot(self._reference_waypoints[:, 0],
+                    self._reference_waypoints[:, 1],
+                    color=(0.5, 0.5, 0.5), linewidth=1, linestyle='--',
+                    alpha=0.4, zorder=2)
+
+        # Convert coarse trajectory (s, d) -> world
+        coarse_world = self._frenet.frenet_to_world_batch(
+            coarse_states[:, 0], coarse_states[:, 1])
+        ax.scatter(coarse_world[:, 0], coarse_world[:, 1],
+                   c='orange', s=40, zorder=6, edgecolors='black',
+                   linewidths=0.5, label='Coarse (MCTS)')
+
+        # Connect coarse points with thin line
+        ax.plot(coarse_world[:, 0], coarse_world[:, 1],
+                color='orange', linewidth=1.0, alpha=0.6, zorder=5)
+
+        # Convert NLP trajectory (s, d) -> world
+        opt_world = self._frenet.frenet_to_world_batch(
+            opt_states[:, 0], opt_states[:, 1])
+        nlp_colour = (0.12, 0.47, 0.71) if success else (0.8, 0.2, 0.2)
+        nlp_label = 'NLP (OK)' if success else 'NLP (failed)'
+        ax.plot(opt_world[:, 0], opt_world[:, 1],
+                color=nlp_colour, linewidth=2.5, zorder=7,
+                label=nlp_label)
+
+        # Ego vehicle
+        ego_corners = calculate_multiple_bboxes(
+            [ego_position[0]], [ego_position[1]],
+            self._ego_length, self._ego_width, ego_heading)[0]
+        ego_patch = MplPolygon(
+            ego_corners, closed=True,
+            facecolor=(0.1, 0.1, 0.1, 0.3), edgecolor='black',
+            linewidth=1.5, zorder=8)
+        ax.add_patch(ego_patch)
+
+        # Other agents
+        for aid, agent_state in other_agent_states.items():
+            if aid < 0:
+                continue
+            pos = agent_state.position
+            heading = float(agent_state.heading)
+            meta = agent_state.metadata
+            length = float(meta.length) if meta else 4.0
+            width = float(meta.width) if meta else 1.8
+            corners = calculate_multiple_bboxes(
+                np.array([float(pos[0])]),
+                np.array([float(pos[1])]),
+                np.array([length]),
+                np.array([width]),
+                np.array([heading]))[0]
+
+            is_hidden = not believed_config.get(aid, True)
+            fc = (0.9, 0.3, 0.3, 0.5) if is_hidden else (0.3, 0.7, 0.3, 0.5)
+            ec = (0.7, 0.1, 0.1) if is_hidden else (0.1, 0.5, 0.1)
+            patch = MplPolygon(
+                corners, closed=True,
+                facecolor=fc, edgecolor=ec,
+                linewidth=1.5, zorder=7)
+            ax.add_patch(patch)
+            status = 'HIDDEN' if is_hidden else 'visible'
+            ax.text(float(pos[0]), float(pos[1]) + width * 0.8,
+                    f'{aid} ({status})', fontsize=7, ha='center',
+                    va='bottom', fontweight='bold', zorder=9)
+
+        # Zoom around ego
+        margin = 40.0
+        ax.set_xlim(ego_position[0] - margin, ego_position[0] + margin)
+        ax.set_ylim(ego_position[1] - margin, ego_position[1] + margin)
+
+        cfg_str = ", ".join(
+            f"{aid}:{'V' if v else 'H'}"
+            for aid, v in sorted(believed_config.items()))
+        ax.set_title(
+            f'MCTS Intervention  step={step}  |  '
+            f'θ={{{cfg_str}}}  |  NLP {"OK" if success else "FAILED"}',
+            fontsize=10)
+
+        ax.set_aspect('equal')
+        ax.legend(loc='upper right', fontsize=7, framealpha=0.8)
+        self._fig.tight_layout()
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()

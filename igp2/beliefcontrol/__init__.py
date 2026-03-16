@@ -8,5 +8,5 @@ from igp2.beliefcontrol.mcts_planner import MCTSPlanner, MCTSTrajectory, BeliefS
 from igp2.beliefcontrol.plotting import (
     BeliefPlotter, OptimisationPlotter, InterventionPlotter,
     MCTSTrajectoryPlotter, MCTSBeliefPlotter, MCTSTreePlotter,
-    MCTSNodePlotter,
+    MCTSNodePlotter, MCTSInterventionPlotter,
 )

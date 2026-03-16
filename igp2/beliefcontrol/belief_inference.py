@@ -21,7 +21,7 @@ from igp2.beliefcontrol.second_stage import SecondStagePlanner
 from igp2.beliefcontrol.plotting import (
     InferencePlotter, InterventionPlotter,
     MCTSBeliefPlotter, MCTSTreePlotter,
-    MCTSNodePlotter,
+    MCTSNodePlotter, MCTSInterventionPlotter,
 )
 from igp2.beliefcontrol.planning_utils import (
     milp_to_nlp_warmstart as _milp_to_nlp_warmstart,
@@ -219,6 +219,7 @@ class BeliefInference:
         self._mcts_belief_plotter: Optional[MCTSBeliefPlotter] = None
         self._mcts_tree_plotter: Optional[MCTSTreePlotter] = None
         self._mcts_node_plotter: Optional[MCTSNodePlotter] = None
+        self._mcts_intervention_plotter: Optional['MCTSInterventionPlotter'] = None
         if plot and inference_type == 'mcts' and self._frenet is not None:
             self._mcts_belief_plotter = MCTSBeliefPlotter(
                 hidden_threshold=self._hidden_threshold)
@@ -226,6 +227,9 @@ class BeliefInference:
             self._mcts_tree_plotter = MCTSTreePlotter(
                 self._frenet, mcts_horizon, self._dt)
             self._mcts_node_plotter = MCTSNodePlotter(
+                scenario_map, policy.reference_waypoints, self._frenet,
+                ego_length=self._ego_length, ego_width=self._ego_width)
+            self._mcts_intervention_plotter = MCTSInterventionPlotter(
                 scenario_map, policy.reference_waypoints, self._frenet,
                 ego_length=self._ego_length, ego_width=self._ego_width)
 
@@ -304,6 +308,18 @@ class BeliefInference:
                 true_obstacles=true_obstacles)
 
             self._last_marginals = marginals
+
+            # MCTS intervention (if enabled)
+            if self._intervention_type == 'mcts' and relevant_aids:
+                w = self._frenet.frenet_to_world(
+                    frenet_state[0], frenet_state[1], heading=frenet_state[2])
+                ego_heading = w['heading']
+                self._compute_intervention(
+                    marginals, frenet_state, other_agent_states,
+                    relevant_aids,
+                    ego_position=ego_position, step_count=step_count,
+                    ego_heading=ego_heading,
+                    true_obstacles=true_obstacles)
         else:
             # Naive mode: requires warmup history
             sim_steps_per_plan_step = max(1, int(round(self._dt / self._dt_sim)))
@@ -944,6 +960,14 @@ class BeliefInference:
             p_hidden = marginals.get(aid, 0.0)
             believed_config[aid] = p_hidden <= self._hidden_threshold  # visible
 
+        # --- MCTS intervention: greedy traversal under believed θ → NLP ---
+        if self._intervention_type == 'mcts':
+            self._compute_mcts_intervention(
+                believed_config, frenet_state, other_agent_states,
+                relevant_aids, ego_position, step_count, ego_heading,
+                true_obstacles)
+            return
+
         # Skip if all agents are believed visible — no intervention needed
         if all(believed_config.values()):
             self._last_intervention = None
@@ -1189,6 +1213,130 @@ class BeliefInference:
         else:
             logger.info("  Believed config: {%s}", cfg_str)
             logger.info("  Intervention: FAILED (returning reference trajectory)")
+
+    def _compute_mcts_intervention(self, believed_config, frenet_state,
+                                     other_agent_states, relevant_aids,
+                                     ego_position, step_count, ego_heading,
+                                     true_obstacles):
+        """MCTS intervention: greedy tree traversal under believed θ → NLP.
+
+        1. Convert believed_config to θ tuple
+        2. Extract greedy trajectory from MCTS tree under that θ
+        3. Use as NLP warm-start with TRUE obstacles (all agents visible)
+        4. Store result and update plotter
+        """
+        if (self._mcts_planner is None
+                or self._mcts_belief_state is None
+                or self._mcts_planner._last_root is None):
+            self._last_intervention = None
+            return
+
+        belief = self._mcts_belief_state
+        agent_ids = belief.agent_ids  # sorted
+
+        # Convert believed_config {aid: bool} → θ tuple
+        # believed_config[aid]=True means visible → θ[i]=1
+        theta = tuple(
+            1 if believed_config.get(aid, True) else 0
+            for aid in agent_ids
+        )
+
+        cfg_str = ", ".join(
+            f"{aid}:{'V' if believed_config.get(aid, True) else 'H'}"
+            for aid in agent_ids)
+
+        # Road boundaries
+        s_values = np.array([
+            frenet_state[0] + frenet_state[3] * np.cos(frenet_state[2]) * k * self._dt
+            for k in range(self._horizon + 1)
+        ])
+        s_values = np.clip(s_values, 0.0, self._frenet.total_length)
+        road_left, road_right = self._sample_road_boundaries(s_values)
+
+        # Obstacles (true — all agents)
+        if true_obstacles is None:
+            all_dynamic_aids = {aid for aid in other_agent_states if aid >= 0}
+            true_obstacles = self._predict_obstacles_cv(
+                other_agent_states, all_dynamic_aids)
+
+        # Extract greedy trajectory under believed θ
+        coarse_traj = self._mcts_planner.extract_trajectory_for_config(
+            theta, belief, road_left, road_right, true_obstacles)
+
+        if coarse_traj is None:
+            logger.info("  MCTS intervention: no trajectory for θ=(%s)", cfg_str)
+            self._last_intervention = None
+            return
+
+        coarse_states = coarse_traj.states     # (K+1, 4) [s, d=0, phi=0, v]
+        coarse_controls = coarse_traj.controls  # (K, 2)   [a, delta=0]
+
+        logger.info("  MCTS intervention: θ=(%s), coarse %d pts, reward=%.2f",
+                     cfg_str, len(coarse_states), coarse_traj.mcts_reward)
+
+        # Build agency reference by splining coarse → fine
+        from scipy.interpolate import CubicSpline
+
+        H = self._horizon
+        K = len(coarse_states) - 1
+
+        fine_ctrl_t = np.linspace(0.0, 1.0, H)
+        if K >= 2:
+            coarse_ctrl_t = np.linspace(0.0, 1.0, K)
+            cs_ctrl = CubicSpline(coarse_ctrl_t, coarse_controls, bc_type='clamped')
+            ref_controls = cs_ctrl(fine_ctrl_t)
+        elif K > 0:
+            coarse_ctrl_t = np.linspace(0.0, 1.0, K)
+            ref_controls = np.column_stack([
+                np.interp(fine_ctrl_t, coarse_ctrl_t, coarse_controls[:, col])
+                for col in range(coarse_controls.shape[1])
+            ])
+        else:
+            ref_controls = np.zeros((H, 2))
+
+        # Warm-start: constant-velocity straight line from current state
+        s0, d0, phi0, v0 = frenet_state[:4]
+        dt = self._dt
+        warm_states = np.zeros((H + 1, 4))
+        for k in range(H + 1):
+            warm_states[k] = [s0 + v0 * k * dt, d0, phi0, v0]
+        warm_controls = np.zeros((H, 2))  # zero accel, zero steering
+        self._second_stage.reset()
+        opt_states, opt_controls, success, _ = self._second_stage.solve(
+            frenet_state, warm_states, warm_controls,
+            road_left, road_right, true_obstacles,
+            ref_controls=ref_controls,
+            w_agency=self._w_agency)
+
+        if not success:
+            logger.info("  MCTS intervention: NLP failed, using warm-start")
+            opt_states = warm_states
+            opt_controls = warm_controls
+
+        self._last_intervention = {
+            'believed_config': believed_config,
+            'coarse_states': coarse_states,
+            'coarse_controls': coarse_controls,
+            'opt_states': opt_states,
+            'opt_controls': opt_controls,
+            'success': success,
+            'true_obstacles': true_obstacles,
+            'theta': theta,
+        }
+
+        # Update plotter
+        if self._mcts_intervention_plotter is not None and ego_position is not None:
+            self._mcts_intervention_plotter.update(
+                coarse_states=coarse_states,
+                opt_states=opt_states,
+                success=success,
+                believed_config=believed_config,
+                ego_position=ego_position,
+                ego_heading=ego_heading,
+                other_agent_states=other_agent_states or {},
+                step=step_count)
+
+        logger.info("  MCTS intervention: NLP %s", "OK" if success else "FAILED")
 
     @property
     def last_results(self) -> Optional[List[InferenceResult]]:

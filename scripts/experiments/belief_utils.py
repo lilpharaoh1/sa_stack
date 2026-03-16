@@ -163,6 +163,12 @@ class StepRecord:
     # Whether the intervention NLP converged.
     intervention_success: Optional[bool] = None
 
+    # Actual ego collision: True if the ego's bounding box overlaps any
+    # other agent or static obstacle at this timestep.
+    ego_collision: bool = False
+    # ID of the agent/object the ego collided with (first detected).
+    ego_collision_id: Optional[int] = None
+
 
 @dataclass
 class ExperimentResult:
@@ -265,6 +271,46 @@ def create_agent(agent_config, frame, fps, scenario_map, plot_interval=True):
         raise ValueError(f"Unsupported agent type: {agent_type}")
 
 
+def _agent_obb(position, heading, length, width) -> Polygon:
+    """Build an oriented bounding box polygon for an agent."""
+    cos_h, sin_h = np.cos(heading), np.sin(heading)
+    hl, hw = length / 2.0, width / 2.0
+    corners = np.array([
+        [+hl, +hw],
+        [+hl, -hw],
+        [-hl, -hw],
+        [-hl, +hw],
+    ])
+    rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
+    world_corners = (rot @ corners.T).T + position[:2]
+    return Polygon(world_corners)
+
+
+def _check_ego_collision(ego_state, frame, ego_id):
+    """Check if the ego vehicle's OBB overlaps any other agent/obstacle.
+
+    Returns (colliding: bool, collider_id: int or None).
+    """
+    if ego_state is None or frame is None:
+        return False, None
+
+    ego_pos = np.array(ego_state.position[:2], dtype=float)
+    ego_poly = _agent_obb(
+        ego_pos, ego_state.heading,
+        ego_state.metadata.length, ego_state.metadata.width)
+
+    for aid, state in frame.items():
+        if aid == ego_id:
+            continue
+        other_pos = np.array(state.position[:2], dtype=float)
+        other_poly = _agent_obb(
+            other_pos, state.heading,
+            state.metadata.length, state.metadata.width)
+        if ego_poly.intersects(other_poly):
+            return True, aid
+    return False, None
+
+
 def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
                  prev_true_trajectories: Optional[Dict[int, np.ndarray]] = None,
                  ) -> StepRecord:
@@ -316,13 +362,20 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
     static_obstacles = {aid: s for aid, s in frame.items()
                         if aid < 0} if frame else {}
 
-    # Goal reached: based on TRUE policy rollout
+    # Goal reached: based on TRUE policy rollout, or ego position if unavailable
     goal_reached = False
-    if ego_goal is not None and true_rollout is not None:
-        for pt in true_rollout[:, :2]:
-            if ego_goal.reached(pt):
-                goal_reached = True
-                break
+    if ego_goal is not None:
+        if true_rollout is not None:
+            for pt in true_rollout[:, :2]:
+                if ego_goal.reached(pt):
+                    goal_reached = True
+                    break
+        elif ego_state is not None:
+            goal_reached = ego_goal.reached(np.array(ego_state.position[:2]))
+
+    # Actual collision check (OBB overlap)
+    ego_collision, ego_collision_id = _check_ego_collision(
+        ego_state, frame, ego_id)
 
     # True policy constraint diagnostics
     true_diag = getattr(true_policy, 'last_diagnostics', None) if true_policy else None
@@ -482,6 +535,8 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         intervention_ref_states=intervention_ref_states,
         intervention_ref_controls=intervention_ref_controls,
         intervention_success=intervention_success,
+        ego_collision=ego_collision,
+        ego_collision_id=ego_collision_id,
     )
 
 

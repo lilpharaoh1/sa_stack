@@ -339,6 +339,7 @@ class BeliefAgent(Agent):
         self._plot_interval = plot_interval
         self._step_count = 0
         self._human_enabled = human
+        self._inference_type = inference_type
         self._other_agents: Dict[int, Any] = {}  # References to other agents in the scene
 
         # Trajectory predictions (belief-filtered and ground-truth)
@@ -650,22 +651,26 @@ class BeliefAgent(Agent):
             human_policy_time = _time.perf_counter() - t0
 
         # --- Run true (ground-truth) policy ---
-        t0 = _time.perf_counter()
-        if isinstance(self._true_policy, TwoStagePolicy):
-            true_action, true_candidates, true_best = self._true_policy.select_action(
-                ego_state,
-                other_agents=true_other_agents or None,
-                agent_trajectories=self._true_agent_trajectories or None)
-        else:
-            true_action, true_candidates, true_best = self._true_policy.select_action(ego_state)
-        true_policy_time = _time.perf_counter() - t0
+        # When using MCTS inference, the true policy is not needed.
+        true_action, true_candidates, true_best = None, None, None
+        true_policy_time = 0.0
+        if self._inference_type != 'mcts':
+            t0 = _time.perf_counter()
+            if isinstance(self._true_policy, TwoStagePolicy):
+                true_action, true_candidates, true_best = self._true_policy.select_action(
+                    ego_state,
+                    other_agents=true_other_agents or None,
+                    agent_trajectories=self._true_agent_trajectories or None)
+            else:
+                true_action, true_candidates, true_best = self._true_policy.select_action(ego_state)
+            true_policy_time = _time.perf_counter() - t0
 
         # --- Plot if enabled ---
         t0 = _time.perf_counter()
         if self._plotter is not None and self._plot_interval:
-            if self._human_enabled:
+            if self._human_enabled and human_candidates is not None:
                 self._plot(ego_state, human_candidates, human_best)
-            else:
+            elif true_candidates is not None:
                 self._plot(ego_state, true_candidates, true_best)
         plot_time = _time.perf_counter() - t0
 
@@ -762,6 +767,12 @@ class BeliefAgent(Agent):
         timing: Dict[str, float] = {}
 
         # 1. Predict trajectories for both policies
+        # When using MCTS inference, the true policy is not needed — MCTS
+        # builds its own obstacle predictions and the intervention generates
+        # its own trajectory.  Skip the true prediction and true policy to
+        # save time.
+        skip_true = (self._inference_type == 'mcts')
+
         if self._other_agents:
             if self._human_enabled:
                 t0 = _time.perf_counter()
@@ -769,10 +780,11 @@ class BeliefAgent(Agent):
                     observation.frame, use_beliefs=True)
                 timing['human_predict'] = _time.perf_counter() - t0
 
-            t0 = _time.perf_counter()
-            self._true_agent_trajectories = self._predict_agent_trajectories(
-                observation.frame, use_beliefs=False)
-            timing['true_predict'] = _time.perf_counter() - t0
+            if not skip_true:
+                t0 = _time.perf_counter()
+                self._true_agent_trajectories = self._predict_agent_trajectories(
+                    observation.frame, use_beliefs=False)
+                timing['true_predict'] = _time.perf_counter() - t0
 
         # 2. Run human + true policies
         action = self.policy(observation)
@@ -827,28 +839,33 @@ class BeliefAgent(Agent):
                                   float(action.steer_angle))
 
         true_result = None
-        if (self._true_policy._prev_nlp_states is not None and
-                self._true_policy._prev_nlp_controls is not None):
-            true_result = (self._true_policy._prev_nlp_states,
-                           self._true_policy._prev_nlp_controls)
-
         human_result = None
-        if (self._human_policy._prev_nlp_states is not None and
-                self._human_policy._prev_nlp_controls is not None):
-            human_result = (self._human_policy._prev_nlp_states,
-                            self._human_policy._prev_nlp_controls)
-
         active_agents = None
-        if isinstance(self._true_policy, TwoStagePolicy):
-            active_agents = self._true_policy.last_dual_analysis
+
+        if self._inference_type != 'mcts':
+            # These are only needed for naive inference / non-MCTS interventions
+            if (self._true_policy._prev_nlp_states is not None and
+                    self._true_policy._prev_nlp_controls is not None):
+                true_result = (self._true_policy._prev_nlp_states,
+                               self._true_policy._prev_nlp_controls)
+
+            if (self._human_policy._prev_nlp_states is not None and
+                    self._human_policy._prev_nlp_controls is not None):
+                human_result = (self._human_policy._prev_nlp_states,
+                                self._human_policy._prev_nlp_controls)
+
+            if isinstance(self._true_policy, TwoStagePolicy):
+                active_agents = self._true_policy.last_dual_analysis
 
         # Run inference step
         t0 = _time.perf_counter()
+        true_obstacles = (self._true_policy.last_obstacles
+                          if self._inference_type != 'mcts' else None)
         self._belief_inference.step(
             frenet_state, other_states, self._step_count,
             ego_position=np.array(ego_state.position),
             human_action=human_action_tuple,
-            true_obstacles=self._true_policy.last_obstacles,
+            true_obstacles=true_obstacles,
             true_policy_result=true_result,
             human_policy_result=human_result,
             active_agents=active_agents)

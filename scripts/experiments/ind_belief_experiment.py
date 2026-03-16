@@ -71,8 +71,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--no-plot", action="store_true",
                         help="Disable the BeliefAgent plotter")
+    parser.add_argument("--preview", action="store_true",
+                        help="Show spawn preview plot before running")
     parser.add_argument("--intervention-type", type=str, default="none",
-                        choices=["none", "agency_only", "combined", "policy_only"],
+                        choices=["none", "agency_only", "combined", "policy_only", "mcts"],
                         help="Intervention scheme for the ego agent (default: none)")
     parser.add_argument("--inference-type", type=str, default="naive",
                         choices=["naive", "mcts"],
@@ -199,6 +201,21 @@ def run_single_experiment(config: dict,
                 print(f"{'='*60}\n")
                 break
 
+            # Stop if ego collided with another agent/obstacle
+            if record.ego_collision:
+                result.failed = True
+                result.failure_step = t
+                result.wall_time_seconds = time.time() - t0
+                result.failure_reason = f"ego collision with {record.ego_collision_id}"
+
+                print(f"\n{'='*60}")
+                print(f"  EGO COLLISION at step {t}")
+                print(f"  Collided with: {record.ego_collision_id}")
+                print(f"  Ego position: {record.ego_position}")
+                print(f"  Wall time: {result.wall_time_seconds:.1f}s")
+                print(f"{'='*60}\n")
+                break
+
             # Stop if true policy MILP failed
             if record.true_diag_milp_ok is not None and not record.true_diag_milp_ok:
                 result.failed = True
@@ -304,7 +321,7 @@ def main():
     plot_interval = False if args.no_plot else config["scenario"].get("plot_interval", True)
 
     # Show spawn preview before connecting to CARLA
-    if plot_interval:
+    if args.preview:
         plot_spawn_preview(scenario_map, expanded, frame,
                            title=f"Spawn Preview: {args.map}",
                            raw_config=config)

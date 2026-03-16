@@ -362,10 +362,10 @@ class MCTSPlanner:
 
         new_state = np.array([s_new, v_new])
 
-        # Check all obstacles against the new state
+        # Check all obstacles against the new state (at the child's time)
         colliding = False
         if obstacles:
-            fine_k = step_k * self._coarseness
+            fine_k = (step_k + 1) * self._coarseness
             for obs in obstacles:
                 if self._check_longitudinal_collision(s_new, obs, fine_k):
                     colliding = True
@@ -525,12 +525,17 @@ class MCTSPlanner:
                 if child is not None:
                     n_expanded += 1
                     path.append((node, action))
-                    # Leaf evaluation: per-θ step reward
+                    # Leaf value estimate: 0 for terminal nodes (no future),
+                    # step reward as crude V(leaf) for non-terminal nodes.
                     leaf_returns = {}
-                    for cfg in all_configs:
-                        leaf_returns[cfg] = self._step_reward(
-                            child.state, action, obstacles, child.depth, s0,
-                            visible_aids=theta_visible[cfg])
+                    if child.colliding:
+                        # Terminal — no future return
+                        leaf_returns = {cfg: 0.0 for cfg in all_configs}
+                    else:
+                        for cfg in all_configs:
+                            leaf_returns[cfg] = self._step_reward(
+                                child.state, action, obstacles, child.depth, s0,
+                                visible_aids=theta_visible[cfg])
                 else:
                     untried = node.untried_actions(self._actions, self)
                     if not untried:
@@ -848,6 +853,40 @@ class MCTSPlanner:
 
         return MCTSTrajectory(states=padded_states, controls=padded_controls,
                               mcts_reward=reward)
+
+    # ==================================================================
+    # Public trajectory extraction
+    # ==================================================================
+
+    def extract_trajectory_for_config(
+            self, theta: tuple, belief: 'BeliefState',
+            road_left: np.ndarray, road_right: np.ndarray,
+            obstacles: list) -> Optional[MCTSTrajectory]:
+        """Extract the greedy trajectory under a specific θ config.
+
+        Uses the last search tree (``_last_root``).  Returns None if no
+        tree is available or the config has no Q data at the root.
+
+        Args:
+            theta: Belief configuration tuple, e.g. (1, 0).
+            belief: BeliefState (for visible_aids mapping).
+            road_left / road_right: Road boundary arrays.
+            obstacles: Obstacle list.
+
+        Returns:
+            MCTSTrajectory or None.
+        """
+        root = self._last_root
+        if root is None or not root.Q:
+            return None
+
+        s0 = float(root.state[0])
+        theta_visible = {
+            cfg: belief.visible_aids(cfg) for cfg in belief.configs
+        }
+        return self._greedy_trajectory(
+            root, road_left, road_right, obstacles, s0,
+            theta, theta_visible)
 
     # ==================================================================
     # Helper methods
