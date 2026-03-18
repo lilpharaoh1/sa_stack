@@ -327,7 +327,7 @@ class MCTSPlanner:
     def _check_rate_limits(self, prev_action: Optional[float],
                            action: float) -> bool:
         if prev_action is None:
-            return True
+            prev_action = 0.0
         return abs(action - prev_action) <= self._jerk_limit + 1e-6
 
     def _nearest_action(self, continuous_action) -> float:
