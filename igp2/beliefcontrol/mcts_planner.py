@@ -104,11 +104,15 @@ class BeliefState:
                 self._probs[cfg] = uniform
 
     def marginals(self) -> Dict[int, float]:
-        """P(agent i visible) for each agent."""
+        """P(agent i hidden) for each agent.
+
+        Matches the convention used by naive inference: marginals
+        represent P(hidden), not P(visible).
+        """
         result = {}
         for i, aid in enumerate(self._agent_ids):
-            p = sum(prob for cfg, prob in self._probs.items() if cfg[i] == 1)
-            result[aid] = p
+            p_visible = sum(prob for cfg, prob in self._probs.items() if cfg[i] == 1)
+            result[aid] = 1.0 - p_visible
         return result
 
 
@@ -244,11 +248,11 @@ class MCTSPlanner:
                  nlp_params: dict,
                  n_simulations: int = 800,
                  exploration_constant: float = 10.0,
-                 n_accel_levels: int = 13,
+                 n_accel_levels: int = 19,
                  n_steer_levels: int = 21,
                  max_trajectories: int = 25,
                  gamma: float = 0.99,
-                 collision_penalty: float = 1000000.0,
+                 collision_penalty: float = 100.0,
                  clearance_threshold: float = 4.0,
                  beta: float = 1.0,
                  rollout_policy: str = 'heuristic',
@@ -497,11 +501,21 @@ class MCTSPlanner:
 
     def _check_longitudinal_collision(self, s_ego: float, obs: dict,
                                       fine_k: int) -> bool:
-        """1-D collision: check if ego s overlaps obstacle s (+ margins)."""
+        """Collision check: longitudinal gap along s + lateral check on d.
+
+        Only triggers if the obstacle is close in both s (longitudinal)
+        and d (lateral).  This prevents false collisions when a vehicle
+        has crossed the ego's reference path and moved away laterally.
+        """
         k = min(fine_k, len(obs['s']) - 1)
         s_obs = float(obs['s'][k])
-        gap = self._half_L + obs['length'] / 2.0 + self._collision_margin
-        return abs(s_ego - s_obs) < gap
+        s_gap = self._half_L + obs['length'] / 2.0 + self._collision_margin
+        if abs(s_ego - s_obs) >= s_gap:
+            return False
+        # Lateral check: obstacle must be within lane-width proximity
+        d_obs = float(obs['d'][k])
+        d_gap = self._ego_width / 2.0 + obs['width'] / 2.0 + self._collision_margin
+        return abs(d_obs) < d_gap
 
     # ==================================================================
     # Core MCTS loop (per-belief)
@@ -538,6 +552,24 @@ class MCTSPlanner:
             prev_action = float(prev_action[0])
 
         root = MCTSNode(state=state_1d, depth=0, action=prev_action)
+
+        # Debug: show root state and action filtering
+        nearest_grid = self._nearest_action(prev_action) if prev_action is not None else None
+        root_untried = [
+            a for a in self._actions
+            if self._check_rate_limits(prev_action, a)
+        ]
+        root_v_after = [max(self._v_min, min(self._v_max, v0 + a * self._dt))
+                        for a in root_untried]
+        logger.info("MCTS root: s=%.2f v=%.2f prev_action=%s (nearest_grid=%s) "
+                     "jerk_limit=%.4f dt_coarse=%.3f | %d viable_actions=%s "
+                     "→ v_after=%s | all_actions=[%.2f..%.2f] (%d total)",
+                     s0, v0, prev_action, nearest_grid,
+                     self._jerk_limit, self._dt,
+                     len(root_untried),
+                     [round(a, 3) for a in root_untried],
+                     [round(v, 3) for v in root_v_after],
+                     self._actions[0], self._actions[-1], len(self._actions))
 
         # Build belief state if not provided
         if belief is None:

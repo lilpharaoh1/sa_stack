@@ -285,6 +285,7 @@ def create_agent(agent_config, frame, fps, scenario_map, plot_interval=True):
         inference_type = agent_config.get("inference_type", "naive")
         relevance_method = agent_config.get("relevance_method", "dual")
         planning_mode = agent_config.get("planning_mode", "2d")
+        ref_controls = agent_config.get("ref_controls", "opt")
         return ip.BeliefAgent(**base, scenario_map=scenario_map,
                               plot_interval=plot_interval,
                               agent_beliefs=agent_beliefs,
@@ -292,7 +293,8 @@ def create_agent(agent_config, frame, fps, scenario_map, plot_interval=True):
                               intervention_type=intervention_type,
                               inference_type=inference_type,
                               relevance_method=relevance_method,
-                              planning_mode=planning_mode)
+                              planning_mode=planning_mode,
+                              ref_controls=ref_controls)
     elif agent_type == "TrafficAgent":
         open_loop = agent_config.get("open_loop", False)
         return ip.TrafficAgent(**base, open_loop=open_loop)
@@ -693,6 +695,7 @@ def build_run_metadata(args, config: dict) -> dict:
         "intervention_type": args.intervention_type,
         "inference_type": getattr(args, 'inference_type', 'naive'),
         "planning_mode": getattr(args, 'planning_mode', '2d'),
+        "ref_controls": getattr(args, 'ref_controls', 'opt'),
         "n_samples": n_samples,
         "timestamp": datetime.now().isoformat(),
         "config": config,

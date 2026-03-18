@@ -330,8 +330,9 @@ class BeliefAgent(Agent):
                  human: bool = True,
                  intervention_type: str = 'none',
                  inference_type: str = 'naive',
-                 relevance_method: str = 'dual',
+                 relevance_method: str = 'naive',
                  planning_mode: str = '2d',
+                 ref_controls: str = 'opt',
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
@@ -342,6 +343,7 @@ class BeliefAgent(Agent):
         self._human_enabled = human
         self._inference_type = inference_type
         self._intervention_type = intervention_type
+        self._ref_controls = ref_controls
         self._planning_mode = planning_mode
         self._other_agents: Dict[int, Any] = {}  # References to other agents in the scene
 
@@ -406,7 +408,8 @@ class BeliefAgent(Agent):
                 intervention_type=intervention_type,
                 inference_type=inference_type,
                 relevance_method=relevance_method,
-                planning_mode=planning_mode)
+                planning_mode=planning_mode,
+                ref_controls=ref_controls)
 
     def _build_policy(self, policy_type, fps, scenario_map,
                        planning_mode='2d', **kwargs):
@@ -887,10 +890,17 @@ class BeliefAgent(Agent):
         t0 = _time.perf_counter()
         true_obstacles = (self._true_policy.last_obstacles
                           if self._inference_type not in ('mcts_naive', 'mcts_resample') else None)
+        # Previous executed action for MCTS root jerk continuity
+        prev_exec_tuple = None
+        if self._last_executed_action is not None:
+            prev_exec_tuple = (float(self._last_executed_action.acceleration),
+                               float(self._last_executed_action.steer_angle))
+
         self._belief_inference.step(
             frenet_state, other_states, self._step_count,
             ego_position=np.array(ego_state.position),
             human_action=human_action_tuple,
+            prev_executed_action=prev_exec_tuple,
             true_obstacles=true_obstacles,
             true_policy_result=true_result,
             human_policy_result=human_result,

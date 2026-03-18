@@ -34,7 +34,7 @@ from igp2.beliefcontrol.planning_utils import (
 
 logger = logging.getLogger(__name__)
 
-INFERENCE_TYPES = ('naive', 'mcts_naive', 'mcts_resample')
+INFERENCE_TYPES = ('none', 'naive', 'mcts_naive', 'mcts_resample')
 
 
 @dataclass
@@ -77,7 +77,7 @@ class BeliefInference:
         relevance_d_threshold: Maximum lateral offset for relevance (m).
     """
 
-    RELEVANCE_METHODS = ('corridor', 'dual')
+    RELEVANCE_METHODS = ('corridor', 'dual', 'naive')
 
     def __init__(self, policy, scenario_map,
                  warmup_fraction: float = 0.2,
@@ -94,17 +94,18 @@ class BeliefInference:
                  # MCTS-specific parameters
                  mcts_n_simulations: int = 800,
                  mcts_exploration_constant: float = 10.0,
-                 mcts_n_accel_levels: int = 13,
+                 mcts_n_accel_levels: int = 19,
                  mcts_n_steer_levels: int = 21,
                  mcts_max_trajectories: int = 5,
                  mcts_gamma: float = 0.99,
-                 mcts_collision_penalty: float = 1000.0,
+                 mcts_collision_penalty: float = 100.0,
                  mcts_clearance_threshold: float = 4.0,
                  mcts_rollout_policy: str = 'heuristic',
                  # MCTS resampling parameters
                  mcts_resample_gamma: float = 5.0,
                  mcts_resample_eta: float = 0.7,
-                 planning_mode: str = '2d'):
+                 planning_mode: str = '2d',
+                 ref_controls: str = 'opt'):
         if relevance_method not in self.RELEVANCE_METHODS:
             raise ValueError(
                 f"Unknown relevance_method {relevance_method!r}. "
@@ -170,7 +171,17 @@ class BeliefInference:
         )
 
         # Intervention configuration
+        # Translate legacy 'mcts' intervention type
+        if intervention_type == 'mcts':
+            import warnings
+            warnings.warn(
+                "--intervention-type mcts is deprecated. "
+                "Use --ref-controls mcts-greedy --intervention-type combined instead.",
+                DeprecationWarning, stacklevel=2)
+            intervention_type = 'combined'
+            ref_controls = 'mcts-greedy'
         self._intervention_type = intervention_type
+        self._ref_controls = ref_controls
         self._w_agency = w_agency
 
         # History buffer
@@ -197,9 +208,11 @@ class BeliefInference:
                     ego_length=self._ego_length, ego_width=self._ego_width,
                     collision_margin=self._collision_margin)
 
-        # MCTS planner (only created when needed)
+        # MCTS planner (created when needed for inference or ref-controls)
         self._mcts_planner = None
-        if inference_type in ('mcts_naive', 'mcts_resample'):
+        _needs_mcts = (inference_type in ('mcts_naive', 'mcts_resample')
+                       or ref_controls == 'mcts-greedy')
+        if _needs_mcts:
             from igp2.beliefcontrol.mcts_planner import MCTSPlanner
             resample_kwargs = {}
             if inference_type == 'mcts_resample':
@@ -269,6 +282,7 @@ class BeliefInference:
              step_count: int,
              ego_position: np.ndarray = None,
              human_action: Optional[tuple] = None,
+             prev_executed_action: Optional[tuple] = None,
              true_obstacles: Optional[list] = None,
              true_policy_result: Optional[tuple] = None,
              human_policy_result: Optional[tuple] = None,
@@ -306,6 +320,9 @@ class BeliefInference:
         if self._frenet is None:
             return
 
+        if self._inference_type == 'none':
+            return
+
         observed_sd = None
 
         # MCTS mode: run every timestep from current state, no history needed
@@ -316,24 +333,32 @@ class BeliefInference:
             relevant_aids = self._find_relevant_agents(
                 frenet_state, other_agent_states, active_agents=active_agents)
             _t_relevance = _time.perf_counter() - _t_infer_start
+            logger.info("[Step %4d] MCTS relevance: corridor_aids=%s, active_agents=%s",
+                        step_count, relevant_aids, active_agents)
 
             results, marginals, t_elapsed = self._run_mcts_inference(
                 frenet_state, other_agent_states, observed_sd=None,
                 relevant_aids=relevant_aids,
                 step_count=step_count,
-                prev_action=human_action,
+                prev_action=prev_executed_action,
+                human_action=human_action,
                 true_obstacles=true_obstacles)
 
             self._last_marginals = marginals
 
-            # MCTS intervention (if enabled)
-            if self._intervention_type == 'mcts' and relevant_aids:
+            # For intervention, use agents tracked by MCTS (not corridor
+            # relevance) — the MCTS planner already determines which agents
+            # matter via its belief state.
+            intervention_aids = sorted(marginals.keys()) if marginals else relevant_aids
+
+            # Intervention (if enabled)
+            if self._intervention_type not in ('none', 'always_policy') and intervention_aids:
                 w = self._frenet.frenet_to_world(
                     frenet_state[0], frenet_state[1], heading=frenet_state[2])
                 ego_heading = w['heading']
                 self._compute_intervention(
                     marginals, frenet_state, other_agent_states,
-                    relevant_aids,
+                    intervention_aids,
                     ego_position=ego_position, step_count=step_count,
                     ego_heading=ego_heading,
                     true_obstacles=true_obstacles)
@@ -545,6 +570,7 @@ class BeliefInference:
                             relevant_aids: List[int],
                             step_count: int,
                             prev_action: Optional[tuple] = None,
+                            human_action: Optional[tuple] = None,
                             true_obstacles: Optional[list] = None,
                             ) -> tuple:
         """MCTS-based planning with per-belief Q values.
@@ -593,7 +619,7 @@ class BeliefInference:
             current_frenet, road_left, road_right, obstacles,
             prev_action=prev_action,
             belief=self._mcts_belief_state,
-            human_action=prev_action)
+            human_action=human_action)
 
         # Store for tree plotter
         self._last_road_left = road_left
@@ -654,6 +680,9 @@ class BeliefInference:
             active_agents: Per-agent dual influence {agent_id: Σ|λ|} from
                 the true policy's NLP solve (only used for 'dual' method).
         """
+        if self._relevance_method == 'naive':
+            return sorted([aid for aid in other_agent_states if aid >= 0])
+
         if self._relevance_method == 'dual':
             if active_agents is not None:
                 return sorted([
@@ -977,14 +1006,6 @@ class BeliefInference:
             p_hidden = marginals.get(aid, 0.0)
             believed_config[aid] = p_hidden <= self._hidden_threshold  # visible
 
-        # --- MCTS intervention: greedy traversal under believed θ → NLP ---
-        if self._intervention_type == 'mcts':
-            self._compute_mcts_intervention(
-                believed_config, frenet_state, other_agent_states,
-                relevant_aids, ego_position, step_count, ego_heading,
-                true_obstacles)
-            return
-
         # Skip if all agents are believed visible — no intervention needed
         if all(believed_config.values()):
             self._last_intervention = None
@@ -1023,13 +1044,9 @@ class BeliefInference:
                 return
 
             # Use the human policy's result as the believed reference (red)
-            # so the plotter shows the meaningful comparison:
-            #   red  = what the human planned (with missing agents)
-            #   blue = what the true policy planned (with all agents)
             if human_policy_result is not None:
                 ref_states, ref_controls = human_policy_result
             else:
-                # Fallback: both are the true policy result
                 ref_states, ref_controls = opt_states, opt_controls
 
             intervention = opt_controls - ref_controls
@@ -1067,54 +1084,16 @@ class BeliefInference:
 
         # --- agency_only / combined ---
 
-        if self._inference_type in ('mcts_naive', 'mcts_resample') and self._last_results:
-            # MCTS path: use the best MCTS trajectory directly as the
-            # believed reference and NLP warm-start.  This replaces the
-            # two MILP→NLP solves with a single NLP warm-started from MCTS.
-            best = self._last_results[0]
-            ref_controls = best.nlp_controls
-            nlp_states = best.nlp_states
-            warm_states = best.nlp_states
-            warm_controls = best.nlp_controls
-            logger.info("  MCTS warm-start: using best trajectory "
-                        "(cost=%.4f) for single NLP solve", best.pos_cost)
-        else:
-            # Naive path: full MILP → NLP for believed trajectory
-            visible_aids = {aid for aid, vis in believed_config.items() if vis}
-            believed_obstacles = self._predict_obstacles_cv(
-                other_agent_states, visible_aids)
-
-            self._first_stage.reset()
-            milp_states = self._first_stage.solve(
-                frenet_state, road_left, road_right, believed_obstacles)
-
-            ref_controls = None
-            nlp_states = None
-            warm_states = None
-            warm_controls = None
-
-            if milp_states is not None:
-                warm_states, warm_controls = self._milp_to_nlp_warmstart(
-                    milp_states, frenet_state)
-
-                self._second_stage.reset()
-                nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
-                    frenet_state, warm_states, warm_controls,
-                    road_left, road_right, believed_obstacles)
-
-                if not nlp_ok:
-                    nlp_states = warm_states
-                    nlp_controls = warm_controls
-
-                ref_controls = nlp_controls
-            else:
-                logger.info("  Believed config: {%s} -- believed MILP failed, "
-                            "falling back to pure tracking", cfg_str)
+        # 3. Get reference controls using the configured scheme
+        ref_controls, nlp_states, warm_states, warm_controls = \
+            self._get_reference_controls(
+                believed_config, frenet_state, other_agent_states,
+                road_left, road_right, true_obstacles, cfg_str)
 
         # 4. Single NLP with true obstacles (+ optional agency term)
-        logger.info("  INTERVENTION DEBUG: type=%s, n_true_obs=%d, "
+        logger.info("  INTERVENTION DEBUG: type=%s, ref_scheme=%s, n_true_obs=%d, "
                      "ref_controls=%s, w_agency=%.2f, frenet=[s=%.2f d=%.2f phi=%.3f v=%.2f]",
-                     self._intervention_type, len(true_obstacles),
+                     self._intervention_type, self._ref_controls, len(true_obstacles),
                      "provided" if ref_controls is not None else "None",
                      self._w_agency,
                      frenet_state[0], frenet_state[1],
@@ -1126,17 +1105,12 @@ class BeliefInference:
                          np.max(np.abs(ref_controls[:, 0])),
                          np.max(np.abs(ref_controls[:, 1])))
 
-        if self._inference_type in ('mcts_naive', 'mcts_resample') and warm_states is not None:
-            # MCTS path: use MCTS trajectory directly as NLP warm-start
-            # (no MILP needed — MCTS already provides [s,d,phi,v] + [a,delta])
+        if warm_states is not None:
+            # Ref-controls scheme already provided a warm-start
             true_warm_states = warm_states
             true_warm_controls = warm_controls
-            logger.info("  INTERVENTION DEBUG: MCTS warm-start for NLP, "
-                         "d range=[%.3f, %.3f]",
-                         float(np.min(true_warm_states[:, 1])),
-                         float(np.max(true_warm_states[:, 1])))
         else:
-            # Naive path: MILP first, then warm-start NLP
+            # Need to generate warm-start via MILP with true obstacles
             self._first_stage.reset()
             true_milp_states = self._first_stage.solve(
                 frenet_state, road_left, road_right, true_obstacles)
@@ -1146,18 +1120,8 @@ class BeliefInference:
                 self._last_intervention = None
                 return
 
-            logger.info("  INTERVENTION DEBUG: true MILP OK, "
-                         "milp d range=[%.3f, %.3f]",
-                         float(np.min(true_milp_states[:, 1])),
-                         float(np.max(true_milp_states[:, 1])))
-
             true_warm_states, true_warm_controls = self._milp_to_nlp_warmstart(
                 true_milp_states, frenet_state)
-
-        logger.info("  INTERVENTION DEBUG: warm_controls[0]=[a=%.4f, δ=%.4f], "
-                     "max|warm_δ|=%.4f",
-                     true_warm_controls[0, 0], true_warm_controls[0, 1],
-                     np.max(np.abs(true_warm_controls[:, 1])))
 
         self._second_stage.reset()
         opt_states, opt_controls, success, _ = self._second_stage.solve(
@@ -1168,15 +1132,6 @@ class BeliefInference:
             agency_only=(self._intervention_type == 'agency_only'))
 
         logger.info("  INTERVENTION DEBUG: NLP success=%s", success)
-        if success:
-            logger.info("  INTERVENTION DEBUG: opt_controls[0]=[a=%.4f, δ=%.4f], "
-                         "max|opt_a|=%.4f, max|opt_δ|=%.4f, "
-                         "opt d range=[%.3f, %.3f]",
-                         opt_controls[0, 0], opt_controls[0, 1],
-                         np.max(np.abs(opt_controls[:, 0])),
-                         np.max(np.abs(opt_controls[:, 1])),
-                         float(np.min(opt_states[:, 1])),
-                         float(np.max(opt_states[:, 1])))
 
         if not success:
             intervention = np.zeros_like(true_warm_controls)
@@ -1230,6 +1185,130 @@ class BeliefInference:
         else:
             logger.info("  Believed config: {%s}", cfg_str)
             logger.info("  Intervention: FAILED (returning reference trajectory)")
+
+    def _get_reference_controls(self, believed_config, frenet_state,
+                                other_agent_states, road_left, road_right,
+                                true_obstacles, cfg_str):
+        """Generate reference controls using the configured scheme.
+
+        Returns:
+            (ref_controls, ref_states, warm_states, warm_controls)
+            Any may be None if generation failed.
+        """
+        if self._ref_controls == 'mcts-greedy':
+            return self._ref_controls_mcts_greedy(
+                believed_config, frenet_state, other_agent_states,
+                road_left, road_right, true_obstacles, cfg_str)
+        else:  # 'opt'
+            return self._ref_controls_opt(
+                believed_config, frenet_state, other_agent_states,
+                road_left, road_right, true_obstacles, cfg_str)
+
+    def _ref_controls_opt(self, believed_config, frenet_state,
+                           other_agent_states, road_left, road_right,
+                           true_obstacles, cfg_str):
+        """Reference controls via two-stage MILP→NLP under believed config."""
+        if self._inference_type in ('mcts_naive', 'mcts_resample') and self._last_results:
+            # MCTS inference ran: use the best trajectory as warm-start
+            best = self._last_results[0]
+            ref_controls = best.nlp_controls
+            nlp_states = best.nlp_states
+            warm_states = best.nlp_states
+            warm_controls = best.nlp_controls
+            logger.info("  ref_controls(opt): using best MCTS trajectory "
+                        "(cost=%.4f) as ref + warm-start", best.pos_cost)
+            return ref_controls, nlp_states, warm_states, warm_controls
+
+        # Naive path: full MILP → NLP for believed trajectory
+        visible_aids = {aid for aid, vis in believed_config.items() if vis}
+        believed_obstacles = self._predict_obstacles_cv(
+            other_agent_states, visible_aids)
+
+        self._first_stage.reset()
+        milp_states = self._first_stage.solve(
+            frenet_state, road_left, road_right, believed_obstacles)
+
+        if milp_states is None:
+            logger.info("  ref_controls(opt): {%s} -- believed MILP failed, "
+                        "falling back to pure tracking", cfg_str)
+            return None, None, None, None
+
+        warm_states, warm_controls = self._milp_to_nlp_warmstart(
+            milp_states, frenet_state)
+
+        self._second_stage.reset()
+        nlp_states, nlp_controls, nlp_ok, _ = self._second_stage.solve(
+            frenet_state, warm_states, warm_controls,
+            road_left, road_right, believed_obstacles)
+
+        if not nlp_ok:
+            nlp_states = warm_states
+            nlp_controls = warm_controls
+
+        return nlp_controls, nlp_states, None, None
+
+    def _ref_controls_mcts_greedy(self, believed_config, frenet_state,
+                                    other_agent_states, road_left, road_right,
+                                    true_obstacles, cfg_str):
+        """Reference controls via greedy MCTS tree traversal under believed θ."""
+        if (self._mcts_planner is None
+                or self._mcts_belief_state is None
+                or self._mcts_planner._last_root is None):
+            logger.info("  ref_controls(mcts-greedy): no MCTS tree available")
+            return None, None, None, None
+
+        belief = self._mcts_belief_state
+        agent_ids = belief.agent_ids
+
+        # Convert believed_config {aid: bool} → θ tuple
+        theta = tuple(
+            1 if believed_config.get(aid, True) else 0
+            for aid in agent_ids
+        )
+
+        # Extract greedy trajectory under believed θ
+        coarse_traj = self._mcts_planner.extract_trajectory_for_config(
+            theta, belief, road_left, road_right, true_obstacles)
+
+        if coarse_traj is None:
+            logger.info("  ref_controls(mcts-greedy): no trajectory for θ=(%s)", cfg_str)
+            return None, None, None, None
+
+        coarse_states = coarse_traj.states
+        coarse_controls = coarse_traj.controls
+
+        logger.info("  ref_controls(mcts-greedy): θ=(%s), coarse %d pts, reward=%.2f",
+                     cfg_str, len(coarse_states), coarse_traj.mcts_reward)
+
+        # Spline coarse → fine resolution
+        from scipy.interpolate import CubicSpline
+
+        H = self._horizon
+        K = len(coarse_states) - 1
+
+        fine_ctrl_t = np.linspace(0.0, 1.0, H)
+        if K >= 2:
+            coarse_ctrl_t = np.linspace(0.0, 1.0, K)
+            cs_ctrl = CubicSpline(coarse_ctrl_t, coarse_controls, bc_type='clamped')
+            ref_controls = cs_ctrl(fine_ctrl_t)
+        elif K > 0:
+            coarse_ctrl_t = np.linspace(0.0, 1.0, K)
+            ref_controls = np.column_stack([
+                np.interp(fine_ctrl_t, coarse_ctrl_t, coarse_controls[:, col])
+                for col in range(coarse_controls.shape[1])
+            ])
+        else:
+            ref_controls = np.zeros((H, 2))
+
+        # Warm-start: constant-velocity straight line from current state
+        s0, d0, phi0, v0 = frenet_state[:4]
+        dt = self._dt
+        warm_states = np.zeros((H + 1, 4))
+        for k in range(H + 1):
+            warm_states[k] = [s0 + v0 * k * dt, d0, phi0, v0]
+        warm_controls = np.zeros((H, 2))
+
+        return ref_controls, coarse_states, warm_states, warm_controls
 
     def _compute_mcts_intervention(self, believed_config, frenet_state,
                                      other_agent_states, relevant_aids,

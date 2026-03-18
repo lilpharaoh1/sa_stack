@@ -76,13 +76,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--intervention-type", type=str, default="none",
                         choices=["none", "agency_only", "combined", "policy_only", "mcts", "always_policy"],
                         help="Intervention scheme for the ego agent (default: none)")
+    parser.add_argument("--ref-controls", type=str, default="opt",
+                        choices=["opt", "mcts-greedy"],
+                        help="Source of reference controls for intervention (default: opt)")
     parser.add_argument("--inference-type", type=str, default="naive",
-                        choices=["naive", "mcts_naive", "mcts_resample"],
+                        choices=["none", "naive", "mcts_naive", "mcts_resample"],
                         help="Belief inference strategy (default: naive)")
-    parser.add_argument("--relevance-method", type=str, default="dual",
-                        choices=["corridor", "dual"],
+    parser.add_argument("--relevance-method", type=str, default="naive",
+                        choices=["corridor", "dual", "naive"],
                         help="Relevance detection method for belief inference "
-                             "(default: dual)")
+                             "(default: naive)")
     parser.add_argument("--planning-mode", type=str, default="2d",
                         choices=["2d", "longitudinal"],
                         help="Planning mode: 2d (full lateral+longitudinal) "
@@ -107,6 +110,7 @@ def run_single_experiment(config: dict,
                           inference_type: str = "naive",
                           relevance_method: str = "dual",
                           planning_mode: str = "2d",
+                          ref_controls: str = "opt",
                           ) -> ExperimentResult:
     """Run a single experiment episode.
 
@@ -122,6 +126,7 @@ def run_single_experiment(config: dict,
     config["agents"][0]["inference_type"] = inference_type
     config["agents"][0]["relevance_method"] = relevance_method
     config["agents"][0]["planning_mode"] = planning_mode
+    config["agents"][0]["ref_controls"] = ref_controls
 
     agents = {}
     for agent_config in config["agents"]:
@@ -361,6 +366,7 @@ def main():
         inference_type=args.inference_type,
         relevance_method=args.relevance_method,
         planning_mode=args.planning_mode,
+        ref_controls=args.ref_controls,
     )
 
     run_dir = make_run_dir(
