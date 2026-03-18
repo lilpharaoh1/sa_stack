@@ -70,12 +70,16 @@ def parse_args() -> argparse.Namespace:
                         choices=["none", "agency_only", "combined", "policy_only", "mcts"],
                         help="Intervention scheme for the ego agent (default: none)")
     parser.add_argument("--inference-type", type=str, default="naive",
-                        choices=["naive", "mcts"],
+                        choices=["naive", "mcts_naive", "mcts_resample"],
                         help="Belief inference strategy (default: naive)")
     parser.add_argument("--relevance-method", type=str, default="dual",
                         choices=["corridor", "dual"],
                         help="Relevance detection method for belief inference "
                              "(default: dual)")
+    parser.add_argument("--planning-mode", type=str, default="2d",
+                        choices=["2d", "longitudinal"],
+                        help="Planning mode: 2d (full lateral+longitudinal) "
+                             "or longitudinal (d=0, accel only) (default: 2d)")
     return parser.parse_args()
 
 
@@ -164,6 +168,66 @@ def print_summary(scenario_name: str,
             dev = np.array(dev_vals)
             print(f"  Action deviation (during intervention, {len(dev_vals)} steps):")
             print(f"    mean={dev.mean():.4f}  max={dev.max():.4f}  std={dev.std():.4f}")
+
+            # Decomposed deviation
+            dev_a = [s.action_deviation_accel for s in all_steps
+                     if s.action_deviation_accel is not None]
+            dev_d = [s.action_deviation_steer for s in all_steps
+                     if s.action_deviation_steer is not None]
+            if dev_a:
+                da = np.array(dev_a)
+                print(f"    accel:  mean={da.mean():.4f}  max={da.max():.4f}")
+            if dev_d:
+                dd = np.array(dev_d)
+                print(f"    steer:  mean={dd.mean():.4f}  max={dd.max():.4f}")
+
+        # --- Ego violations ---
+        n_col = sum(1 for s in all_steps if s.ego_collision)
+        n_accel_v = sum(1 for s in all_steps if s.ego_accel_violated)
+        n_steer_v = sum(1 for s in all_steps if s.ego_steering_violated)
+        n_jerk_v = sum(1 for s in all_steps if s.ego_jerk_violated)
+        n_srate_v = sum(1 for s in all_steps if s.ego_steer_rate_violated)
+
+        print(f"\n  Ego violations ({n_total_steps} steps):")
+        print(f"    Collision:     {n_col:4d} ({pct(n_col, n_total_steps)}%)")
+        print(f"    Control:")
+        print(f"      Acceleration:{n_accel_v:4d} ({pct(n_accel_v, n_total_steps)}%)")
+        print(f"      Steering:    {n_steer_v:4d} ({pct(n_steer_v, n_total_steps)}%)")
+        print(f"    Comfort:")
+        print(f"      Jerk:        {n_jerk_v:4d} ({pct(n_jerk_v, n_total_steps)}%)")
+        print(f"      Steer rate:  {n_srate_v:4d} ({pct(n_srate_v, n_total_steps)}%)")
+
+        # --- Per-step ego cost ---
+        cost_vals = [s.ego_step_cost for s in all_steps
+                     if s.ego_step_cost is not None]
+        if cost_vals:
+            cv = np.array(cost_vals)
+            print(f"\n  Ego step cost ({len(cost_vals)} steps):")
+            print(f"    mean={cv.mean():.4f}  std={cv.std():.4f}  "
+                  f"min={cv.min():.4f}  max={cv.max():.4f}")
+
+        # --- Per-step timing breakdown ---
+        timing_dicts = [s.ego_timing for s in all_steps if s.ego_timing]
+        if timing_dicts:
+            # Gather all timing keys
+            all_keys = set()
+            for td in timing_dicts:
+                all_keys.update(td.keys())
+
+            print(f"\n  Per-step timing ({len(timing_dicts)} steps):")
+            for key in sorted(all_keys):
+                vals = [td[key] * 1000 for td in timing_dicts if key in td]
+                if vals:
+                    arr = np.array(vals)
+                    print(f"    {key:20s}  mean={arr.mean():7.1f}ms  "
+                          f"std={arr.std():7.1f}ms  "
+                          f"max={arr.max():7.1f}ms")
+
+            totals = [sum(td.values()) * 1000 for td in timing_dicts]
+            ta = np.array(totals)
+            print(f"    {'total':20s}  mean={ta.mean():7.1f}ms  "
+                  f"std={ta.std():7.1f}ms  "
+                  f"max={ta.max():7.1f}ms")
 
     print(f"\n  Run directory: {run_dir}")
     print(f"{'='*60}\n")
@@ -288,6 +352,7 @@ def main():
             intervention_type=args.intervention_type,
             inference_type=args.inference_type,
             relevance_method=args.relevance_method,
+            planning_mode=args.planning_mode,
         )
         results.append(result)
 

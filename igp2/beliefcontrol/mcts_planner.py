@@ -251,7 +251,9 @@ class MCTSPlanner:
                  collision_penalty: float = 1000000.0,
                  clearance_threshold: float = 4.0,
                  beta: float = 1.0,
-                 rollout_policy: str = 'heuristic'):
+                 rollout_policy: str = 'heuristic',
+                 resample_gamma: Optional[float] = None,
+                 resample_eta: Optional[float] = None):
 
         self._coarseness = self.COARSENESS_FACTOR
         self._dt_fine = dt
@@ -295,10 +297,18 @@ class MCTSPlanner:
 
         self._last_root: Optional[MCTSNode] = None
 
+        # Information-guided resampling (None = disabled)
+        self._resample_gamma = resample_gamma
+        self._resample_eta = resample_eta
+        self._resample_enabled = (resample_gamma is not None
+                                  and resample_eta is not None)
+
         logger.info("MCTSPlanner (1-D): coarseness=%d, dt=%.3f/%.3f, "
-                     "horizon=%d/%d, actions=%d, beta=%.2f",
+                     "horizon=%d/%d, actions=%d, beta=%.2f, resample=%s",
                      self._coarseness, self._dt_fine, self._dt,
-                     self._horizon, horizon, len(self._actions), beta)
+                     self._horizon, horizon, len(self._actions), beta,
+                     f"gamma={resample_gamma},eta={resample_eta}"
+                     if self._resample_enabled else "off")
 
     # ==================================================================
     # Action space (1-D: accelerations only)
@@ -334,6 +344,63 @@ class MCTSPlanner:
                 best_dist = dist
                 best = act
         return best
+
+    # ==================================================================
+    # Information-guided resampling
+    # ==================================================================
+
+    def _compute_policy_divergence(self, node: MCTSNode,
+                                   all_configs: List[tuple]) -> float:
+        """Jensen-Shannon divergence of Boltzmann policies across configs.
+
+        Measures how much the latent configurations disagree about the
+        best action at this node.  Returns JSD >= 0.
+        """
+        if not node.Q or len(all_configs) <= 1:
+            return 0.0
+
+        actions = list(node.Q.keys())
+        if not actions:
+            return 0.0
+
+        n_actions = len(actions)
+        n_configs = len(all_configs)
+
+        # Step 1: Boltzmann policy per configuration
+        policies = {}
+        for cfg in all_configs:
+            logits = [self._beta * node.Q[a].get(cfg, 0.0) for a in actions]
+            max_logit = max(logits)
+            exps = [math.exp(l - max_logit) for l in logits]
+            total = sum(exps)
+            if total < 1e-30:
+                policies[cfg] = [1.0 / n_actions] * n_actions
+            else:
+                policies[cfg] = [e / total for e in exps]
+
+        # Step 2: mixture distribution (uniform weights over configs)
+        mixture = [0.0] * n_actions
+        for i in range(n_actions):
+            for cfg in all_configs:
+                mixture[i] += policies[cfg][i] / n_configs
+
+        # Step 3: KL(pi_theta || mixture) for each config
+        kl_values = []
+        for cfg in all_configs:
+            kl = 0.0
+            for i in range(n_actions):
+                if policies[cfg][i] > 1e-10:
+                    kl += policies[cfg][i] * math.log(
+                        policies[cfg][i] / max(mixture[i], 1e-30))
+            kl_values.append(kl)
+
+        # Step 4: JSD = average of KL divergences
+        return sum(kl_values) / n_configs
+
+    def _should_resample(self, info_value: float) -> bool:
+        """Sigmoid decision: resample if p > eta."""
+        p = 1.0 / (1.0 + math.exp(-self._resample_gamma * info_value))
+        return p > self._resample_eta
 
     # ==================================================================
     # 1-D longitudinal dynamics
@@ -497,8 +564,10 @@ class MCTSPlanner:
         _t_expand = 0.0
         _t_backup = 0.0
 
+        n_resamples = 0  # debug counter
+
         for _ in range(self._n_simulations):
-            # 1. Sample θ for this simulation
+            # 1. Sample θ from belief for this simulation
             theta_sampled = belief.sample()
 
             # 2. Selection: traverse using Q_θ for UCB
@@ -509,6 +578,14 @@ class MCTSPlanner:
             while not node.is_terminal(self._horizon):
                 if not node.is_fully_expanded(self._actions, self):
                     break
+
+                # Information-guided resampling
+                if self._resample_enabled:
+                    jsd = self._compute_policy_divergence(node, all_configs)
+                    if self._should_resample(jsd):
+                        theta_sampled = random.choice(all_configs)
+                        n_resamples += 1
+
                 action = node.best_action_ucb(theta_sampled,
                                               self._exploration_constant)
                 if action is None:
@@ -593,15 +670,25 @@ class MCTSPlanner:
         # Debug logging
         reject_str = ", ".join(
             f"{r}={c}" for r, c in sorted(self._reject_counts.items()))
-        n_nodes = self._count_nodes(root)
+        n_nodes, depth_counts, visit_buckets = self._tree_stats(root)
+        resample_str = (f" | resamples: {n_resamples}"
+                        if self._resample_enabled else "")
         logger.info(
             "MCTS debug: %d expanded, %d terminal, %d fully-expanded, "
-            "%d all-infeasible | %d tree nodes | rejects: {%s} | "
+            "%d all-infeasible | %d tree nodes | rejects: {%s}%s | "
             "road_left=[%.1f..%.1f] road_right=[%.1f..%.1f]",
             n_expanded, n_terminal, n_no_untried, n_all_infeasible,
-            n_nodes, reject_str,
+            n_nodes, reject_str, resample_str,
             float(road_left.min()), float(road_left.max()),
             float(road_right.min()), float(road_right.max()))
+
+        # Tree shape: nodes per depth
+        depth_str = "  ".join(f"d{d}={c}" for d, c in sorted(depth_counts.items()))
+        logger.info("MCTS tree shape: %s", depth_str)
+
+        # Visit distribution (bucketed)
+        bucket_str = "  ".join(f"{k}:{v}" for k, v in visit_buckets.items() if v > 0)
+        logger.info("MCTS visit buckets: %s", bucket_str)
 
         # Log belief state
         if belief.agent_ids:
@@ -640,6 +727,48 @@ class MCTSPlanner:
                 if child is not None:
                     queue.append(child)
         return count
+
+    def _tree_stats(self, root: MCTSNode):
+        """Collect tree statistics: node count, depth distribution, visit buckets.
+
+        Returns (n_nodes, depth_counts, visit_buckets) where:
+          depth_counts: {depth: node_count}
+          visit_buckets: {bucket_label: count}
+        """
+        depth_counts: Dict[int, int] = {}
+        all_visits = []
+
+        queue = [root]
+        n_nodes = 0
+        while queue:
+            nd = queue.pop(0)
+            n_nodes += 1
+            depth_counts[nd.depth] = depth_counts.get(nd.depth, 0) + 1
+            all_visits.append(nd.total_visits())
+            for child in nd.children.values():
+                if child is not None:
+                    queue.append(child)
+
+        # Bucket visit counts
+        buckets = {'0': 0, '1': 0, '2-5': 0, '6-20': 0,
+                   '21-50': 0, '51-200': 0, '201+': 0}
+        for v in all_visits:
+            if v == 0:
+                buckets['0'] += 1
+            elif v == 1:
+                buckets['1'] += 1
+            elif v <= 5:
+                buckets['2-5'] += 1
+            elif v <= 20:
+                buckets['6-20'] += 1
+            elif v <= 50:
+                buckets['21-50'] += 1
+            elif v <= 200:
+                buckets['51-200'] += 1
+            else:
+                buckets['201+'] += 1
+
+        return n_nodes, depth_counts, buckets
 
     # ----- 1. Expansion -----
 

@@ -10,7 +10,7 @@
     {
       "id": 0,
       "type": "BeliefAgent",
-      "inference_type": "mcts",
+      "inference_type": "mcts_naive",
       "intervention_type": "agency_only",
       "spawn": {
         "box": {

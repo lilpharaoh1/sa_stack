@@ -169,6 +169,33 @@ class StepRecord:
     # ID of the agent/object the ego collided with (first detected).
     ego_collision_id: Optional[int] = None
 
+    # --- Per-step ego violations (actual, from executed controls) ---
+    # These are computed from the ego's actual state and actions, independent
+    # of whether the NLP solver converged.
+
+    # Control violations: executed control exceeds hard bounds
+    ego_accel_violated: bool = False        # |a| > a_max
+    ego_steering_violated: bool = False     # |delta| > delta_max
+
+    # Comfort violations: rate-of-change exceeds smooth-driving bounds
+    ego_jerk_violated: bool = False         # |a_k - a_{k-1}| / dt > jerk_max
+    ego_steer_rate_violated: bool = False   # |delta_k - delta_{k-1}| / dt > delta_rate_max
+
+    # Actual executed acceleration and steering angle
+    ego_acceleration: Optional[float] = None
+    ego_steer_angle: Optional[float] = None
+
+    # Decomposed action deviation (human action vs executed action)
+    action_deviation_accel: Optional[float] = None   # |a_exec - a_human|
+    action_deviation_steer: Optional[float] = None   # |delta_exec - delta_human|
+
+    # --- Per-step ego cost ---
+    # Instantaneous cost incurred by the ego vehicle at this step, computed
+    # from the NLP cost function weights and the ego's actual Frenet state.
+    # Cost = w_s*(s-s_ref)^2 + w_d*d^2 + w_v*(v-v_tgt)^2
+    #      + w_a*a^2 + w_delta*delta^2 + w_phi*phi^2
+    ego_step_cost: Optional[float] = None
+
 
 @dataclass
 class ExperimentResult:
@@ -257,13 +284,15 @@ def create_agent(agent_config, frame, fps, scenario_map, plot_interval=True):
         intervention_type = agent_config.get("intervention_type", "none")
         inference_type = agent_config.get("inference_type", "naive")
         relevance_method = agent_config.get("relevance_method", "dual")
+        planning_mode = agent_config.get("planning_mode", "2d")
         return ip.BeliefAgent(**base, scenario_map=scenario_map,
                               plot_interval=plot_interval,
                               agent_beliefs=agent_beliefs,
                               human=human,
                               intervention_type=intervention_type,
                               inference_type=inference_type,
-                              relevance_method=relevance_method)
+                              relevance_method=relevance_method,
+                              planning_mode=planning_mode)
     elif agent_type == "TrafficAgent":
         open_loop = agent_config.get("open_loop", False)
         return ip.TrafficAgent(**base, open_loop=open_loop)
@@ -313,6 +342,7 @@ def _check_ego_collision(ego_state, frame, ego_id):
 
 def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
                  prev_true_trajectories: Optional[Dict[int, np.ndarray]] = None,
+                 prev_action: Optional[tuple] = None,
                  ) -> StepRecord:
     """Collect diagnostics for one simulation step.
 
@@ -324,6 +354,8 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         frame: Current observation frame.
         prev_true_trajectories: True-policy predicted trajectories from the
             *previous* step.  Used to compute 1-step-ahead prediction error.
+        prev_action: (acceleration, steer_angle) from the previous step's
+            executed action.  Used to compute jerk and steering rate violations.
     """
     ego_id = ego_agent.agent_id
     ego_state = frame.get(ego_id) if frame else None
@@ -467,10 +499,14 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
     # Action deviation: compare human policy action to executed action
     last_human = getattr(ego_agent, '_last_human_action', None)
     last_executed = getattr(ego_agent, '_last_executed_action', None)
+    action_deviation_accel = None
+    action_deviation_steer = None
     if last_human is not None and last_executed is not None:
         da = last_executed.acceleration - last_human.acceleration
         dd = last_executed.steer_angle - last_human.steer_angle
         action_deviation = float(np.sqrt(da**2 + dd**2))
+        action_deviation_accel = float(abs(da))
+        action_deviation_steer = float(abs(dd))
 
     # Intervention detail
     if belief_inference is not None:
@@ -485,6 +521,57 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
                 intervention_opt_controls = interv.get('opt_controls')
                 intervention_ref_states = interv.get('ref_states')
                 intervention_ref_controls = interv.get('ref_controls')
+
+    # --- Per-step ego violations and cost ---
+    ego_acceleration = None
+    ego_steer_angle = None
+    ego_accel_violated = False
+    ego_steering_violated = False
+    ego_jerk_violated = False
+    ego_steer_rate_violated = False
+    ego_step_cost = None
+
+    # Get NLP parameters from whichever policy is available
+    _policy = human_policy or true_policy
+    if _policy is not None and last_executed is not None:
+        from igp2.beliefcontrol.second_stage import SecondStagePlanner
+        params = dict(SecondStagePlanner.DEFAULTS)
+        nlp_params = getattr(_policy, '_params', None)
+        if nlp_params:
+            params.update(nlp_params)
+
+        a_exec = float(last_executed.acceleration)
+        delta_exec = float(last_executed.steer_angle)
+        ego_acceleration = a_exec
+        ego_steer_angle = delta_exec
+
+        # Control violations
+        ego_accel_violated = abs(a_exec) > params['a_max'] + 1e-6
+        ego_steering_violated = abs(delta_exec) > params['delta_max'] + 1e-6
+
+        # Comfort violations (rate-of-change)
+        fps = getattr(ego_agent, '_fps', 20)
+        dt_sim = 1.0 / fps
+        if prev_action is not None:
+            prev_a, prev_delta = prev_action
+            jerk = abs(a_exec - prev_a) / dt_sim
+            steer_rate = abs(delta_exec - prev_delta) / dt_sim
+            ego_jerk_violated = jerk > params['jerk_max'] + 1e-6
+            ego_steer_rate_violated = steer_rate > params['delta_rate_max'] + 1e-6
+
+        # Per-step cost (NLP objective terms)
+        if ego_frenet_state is not None:
+            s, d, phi, v = ego_frenet_state[:4]
+            target_speed = getattr(_policy, 'target_speed', params['v_max'])
+            # Reference s: how far the ego should have travelled at target speed
+            s_ref = s  # self-referencing (no absolute reference available per step)
+            ego_step_cost = float(
+                params['w_d'] * d ** 2
+                + params['w_v'] * (v - target_speed) ** 2
+                + params['w_a'] * a_exec ** 2
+                + params['w_delta'] * delta_exec ** 2
+                + params['w_phi'] * phi ** 2
+            )
 
     return StepRecord(
         step=step,
@@ -537,6 +624,18 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         intervention_success=intervention_success,
         ego_collision=ego_collision,
         ego_collision_id=ego_collision_id,
+        # Actual ego violations
+        ego_accel_violated=ego_accel_violated,
+        ego_steering_violated=ego_steering_violated,
+        ego_jerk_violated=ego_jerk_violated,
+        ego_steer_rate_violated=ego_steer_rate_violated,
+        ego_acceleration=ego_acceleration,
+        ego_steer_angle=ego_steer_angle,
+        # Decomposed action deviation
+        action_deviation_accel=action_deviation_accel,
+        action_deviation_steer=action_deviation_steer,
+        # Per-step ego cost
+        ego_step_cost=ego_step_cost,
     )
 
 
@@ -593,6 +692,7 @@ def build_run_metadata(args, config: dict) -> dict:
         "max_steps": args.steps,
         "intervention_type": args.intervention_type,
         "inference_type": getattr(args, 'inference_type', 'naive'),
+        "planning_mode": getattr(args, 'planning_mode', '2d'),
         "n_samples": n_samples,
         "timestamp": datetime.now().isoformat(),
         "config": config,
@@ -624,6 +724,112 @@ def save_experiment(result_or_batch, run_dir: str, metadata: dict) -> str:
     return pkl_path
 
 
+def _arr_stats(values) -> dict:
+    """Compute mean/std/min/max from a list of floats."""
+    arr = np.array(values)
+    return {
+        "mean": round(float(arr.mean()), 4),
+        "std": round(float(arr.std()), 4),
+        "min": round(float(arr.min()), 4),
+        "max": round(float(arr.max()), 4),
+    }
+
+
+def _compute_violation_stats(steps: list) -> dict:
+    """Compute ego violation and cost stats from a list of StepRecords."""
+    n = len(steps)
+    if n == 0:
+        return {}
+
+    # --- Ego violations (categorised) ---
+    n_accel = sum(1 for s in steps if s.ego_accel_violated)
+    n_steer = sum(1 for s in steps if s.ego_steering_violated)
+    n_jerk = sum(1 for s in steps if s.ego_jerk_violated)
+    n_steer_rate = sum(1 for s in steps if s.ego_steer_rate_violated)
+    n_collision = sum(1 for s in steps if s.ego_collision)
+
+    violations = {
+        "control": {
+            "acceleration": {"count": n_accel, "rate": round(n_accel / n, 4)},
+            "steering": {"count": n_steer, "rate": round(n_steer / n, 4)},
+        },
+        "comfort": {
+            "jerk": {"count": n_jerk, "rate": round(n_jerk / n, 4)},
+            "steer_rate": {"count": n_steer_rate, "rate": round(n_steer_rate / n, 4)},
+        },
+        "collision": {"count": n_collision, "rate": round(n_collision / n, 4)},
+        "total_steps": n,
+    }
+
+    # --- Per-step ego cost ---
+    cost_vals = [s.ego_step_cost for s in steps if s.ego_step_cost is not None]
+    ego_cost = _arr_stats(cost_vals) if cost_vals else None
+    if ego_cost:
+        ego_cost["n_steps"] = len(cost_vals)
+
+    # --- Decomposed action deviation ---
+    dev_a = [s.action_deviation_accel for s in steps
+             if s.action_deviation_accel is not None]
+    dev_d = [s.action_deviation_steer for s in steps
+             if s.action_deviation_steer is not None]
+    action_deviation_detail = {}
+    if dev_a:
+        action_deviation_detail["acceleration"] = _arr_stats(dev_a)
+    if dev_d:
+        action_deviation_detail["steering"] = _arr_stats(dev_d)
+
+    return {
+        "violations": violations,
+        "ego_cost": ego_cost,
+        "action_deviation_detail": action_deviation_detail or None,
+    }
+
+
+def _compute_timing_stats(steps: list) -> Optional[dict]:
+    """Aggregate per-step ``ego_timing`` dicts into summary statistics.
+
+    Returns a dict keyed by timing component (e.g. ``human_policy``,
+    ``belief_inference``, etc.) with mean/std/min/max, plus a ``total``
+    entry that sums all components per step.  Returns ``None`` if no
+    timing data is available.
+    """
+    # Collect all timing dicts that are non-None
+    timing_dicts = [s.ego_timing for s in steps if s.ego_timing]
+    if not timing_dicts:
+        return None
+
+    # Gather all unique keys across steps
+    all_keys = set()
+    for td in timing_dicts:
+        all_keys.update(td.keys())
+
+    result = {}
+    for key in sorted(all_keys):
+        vals = [td[key] for td in timing_dicts if key in td]
+        if vals:
+            arr = np.array(vals)
+            result[key] = {
+                "mean_ms": round(float(arr.mean()) * 1000, 2),
+                "std_ms": round(float(arr.std()) * 1000, 2),
+                "min_ms": round(float(arr.min()) * 1000, 2),
+                "max_ms": round(float(arr.max()) * 1000, 2),
+                "n_steps": len(vals),
+            }
+
+    # Total per step (sum of all components)
+    totals = [sum(td.values()) for td in timing_dicts]
+    arr = np.array(totals)
+    result["total"] = {
+        "mean_ms": round(float(arr.mean()) * 1000, 2),
+        "std_ms": round(float(arr.std()) * 1000, 2),
+        "min_ms": round(float(arr.min()) * 1000, 2),
+        "max_ms": round(float(arr.max()) * 1000, 2),
+        "n_steps": len(totals),
+    }
+
+    return result
+
+
 def build_summary(result: ExperimentResult) -> dict:
     """Compute summary stats for a single experiment run.
 
@@ -642,17 +848,17 @@ def build_summary(result: ExperimentResult) -> dict:
     dev_vals = [s.action_deviation for s in result.steps
                 if s.intervention_active and s.action_deviation is not None]
     if dev_vals:
-        dev_arr = np.array(dev_vals)
-        action_dev = {
-            "mean": round(float(dev_arr.mean()), 4),
-            "std": round(float(dev_arr.std()), 4),
-            "min": round(float(dev_arr.min()), 4),
-            "max": round(float(dev_arr.max()), 4),
-        }
+        action_dev = _arr_stats(dev_vals)
     else:
         action_dev = None
 
-    return {
+    # Violations and cost
+    perf = _compute_violation_stats(result.steps)
+
+    # Timing
+    timing = _compute_timing_stats(result.steps)
+
+    summary = {
         "solved": result.solved,
         "failed": result.failed,
         "total_steps": result.total_steps,
@@ -669,7 +875,10 @@ def build_summary(result: ExperimentResult) -> dict:
             "rate": round(n_interv / n_total_steps, 3) if n_total_steps > 0 else 0.0,
             "action_deviation": action_dev,
         },
+        "timing": timing,
     }
+    summary.update(perf)
+    return summary
 
 
 def build_batch_summary(results: List[ExperimentResult],
@@ -766,7 +975,41 @@ def build_batch_summary(results: List[ExperimentResult],
                 reason_counts["NLP infeasible"] += 1
         failure_breakdown = dict(reason_counts)
 
-    return {
+    # Violations and cost (aggregated across all steps in all episodes)
+    perf = _compute_violation_stats(all_steps)
+
+    # Timing (aggregated across all steps in all episodes)
+    timing = _compute_timing_stats(all_steps)
+
+    # Per-episode wall time breakdown (mean time per episode for each component)
+    per_episode_timing = None
+    if timing:
+        ep_timings = []
+        for r in results:
+            ep_td = [s.ego_timing for s in r.steps if s.ego_timing]
+            if ep_td:
+                ep_totals = {}
+                for td in ep_td:
+                    for k, v in td.items():
+                        ep_totals[k] = ep_totals.get(k, 0.0) + v
+                ep_totals["total"] = sum(ep_totals.values())
+                ep_timings.append(ep_totals)
+        if ep_timings:
+            all_keys = set()
+            for et in ep_timings:
+                all_keys.update(et.keys())
+            per_episode_timing = {}
+            for key in sorted(all_keys):
+                vals = [et.get(key, 0.0) for et in ep_timings]
+                arr = np.array(vals)
+                per_episode_timing[key] = {
+                    "mean_s": round(float(arr.mean()), 3),
+                    "std_s": round(float(arr.std()), 3),
+                    "min_s": round(float(arr.min()), 3),
+                    "max_s": round(float(arr.max()), 3),
+                }
+
+    summary = {
         "n_episodes": n_episodes,
         "n_viable": n_viable,
         "n_nonviable": n_nonviable,
@@ -777,7 +1020,11 @@ def build_batch_summary(results: List[ExperimentResult],
         "belief_accuracy": belief_accuracy,
         "intervention": intervention,
         "failure_breakdown": failure_breakdown,
+        "timing_per_step": timing,
+        "timing_per_episode": per_episode_timing,
     }
+    summary.update(perf)
+    return summary
 
 
 def save_summary(summary: dict, run_dir: str) -> str:

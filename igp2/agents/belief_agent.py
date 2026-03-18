@@ -331,6 +331,7 @@ class BeliefAgent(Agent):
                  intervention_type: str = 'none',
                  inference_type: str = 'naive',
                  relevance_method: str = 'dual',
+                 planning_mode: str = '2d',
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
@@ -340,6 +341,8 @@ class BeliefAgent(Agent):
         self._step_count = 0
         self._human_enabled = human
         self._inference_type = inference_type
+        self._intervention_type = intervention_type
+        self._planning_mode = planning_mode
         self._other_agents: Dict[int, Any] = {}  # References to other agents in the scene
 
         # Trajectory predictions (belief-filtered and ground-truth)
@@ -364,12 +367,14 @@ class BeliefAgent(Agent):
         self._human_policy = None
         if self._human_enabled:
             self._human_policy = self._build_policy(
-                policy_type, fps, scenario_map, **policy_kwargs,
+                policy_type, fps, scenario_map,
+                planning_mode=planning_mode, **policy_kwargs,
             )
             if isinstance(self._human_policy, TwoStagePolicy):
                 self._human_policy.label = "human"
         self._true_policy = self._build_policy(
-            policy_type, fps, scenario_map, **policy_kwargs,
+            policy_type, fps, scenario_map,
+            planning_mode=planning_mode, **policy_kwargs,
         )
         # Enable collision dual analysis on the true policy only
         if isinstance(self._true_policy, TwoStagePolicy):
@@ -381,6 +386,7 @@ class BeliefAgent(Agent):
 
         # Per-step action tracking (for evaluation metrics)
         self._last_human_action: Optional[Action] = None
+        self._last_true_action: Optional[Action] = None
         self._last_executed_action: Optional[Action] = None
 
         # Build the matching plotter
@@ -399,9 +405,11 @@ class BeliefAgent(Agent):
                 self._human_policy, scenario_map,
                 intervention_type=intervention_type,
                 inference_type=inference_type,
-                relevance_method=relevance_method)
+                relevance_method=relevance_method,
+                planning_mode=planning_mode)
 
-    def _build_policy(self, policy_type, fps, scenario_map, **kwargs):
+    def _build_policy(self, policy_type, fps, scenario_map,
+                       planning_mode='2d', **kwargs):
         """Instantiate the control policy based on ``policy_type``."""
         if policy_type not in POLICY_TYPES:
             raise ValueError(
@@ -417,6 +425,7 @@ class BeliefAgent(Agent):
 
         if policy_type == "two_stage_opt":
             common["scenario_map"] = scenario_map
+            common["planning_mode"] = planning_mode
             common.update(kwargs)
             return TwoStagePolicy(**common)
         else:
@@ -654,7 +663,7 @@ class BeliefAgent(Agent):
         # When using MCTS inference, the true policy is not needed.
         true_action, true_candidates, true_best = None, None, None
         true_policy_time = 0.0
-        if self._inference_type != 'mcts':
+        if self._inference_type not in ('mcts_naive', 'mcts_resample'):
             t0 = _time.perf_counter()
             if isinstance(self._true_policy, TwoStagePolicy):
                 true_action, true_candidates, true_best = self._true_policy.select_action(
@@ -679,6 +688,8 @@ class BeliefAgent(Agent):
             'true_policy': true_policy_time,
             'plotting': plot_time,
         }
+
+        self._last_true_action = true_action
 
         # Return human action if enabled, otherwise true action
         return human_action if self._human_enabled else true_action
@@ -771,7 +782,7 @@ class BeliefAgent(Agent):
         # builds its own obstacle predictions and the intervention generates
         # its own trajectory.  Skip the true prediction and true policy to
         # save time.
-        skip_true = (self._inference_type == 'mcts')
+        skip_true = (self._inference_type in ('mcts_naive', 'mcts_resample'))
 
         if self._other_agents:
             if self._human_enabled:
@@ -792,6 +803,21 @@ class BeliefAgent(Agent):
 
         # 3. Run inference, update beliefs, apply intervention
         action = self._run_inference(observation, action, timing)
+
+        # always_policy: override with true policy action regardless
+        if self._intervention_type == 'always_policy' and self._last_true_action is not None:
+            action = self._last_true_action
+
+        # Debug: log executed action and ego state every step
+        ego_state = observation.frame.get(self.agent_id)
+        if ego_state is not None and action is not None:
+            logger.info(
+                "[Step %4d] ACTION: a=%.4f δ=%.4f  |  "
+                "pos=[%.2f,%.2f] heading=%.4f vel=%.3f",
+                self._step_count,
+                action.acceleration, action.steer_angle,
+                ego_state.position[0], ego_state.position[1],
+                ego_state.heading, ego_state.speed)
 
         timing.update(self.last_step_timing)
         self.last_step_timing = timing
@@ -842,7 +868,7 @@ class BeliefAgent(Agent):
         human_result = None
         active_agents = None
 
-        if self._inference_type != 'mcts':
+        if self._inference_type not in ('mcts_naive', 'mcts_resample'):
             # These are only needed for naive inference / non-MCTS interventions
             if (self._true_policy._prev_nlp_states is not None and
                     self._true_policy._prev_nlp_controls is not None):
@@ -860,7 +886,7 @@ class BeliefAgent(Agent):
         # Run inference step
         t0 = _time.perf_counter()
         true_obstacles = (self._true_policy.last_obstacles
-                          if self._inference_type != 'mcts' else None)
+                          if self._inference_type not in ('mcts_naive', 'mcts_resample') else None)
         self._belief_inference.step(
             frenet_state, other_states, self._step_count,
             ego_position=np.array(ego_state.position),

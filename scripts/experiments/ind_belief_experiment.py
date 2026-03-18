@@ -74,15 +74,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview", action="store_true",
                         help="Show spawn preview plot before running")
     parser.add_argument("--intervention-type", type=str, default="none",
-                        choices=["none", "agency_only", "combined", "policy_only", "mcts"],
+                        choices=["none", "agency_only", "combined", "policy_only", "mcts", "always_policy"],
                         help="Intervention scheme for the ego agent (default: none)")
     parser.add_argument("--inference-type", type=str, default="naive",
-                        choices=["naive", "mcts"],
+                        choices=["naive", "mcts_naive", "mcts_resample"],
                         help="Belief inference strategy (default: naive)")
     parser.add_argument("--relevance-method", type=str, default="dual",
                         choices=["corridor", "dual"],
                         help="Relevance detection method for belief inference "
                              "(default: dual)")
+    parser.add_argument("--planning-mode", type=str, default="2d",
+                        choices=["2d", "longitudinal"],
+                        help="Planning mode: 2d (full lateral+longitudinal) "
+                             "or longitudinal (d=0, accel only) (default: 2d)")
     return parser.parse_args()
 
 
@@ -102,6 +106,7 @@ def run_single_experiment(config: dict,
                           intervention_type: str = "none",
                           inference_type: str = "naive",
                           relevance_method: str = "dual",
+                          planning_mode: str = "2d",
                           ) -> ExperimentResult:
     """Run a single experiment episode.
 
@@ -116,6 +121,7 @@ def run_single_experiment(config: dict,
     config["agents"][0]["intervention_type"] = intervention_type
     config["agents"][0]["inference_type"] = inference_type
     config["agents"][0]["relevance_method"] = relevance_method
+    config["agents"][0]["planning_mode"] = planning_mode
 
     agents = {}
     for agent_config in config["agents"]:
@@ -159,6 +165,7 @@ def run_single_experiment(config: dict,
 
     t0 = time.time()
     prev_true_trajectories = None
+    prev_action = None  # (acceleration, steer_angle) from previous step
 
     for t in range(max_steps):
         # if t > 12:
@@ -183,8 +190,12 @@ def run_single_experiment(config: dict,
         # Collect diagnostics
         if ego_agent is not None and current_frame is not None:
             record = collect_step(t, t0, ego_agent, ego_goal, current_frame,
-                                  prev_true_trajectories=prev_true_trajectories)
+                                  prev_true_trajectories=prev_true_trajectories,
+                                  prev_action=prev_action)
             prev_true_trajectories = dict(ego_agent._true_agent_trajectories)
+            # Track previous action for jerk/steer-rate computation
+            if record.ego_acceleration is not None:
+                prev_action = (record.ego_acceleration, record.ego_steer_angle)
             result.steps.append(record)
             result.total_steps = t + 1
 
@@ -349,6 +360,7 @@ def main():
         intervention_type=args.intervention_type,
         inference_type=args.inference_type,
         relevance_method=args.relevance_method,
+        planning_mode=args.planning_mode,
     )
 
     run_dir = make_run_dir(

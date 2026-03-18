@@ -18,6 +18,9 @@ from igp2.core.agentstate import AgentState
 from igp2.beliefcontrol.frenet import FrenetFrame
 from igp2.beliefcontrol.first_stage import FirstStagePlanner
 from igp2.beliefcontrol.second_stage import SecondStagePlanner
+from igp2.beliefcontrol.longitudinal_planners import (
+    LongitudinalFirstStage, LongitudinalSecondStage,
+)
 from igp2.beliefcontrol.plotting import (
     InferencePlotter, InterventionPlotter,
     MCTSBeliefPlotter, MCTSTreePlotter,
@@ -31,7 +34,7 @@ from igp2.beliefcontrol.planning_utils import (
 
 logger = logging.getLogger(__name__)
 
-INFERENCE_TYPES = ('naive', 'mcts')
+INFERENCE_TYPES = ('naive', 'mcts_naive', 'mcts_resample')
 
 
 @dataclass
@@ -97,7 +100,11 @@ class BeliefInference:
                  mcts_gamma: float = 0.99,
                  mcts_collision_penalty: float = 1000.0,
                  mcts_clearance_threshold: float = 4.0,
-                 mcts_rollout_policy: str = 'heuristic'):
+                 mcts_rollout_policy: str = 'heuristic',
+                 # MCTS resampling parameters
+                 mcts_resample_gamma: float = 5.0,
+                 mcts_resample_eta: float = 0.7,
+                 planning_mode: str = '2d'):
         if relevance_method not in self.RELEVANCE_METHODS:
             raise ValueError(
                 f"Unknown relevance_method {relevance_method!r}. "
@@ -132,8 +139,12 @@ class BeliefInference:
 
         self._wheelbase = policy.wheelbase
 
-        # Create own FirstStagePlanner to avoid corrupting the policy's
-        self._first_stage = FirstStagePlanner(
+        # Create own planner pair to avoid corrupting the policy's.
+        # Use longitudinal variants when planning_mode == 'longitudinal'.
+        _FSClass = LongitudinalFirstStage if planning_mode == 'longitudinal' else FirstStagePlanner
+        _SSClass = LongitudinalSecondStage if planning_mode == 'longitudinal' else SecondStagePlanner
+
+        self._first_stage = _FSClass(
             horizon=self._horizon,
             dt=self._dt,
             ego_length=self._ego_length,
@@ -145,8 +156,7 @@ class BeliefInference:
             n_obs_max=policy.first_stage._n_obs_max,
         )
 
-        # Create own SecondStagePlanner for two-stage inference
-        self._second_stage = SecondStagePlanner(
+        self._second_stage = _SSClass(
             horizon=self._horizon,
             dt=self._dt,
             ego_length=self._ego_length,
@@ -189,8 +199,14 @@ class BeliefInference:
 
         # MCTS planner (only created when needed)
         self._mcts_planner = None
-        if inference_type == 'mcts':
+        if inference_type in ('mcts_naive', 'mcts_resample'):
             from igp2.beliefcontrol.mcts_planner import MCTSPlanner
+            resample_kwargs = {}
+            if inference_type == 'mcts_resample':
+                resample_kwargs = {
+                    'resample_gamma': mcts_resample_gamma,
+                    'resample_eta': mcts_resample_eta,
+                }
             self._mcts_planner = MCTSPlanner(
                 horizon=self._horizon,
                 dt=self._dt,
@@ -210,6 +226,7 @@ class BeliefInference:
                 collision_penalty=mcts_collision_penalty,
                 clearance_threshold=mcts_clearance_threshold,
                 rollout_policy=mcts_rollout_policy,
+                **resample_kwargs,
             )
 
         # Persistent MCTS belief state (across timesteps)
@@ -220,7 +237,7 @@ class BeliefInference:
         self._mcts_tree_plotter: Optional[MCTSTreePlotter] = None
         self._mcts_node_plotter: Optional[MCTSNodePlotter] = None
         self._mcts_intervention_plotter: Optional['MCTSInterventionPlotter'] = None
-        if plot and inference_type == 'mcts' and self._frenet is not None:
+        if plot and inference_type in ('mcts_naive', 'mcts_resample') and self._frenet is not None:
             self._mcts_belief_plotter = MCTSBeliefPlotter(
                 hidden_threshold=self._hidden_threshold)
             mcts_horizon = self._mcts_planner._horizon  # coarse horizon
@@ -292,7 +309,7 @@ class BeliefInference:
         observed_sd = None
 
         # MCTS mode: run every timestep from current state, no history needed
-        if self._inference_type == 'mcts':
+        if self._inference_type in ('mcts_naive', 'mcts_resample'):
             import time as _time
             _t_infer_start = _time.perf_counter()
 
@@ -390,7 +407,7 @@ class BeliefInference:
                 ego_heading=ego_heading)
 
         # 7. Update MCTS-specific debug plots
-        if self._inference_type == 'mcts':
+        if self._inference_type in ('mcts_naive', 'mcts_resample'):
             _t_plot_start = _time.perf_counter()
 
         if (self._mcts_belief_plotter is not None
@@ -416,7 +433,7 @@ class BeliefInference:
                 step_count,
                 other_agent_states=other_agent_states)
 
-        if self._inference_type == 'mcts':
+        if self._inference_type in ('mcts_naive', 'mcts_resample'):
             _t_plot = _time.perf_counter() - _t_plot_start
             _t_total = _time.perf_counter() - _t_infer_start
             logger.info(
@@ -1050,7 +1067,7 @@ class BeliefInference:
 
         # --- agency_only / combined ---
 
-        if self._inference_type == 'mcts' and self._last_results:
+        if self._inference_type in ('mcts_naive', 'mcts_resample') and self._last_results:
             # MCTS path: use the best MCTS trajectory directly as the
             # believed reference and NLP warm-start.  This replaces the
             # two MILP→NLP solves with a single NLP warm-started from MCTS.
@@ -1109,7 +1126,7 @@ class BeliefInference:
                          np.max(np.abs(ref_controls[:, 0])),
                          np.max(np.abs(ref_controls[:, 1])))
 
-        if self._inference_type == 'mcts' and warm_states is not None:
+        if self._inference_type in ('mcts_naive', 'mcts_resample') and warm_states is not None:
             # MCTS path: use MCTS trajectory directly as NLP warm-start
             # (no MILP needed — MCTS already provides [s,d,phi,v] + [a,delta])
             true_warm_states = warm_states

@@ -18,6 +18,9 @@ from igp2.opendrive.map import Map
 from igp2.beliefcontrol.frenet import FrenetFrame
 from igp2.beliefcontrol.first_stage import FirstStagePlanner
 from igp2.beliefcontrol.second_stage import SecondStagePlanner
+from igp2.beliefcontrol.longitudinal_planners import (
+    LongitudinalFirstStage, LongitudinalSecondStage,
+)
 from igp2.beliefcontrol.planning_utils import (
     milp_to_nlp_warmstart as _milp_to_nlp_warmstart,
     sample_road_boundaries as _sample_road_boundaries_util,
@@ -76,6 +79,7 @@ class TwoStagePolicy:
                  milp_params: Optional[Dict] = None,
                  nlp_params: Optional[Dict] = None,
                  use_prev_nlp_on_fail: bool = True,
+                 planning_mode: str = "2d",
                  # Legacy params (for back-compat, override milp/nlp_params)
                  delta_max: float = None,
                  a_min: float = None,
@@ -100,10 +104,14 @@ class TwoStagePolicy:
         self._use_prev_nlp_on_fail = use_prev_nlp_on_fail
 
         # Build parameter dicts with legacy overrides
-        _milp = dict(FirstStagePlanner.DEFAULTS)
+        if planning_mode == "longitudinal":
+            _milp = dict(LongitudinalFirstStage.DEFAULTS)
+            _nlp = dict(LongitudinalSecondStage.DEFAULTS)
+        else:
+            _milp = dict(FirstStagePlanner.DEFAULTS)
+            _nlp = dict(SecondStagePlanner.DEFAULTS)
         if milp_params is not None:
             _milp.update(milp_params)
-        _nlp = dict(SecondStagePlanner.DEFAULTS)
         if nlp_params is not None:
             _nlp.update(nlp_params)
 
@@ -152,30 +160,56 @@ class TwoStagePolicy:
         if len(self._reference_waypoints) >= 2:
             self._frenet = FrenetFrame(self._reference_waypoints)
 
-        # Create stage planners
-        self._first_stage = FirstStagePlanner(
-            horizon=self._horizon,
-            dt=self._dt,
-            ego_length=self._ego_length,
-            ego_width=self._ego_width,
-            collision_margin=collision_margin,
-            target_speed=target_speed,
-            frenet=self._frenet,
-            params=_milp,
-            n_obs_max=self.N_OBS_MAX,
-        )
-        self._second_stage = SecondStagePlanner(
-            horizon=self._horizon,
-            dt=self._dt,
-            ego_length=self._ego_length,
-            ego_width=self._ego_width,
-            wheelbase=self._wheelbase,
-            collision_margin=collision_margin,
-            target_speed=target_speed,
-            frenet=self._frenet,
-            params=_nlp,
-            n_obs_max=self.N_OBS_MAX,
-        )
+        # Create stage planners (swap for longitudinal variants if requested)
+        self._planning_mode = planning_mode
+        if planning_mode == "longitudinal":
+            self._first_stage = LongitudinalFirstStage(
+                horizon=self._horizon,
+                dt=self._dt,
+                ego_length=self._ego_length,
+                ego_width=self._ego_width,
+                collision_margin=collision_margin,
+                target_speed=target_speed,
+                frenet=self._frenet,
+                params=_milp,
+                n_obs_max=self.N_OBS_MAX,
+            )
+            self._second_stage = LongitudinalSecondStage(
+                horizon=self._horizon,
+                dt=self._dt,
+                ego_length=self._ego_length,
+                ego_width=self._ego_width,
+                wheelbase=self._wheelbase,
+                collision_margin=collision_margin,
+                target_speed=target_speed,
+                frenet=self._frenet,
+                params=_nlp,
+                n_obs_max=self.N_OBS_MAX,
+            )
+        else:
+            self._first_stage = FirstStagePlanner(
+                horizon=self._horizon,
+                dt=self._dt,
+                ego_length=self._ego_length,
+                ego_width=self._ego_width,
+                collision_margin=collision_margin,
+                target_speed=target_speed,
+                frenet=self._frenet,
+                params=_milp,
+                n_obs_max=self.N_OBS_MAX,
+            )
+            self._second_stage = SecondStagePlanner(
+                horizon=self._horizon,
+                dt=self._dt,
+                ego_length=self._ego_length,
+                ego_width=self._ego_width,
+                wheelbase=self._wheelbase,
+                collision_margin=collision_margin,
+                target_speed=target_speed,
+                frenet=self._frenet,
+                params=_nlp,
+                n_obs_max=self.N_OBS_MAX,
+            )
 
         # MPC state
         self._prev_milp_states: Optional[np.ndarray] = None
@@ -296,36 +330,40 @@ class TwoStagePolicy:
             step_label=self._step_count)
         t_nlp = time.time() - t_nlp_start
 
+        tag = f" ({self.label})" if self.label else ""
+
         if not nlp_ok:
             self._last_dual_analysis = None
-            if (self._use_prev_nlp_on_fail and
-                self._prev_nlp_states is not None and
-                self._prev_nlp_controls is not None):
-                final_states = self._prev_nlp_states.copy()
-                final_controls = self._prev_nlp_controls.copy()
-                nlp_status = "FAILED(prev)"
-            else:
-                final_states = warm_states
-                final_controls = warm_controls
-                nlp_status = "FAILED(milp)"
-        else:
-            self._last_dual_analysis = nlp_debug
-            final_states = nlp_states
-            final_controls = nlp_controls
-            nlp_status = "OK"
+            logger.warning("[Step %4d]%s MILP: OK (%.1fms) | NLP: FAILED (%.1fms)",
+                           self._step_count, tag, t_milp*1000, t_nlp*1000)
 
-        tag = f" ({self.label})" if self.label else ""
-        logger.info("[Step %4d]%s MILP: OK (%.1fms) | NLP: %s (%.1fms)",
-                    self._step_count, tag, t_milp*1000, nlp_status, t_nlp*1000)
+            # Analyse constraints on the failed NLP solution if available
+            if nlp_debug is not None and nlp_debug[0] is not None:
+                diag_states, diag_controls = nlp_debug
+            else:
+                diag_states, diag_controls = warm_states, warm_controls
+            diag = self._second_stage.analyse_constraints(
+                diag_states, diag_controls, road_left, road_right, obstacles,
+                milp_ok=True, nlp_ok=False, nlp_status='FAILED',
+                t_milp=t_milp, t_nlp=t_nlp,
+            )
+            self._last_diagnostics = diag
+
+            action = Action(acceleration=0.0, steer_angle=0.0,
+                            target_speed=self._target_speed)
+            return action, [np.array([state.position])], 0
+
+        self._last_dual_analysis = nlp_debug
+        final_states = nlp_states
+        final_controls = nlp_controls
+
+        logger.info("[Step %4d]%s MILP: OK (%.1fms) | NLP: OK (%.1fms)",
+                    self._step_count, tag, t_milp*1000, t_nlp*1000)
 
         # Constraint analysis
-        if not nlp_ok and nlp_debug is not None and nlp_debug[0] is not None:
-            diag_states, diag_controls = nlp_debug
-        else:
-            diag_states, diag_controls = final_states, final_controls
         diag = self._second_stage.analyse_constraints(
-            diag_states, diag_controls, road_left, road_right, obstacles,
-            milp_ok=True, nlp_ok=nlp_ok, nlp_status=nlp_status,
+            final_states, final_controls, road_left, road_right, obstacles,
+            milp_ok=True, nlp_ok=True, nlp_status='OK',
             t_milp=t_milp, t_nlp=t_nlp,
         )
         self._last_diagnostics = diag
