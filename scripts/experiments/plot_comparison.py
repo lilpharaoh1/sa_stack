@@ -56,6 +56,11 @@ INTERVENTION_LABELS = {
     'policy_only': 'Policy',
     'mcts': 'MCTS-int',
 }
+REF_CONTROLS_LABELS = {
+    'opt': 'OPT',
+    'mcts-greedy': 'Greedy',
+    'mcts-qcbf': 'QCBF',
+}
 
 # Colour palette — assigned dynamically to composite keys as they appear
 _COLOUR_PALETTE = [
@@ -64,21 +69,43 @@ _COLOUR_PALETTE = [
 ]
 
 
+def _parse_composite_key(key: str):
+    """Parse composite key into (inference, intervention, ref_controls|None)."""
+    # Try matching known inference prefixes (longest first)
+    inf = None
+    remainder = key
+    for inf_key in sorted(INFERENCE_LABELS.keys(), key=len, reverse=True):
+        if key.startswith(inf_key + '_'):
+            inf = inf_key
+            remainder = key[len(inf_key) + 1:]
+            break
+    if inf is None:
+        parts = key.split('_', 1)
+        inf = parts[0]
+        remainder = parts[1] if len(parts) > 1 else ''
+
+    # Check if remainder ends with a known ref_controls suffix
+    ref = None
+    interv = remainder
+    for ref_key in sorted(REF_CONTROLS_LABELS.keys(), key=len, reverse=True):
+        suffix = '_' + ref_key
+        if remainder.endswith(suffix):
+            ref = ref_key
+            interv = remainder[:-len(suffix)]
+            break
+
+    return inf, interv, ref
+
+
 def _group_label(key: str) -> str:
-    """Convert a composite key like 'mcts_naive_none' to a readable label."""
-    parts = key.split('_', 1)
-    if len(parts) == 2:
-        inf, interv = parts[0], parts[1]
-        # Handle multi-word inference keys (mcts_naive, mcts_resample)
-        for inf_key in sorted(INFERENCE_LABELS.keys(), key=len, reverse=True):
-            if key.startswith(inf_key + '_'):
-                inf = inf_key
-                interv = key[len(inf_key) + 1:]
-                break
-        inf_label = INFERENCE_LABELS.get(inf, inf)
-        interv_label = INTERVENTION_LABELS.get(interv, interv)
-        return f"{inf_label} / {interv_label}"
-    return key
+    """Convert a composite key to a readable label."""
+    inf, interv, ref = _parse_composite_key(key)
+    inf_label = INFERENCE_LABELS.get(inf, inf)
+    interv_label = INTERVENTION_LABELS.get(interv, interv)
+    if ref is not None:
+        ref_label = REF_CONTROLS_LABELS.get(ref, ref)
+        return f"{inf_label} / {interv_label} / {ref_label}"
+    return f"{inf_label} / {interv_label}"
 
 
 def _group_colour(key: str, all_keys: list) -> str:
@@ -91,19 +118,15 @@ def _sort_keys(keys) -> list:
     """Sort composite group keys in a sensible order."""
     inference_order = ['naive', 'mcts_naive', 'mcts_resample']
     intervention_order = ['none', 'agency_only', 'combined', 'policy_only', 'mcts']
+    ref_order = [None, 'opt', 'mcts-greedy', 'mcts-qcbf']
 
     def _sort_key(k):
-        for inf_key in sorted(INFERENCE_LABELS.keys(), key=len, reverse=True):
-            if k.startswith(inf_key + '_'):
-                inf = inf_key
-                interv = k[len(inf_key) + 1:]
-                break
-        else:
-            inf, interv = k, ''
+        inf, interv, ref = _parse_composite_key(k)
         inf_idx = inference_order.index(inf) if inf in inference_order else 99
         interv_idx = (intervention_order.index(interv)
                       if interv in intervention_order else 99)
-        return (inf_idx, interv_idx)
+        ref_idx = ref_order.index(ref) if ref in ref_order else 99
+        return (inf_idx, interv_idx, ref_idx)
 
     return sorted(keys, key=_sort_key)
 
@@ -146,9 +169,12 @@ def discover_runs(scenario_name: str) -> list:
 
 
 def _composite_key(meta: dict) -> str:
-    """Build composite grouping key: inference_intervention."""
+    """Build composite grouping key: inference_intervention[_refcontrols]."""
     inf = meta.get("inference_type", "naive")
     interv = meta.get("intervention_type", "none")
+    ref = meta.get("ref_controls", "opt")
+    if interv != "none" and ref != "opt":
+        return f"{inf}_{interv}_{ref}"
     return f"{inf}_{interv}"
 
 
@@ -308,6 +334,13 @@ def extract_metrics(episodes: list) -> dict:
         # Timing
         "timing_per_step": timing_components,
         "timing_per_episode": per_episode_timing,
+        # Raw values for statistical tests
+        "raw_cost": cost_vals,
+        "raw_dev_accel": dev_a,
+        "raw_dev_steer": dev_d,
+        "raw_dev_l2": dev_l2,
+        "raw_solve_steps": solve_steps,
+        "raw_wall_time": wall_times,
     }
 
 
@@ -492,10 +525,105 @@ def print_latex_table(metrics_by_type: dict):
             vals.append("--")
     print(r"Step time (ms, mean) & " + " & ".join(vals) + r" \\")
 
+    print(r"\midrule")
+
+    # Belief inference timing breakdown
+    bi_keys = ['bi_relevance', 'bi_inference', 'bi_intervention', 'bi_plotting']
+    bi_latex = [r'BI: Relevance (ms)', r'BI: Inference (ms)',
+                r'BI: Intervention (ms)', r'BI: Plotting (ms)']
+    for bk, bl in zip(bi_keys, bi_latex):
+        vals = []
+        for t in types:
+            tc = metrics_by_type[t].get("timing_per_step", {})
+            st = tc.get(bk)
+            if st:
+                vals.append(f"{st['mean']:.1f}")
+            else:
+                vals.append("--")
+        print(f"{bl} & " + " & ".join(vals) + r" \\")
+
+    # BI total
+    vals = []
+    for t in types:
+        tc = metrics_by_type[t].get("timing_per_step", {})
+        total = sum(tc.get(bk, {}).get("mean", 0) for bk in bi_keys)
+        vals.append(f"{total:.1f}" if total > 0 else "--")
+    print(r"BI: Total (ms) & " + " & ".join(vals) + r" \\")
+
     print(r"\bottomrule")
     print(r"\end{tabular}")
     print(r"\end{table}")
     print()
+
+
+# ── Significance testing ──────────────────────────────────────────────
+
+def _significance_stars(p: float) -> str:
+    """Convert p-value to star notation."""
+    if p < 0.001:
+        return '***'
+    elif p < 0.01:
+        return '**'
+    elif p < 0.05:
+        return '*'
+    else:
+        return 'n.s.'
+
+
+def _add_significance_brackets(ax, x_positions, raw_data_by_type, types):
+    """Add significance brackets between all pairs of bars.
+
+    Uses Mann-Whitney U test (non-parametric, no normality assumption).
+
+    Args:
+        ax: Matplotlib axes.
+        x_positions: Array of x positions for each bar.
+        raw_data_by_type: Dict mapping type key -> list of raw values.
+        types: Ordered list of type keys.
+    """
+    from scipy.stats import mannwhitneyu
+
+    # Collect pairs that have enough data
+    pairs = []
+    for i in range(len(types)):
+        for j in range(i + 1, len(types)):
+            a = raw_data_by_type.get(types[i], [])
+            b = raw_data_by_type.get(types[j], [])
+            if len(a) >= 3 and len(b) >= 3:
+                pairs.append((i, j, a, b))
+
+    if not pairs:
+        return
+
+    # Get current y-axis upper limit
+    y_max = ax.get_ylim()[1]
+    bracket_height = y_max * 0.05
+    y_offset = y_max * 0.02
+
+    for level, (i, j, a, b) in enumerate(pairs):
+        try:
+            _, p = mannwhitneyu(a, b, alternative='two-sided')
+        except ValueError:
+            continue
+
+        stars = _significance_stars(p)
+
+        # Position bracket above bars, stacking for multiple pairs
+        y_bar = y_max + y_offset + level * (bracket_height + y_offset)
+        x1, x2 = x_positions[i], x_positions[j]
+
+        ax.plot([x1, x1, x2, x2],
+                [y_bar, y_bar + bracket_height, y_bar + bracket_height, y_bar],
+                color='black', linewidth=0.8)
+
+        label = f'{stars}\np={p:.3f}' if p >= 0.001 else f'{stars}\np={p:.1e}'
+        ax.text((x1 + x2) / 2, y_bar + bracket_height,
+                label, ha='center', va='bottom', fontsize=6)
+
+    # Expand y-axis to fit brackets
+    n_levels = len(pairs)
+    new_top = y_max + y_offset + n_levels * (bracket_height + y_offset) + y_max * 0.08
+    ax.set_ylim(top=new_top)
 
 
 # ── Plotting ─────────────────────────────────────────────────────────
@@ -574,6 +702,7 @@ def plot_comparison(metrics_by_type: dict, output: str = None):
         if val > 0:
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
                     f'{val:.3f}', ha='center', va='bottom', fontsize=7)
+    # _add_significance_brackets(ax, x, {t: metrics_by_type[t]["raw_cost"] for t in types}, types)
 
     # ── Panel 4: Action deviation (accel) ──
     ax = axes[1, 0]
@@ -588,6 +717,11 @@ def plot_comparison(metrics_by_type: dict, output: str = None):
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha='right')
     ax.set_ylim(bottom=0)
+    for bar, val in zip(bars, means):
+        if val > 0:
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    f'{val:.4f}', ha='center', va='bottom', fontsize=7)
+    # _add_significance_brackets(ax, x, {t: metrics_by_type[t]["raw_dev_accel"] for t in types}, types)
 
     # ── Panel 5: Action deviation (steering) ──
     ax = axes[1, 1]
@@ -602,6 +736,11 @@ def plot_comparison(metrics_by_type: dict, output: str = None):
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha='right')
     ax.set_ylim(bottom=0)
+    for bar, val in zip(bars, means):
+        if val > 0:
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    f'{val:.4f}', ha='center', va='bottom', fontsize=7)
+    # _add_significance_brackets(ax, x, {t: metrics_by_type[t]["raw_dev_steer"] for t in types}, types)
 
     # ── Panel 6: Steps to solve ──
     ax = axes[1, 2]
@@ -620,6 +759,7 @@ def plot_comparison(metrics_by_type: dict, output: str = None):
         if val > 0:
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
                     f'{val:.0f}', ha='center', va='bottom', fontsize=8)
+    # _add_significance_brackets(ax, x, {t: metrics_by_type[t]["raw_solve_steps"] for t in types}, types)
 
     # ── Panel 7: Wall time per episode ──
     ax = axes[2, 0]
@@ -638,6 +778,7 @@ def plot_comparison(metrics_by_type: dict, output: str = None):
         if val > 0:
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
                     f'{val:.1f}s', ha='center', va='bottom', fontsize=7)
+    # _add_significance_brackets(ax, x, {t: metrics_by_type[t]["raw_wall_time"] for t in types}, types)
 
     # ── Panel 8: Per-step total timing ──
     ax = axes[2, 1]
@@ -663,28 +804,30 @@ def plot_comparison(metrics_by_type: dict, output: str = None):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
                     f'{val:.0f}ms', ha='center', va='bottom', fontsize=7)
 
-    # ── Panel 9: Timing component breakdown (stacked bar) ──
+    # ── Panel 9: Belief inference timing breakdown (stacked bar) ──
     ax = axes[2, 2]
-    # Use a fixed set of known components for the stacked bar
-    component_keys = ['belief_inference', 'human_predict', 'human_policy',
-                      'true_predict', 'true_policy', 'plotting']
-    component_labels = ['Belief inf.', 'Predict (belief)', 'Policy (belief)',
-                        'Predict (true)', 'Policy (true)', 'Plotting']
-    component_colours = ['#4C72B0', '#55A868', '#DD8452',
-                         '#8172B2', '#C44E52', '#CCCCCC']
+    bi_keys = ['bi_relevance', 'bi_inference', 'bi_intervention', 'bi_plotting']
+    bi_labels = ['Relevance', 'Inference', 'Intervention', 'Plotting']
+    bi_colours = ['#4C72B0', '#DD8452', '#C44E52', '#CCCCCC']
 
     bottoms = np.zeros(len(types))
-    for ck, cl, cc in zip(component_keys, component_labels, component_colours):
+    for bk, bl, bc in zip(bi_keys, bi_labels, bi_colours):
         vals = []
         for t in types:
             tc = metrics_by_type[t].get("timing_per_step", {})
-            vals.append(tc.get(ck, {}).get("mean", 0))
+            vals.append(tc.get(bk, {}).get("mean", 0))
         vals = np.array(vals)
-        ax.bar(x, vals, width, bottom=bottoms, label=cl, color=cc)
+        ax.bar(x, vals, width, bottom=bottoms, label=bl, color=bc)
         bottoms += vals
 
+    # Add total label on top
+    for i, total in enumerate(bottoms):
+        if total > 0:
+            ax.text(x[i], total, f'{total:.0f}ms', ha='center',
+                    va='bottom', fontsize=7)
+
     ax.set_ylabel('Time (ms)')
-    ax.set_title('Step Time Breakdown')
+    ax.set_title('Belief Inference Timing')
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha='right')
     ax.set_ylim(bottom=0)

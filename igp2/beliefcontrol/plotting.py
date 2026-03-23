@@ -1658,6 +1658,142 @@ class MCTSTreePlotter:
 
 
 # ---------------------------------------------------------------------------
+# MCTSResamplePlotter
+# ---------------------------------------------------------------------------
+
+
+class MCTSResamplePlotter:
+    """Live plot showing MCTS tree nodes coloured by resample probability.
+
+    Displays an s-vs-v plot with:
+    - All tree edges (traversals) as light grey lines
+    - Nodes coloured by their resample probability (JSD → sigmoid)
+    - A background heatmap approximation of high-resample regions
+    - Root node highlighted with a star marker
+    """
+
+    def __init__(self, frenet, horizon: int, dt: float):
+        self._frenet = frenet
+        self._horizon = horizon
+        self._dt = dt
+        self._fig: Optional[plt.Figure] = None
+        self._ax: Optional[plt.Axes] = None
+        self._cbar_ax: Optional[plt.Axes] = None
+
+    def _init(self):
+        if self._fig is not None and plt.fignum_exists(self._fig.number):
+            plt.close(self._fig)
+
+        plt.ion()
+        self._fig = plt.figure(figsize=(8, 5))
+        gs = self._fig.add_gridspec(1, 2, width_ratios=[1, 0.04], wspace=0.05)
+        self._ax = self._fig.add_subplot(gs[0])
+        self._cbar_ax = self._fig.add_subplot(gs[1])
+        self._ax.set_xlabel('s (m)', fontsize=10)
+        self._ax.set_ylabel('v (m/s)', fontsize=10)
+        self._ax.grid(True, alpha=0.3)
+        self._fig.tight_layout()
+
+    def update(self, root, road_left: np.ndarray, road_right: np.ndarray,
+               step: int):
+        if root is None:
+            return
+
+        # BFS to collect all nodes and edges
+        node_s, node_v, node_resample = [], [], []
+        edge_s, edge_v = [], []
+
+        queue = [root]
+        n_nodes = 0
+        while queue and n_nodes < _MAX_TREE_NODES:
+            node = queue.pop(0)
+            s = float(node.state[0])
+            v = float(node.state[1]) if len(node.state) == 2 else float(node.state[3])
+            node_s.append(s)
+            node_v.append(v)
+            node_resample.append(getattr(node, 'resample_prob', 0.0))
+            n_nodes += 1
+
+            for act, child in node.children.items():
+                if child is None:
+                    continue
+                cs = float(child.state[0])
+                cv = float(child.state[1]) if len(child.state) == 2 else float(child.state[3])
+                edge_s.extend([s, cs, None])
+                edge_v.extend([v, cv, None])
+                queue.append(child)
+
+        if not node_s:
+            return
+
+        node_s = np.array(node_s)
+        node_v = np.array(node_v)
+        node_resample = np.array(node_resample)
+
+        # Initialise figure if needed
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init()
+
+        ax = self._ax
+        ax.cla()
+        ax.set_xlabel('s (m)', fontsize=10)
+        ax.set_ylabel('v (m/s)', fontsize=10)
+        ax.grid(True, alpha=0.3)
+
+        self._cbar_ax.cla()
+
+        # Background heatmap: bin nodes into grid and average resample prob
+        s_min, s_max = node_s.min(), node_s.max()
+        v_min, v_max = node_v.min(), node_v.max()
+        s_pad = max((s_max - s_min) * 0.05, 0.5)
+        v_pad = max((v_max - v_min) * 0.05, 0.2)
+        n_bins_s, n_bins_v = 30, 20
+        s_edges = np.linspace(s_min - s_pad, s_max + s_pad, n_bins_s + 1)
+        v_edges = np.linspace(v_min - v_pad, v_max + v_pad, n_bins_v + 1)
+
+        heatmap = np.zeros((n_bins_v, n_bins_s))
+        counts = np.zeros((n_bins_v, n_bins_s))
+        s_idx = np.clip(np.digitize(node_s, s_edges) - 1, 0, n_bins_s - 1)
+        v_idx = np.clip(np.digitize(node_v, v_edges) - 1, 0, n_bins_v - 1)
+        for i in range(len(node_s)):
+            heatmap[v_idx[i], s_idx[i]] += node_resample[i]
+            counts[v_idx[i], s_idx[i]] += 1
+        mask = counts > 0
+        heatmap[mask] /= counts[mask]
+
+        # Only show background where there are nodes
+        heatmap_masked = np.ma.masked_where(~mask, heatmap)
+        ax.pcolormesh(s_edges, v_edges, heatmap_masked,
+                      cmap='YlOrRd', alpha=0.3, shading='flat',
+                      vmin=0.0, vmax=1.0, zorder=0)
+
+        # Tree edges
+        ax.plot(edge_s, edge_v,
+                color=(0.75, 0.75, 0.75), linewidth=0.3, alpha=0.5, zorder=1)
+
+        # Nodes coloured by resample probability
+        sizes = 8 + 25 * node_resample
+        sc = ax.scatter(node_s, node_v, c=node_resample, cmap='YlOrRd',
+                        s=sizes, zorder=3, edgecolors='none', alpha=0.8,
+                        vmin=0.0, vmax=1.0)
+
+        # Root star
+        ax.scatter([node_s[0]], [node_v[0]], c='blue', s=100, zorder=5,
+                   marker='*', edgecolors='black', linewidths=0.5)
+
+        self._fig.colorbar(sc, cax=self._cbar_ax, label='P(resample)')
+
+        n_high = int(np.sum(node_resample > 0.5))
+        ax.set_title(
+            f'Resample probability  step={step}  |  '
+            f'{n_nodes} nodes  |  {n_high} with P>0.5',
+            fontsize=10)
+
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()
+
+
+# ---------------------------------------------------------------------------
 # MCTSTrajectoryPlotter
 # ---------------------------------------------------------------------------
 

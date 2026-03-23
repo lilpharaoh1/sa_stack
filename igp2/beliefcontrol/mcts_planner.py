@@ -42,6 +42,7 @@ class MCTSTrajectory:
     states: np.ndarray      # (K+1, 4) [s, d=0, phi=0, v]  coarse, padded for compat
     controls: np.ndarray    # (K, 2)   [a, delta=0]         coarse, padded for compat
     mcts_reward: float      # cumulative discounted reward
+    interventions: Optional[List[bool]] = None  # per-step intervention flags (QCBF)
 
 
 class BeliefState:
@@ -129,6 +130,8 @@ class MCTSNode:
         'action_visits',   # Dict[float, int]
         'Q',               # Dict[float, Dict[theta, float]]
         'colliding',       # True if this state collides with an obstacle
+        'jsd',             # JSD (policy divergence) at this node
+        'resample_prob',   # sigmoid(gamma * jsd) — probability of resampling
     )
 
     def __init__(self,
@@ -148,6 +151,8 @@ class MCTSNode:
         self.action_visits: Dict[float, int] = {}
         self.Q: Dict[float, Dict[tuple, float]] = {}
         self.colliding = colliding  # node is reachable but not expandable
+        self.jsd = 0.0
+        self.resample_prob = 0.0
 
     def is_terminal(self, horizon: int) -> bool:
         return self.depth >= horizon or self.colliding
@@ -694,6 +699,17 @@ class MCTSPlanner:
 
         self._last_root = root
 
+        # Compute JSD and resample probability for every node (for plotting)
+        gamma_r = self._resample_gamma if self._resample_gamma is not None else 5.0
+        bfs_q = [root]
+        while bfs_q:
+            nd = bfs_q.pop(0)
+            nd.jsd = self._compute_policy_divergence(nd, all_configs)
+            nd.resample_prob = 1.0 / (1.0 + math.exp(-gamma_r * nd.jsd))
+            for ch in nd.children.values():
+                if ch is not None:
+                    bfs_q.append(ch)
+
         _t0 = _time.perf_counter()
         # ----- Belief update from human's observed action -----
         if human_action is not None and root.Q:
@@ -1048,6 +1064,104 @@ class MCTSPlanner:
         return self._greedy_trajectory(
             root, road_left, road_right, obstacles, s0,
             theta, theta_visible)
+
+    def extract_safe_trajectory(
+            self, theta_star: tuple, theta_R: tuple,
+            belief: 'BeliefState',
+            road_left: np.ndarray, road_right: np.ndarray,
+            obstacles: list,
+            gamma: float = 0.8) -> Optional[MCTSTrajectory]:
+        """Safety-filtered trajectory extraction (QCBF).
+
+        At each node, follow the human's preferred action (argmax Q_{θ*})
+        unless its relative regret under the true state θ_R exceeds
+        (1 − γ), in which case override with argmax Q_{θ_R}.
+
+        Args:
+            theta_star: MAP belief config (human's estimated belief).
+            theta_R: True config (all agents visible).
+            belief: BeliefState for visible_aids mapping.
+            road_left / road_right: Road boundary arrays.
+            obstacles: Obstacle list.
+            gamma: Safety strictness ∈ [0, 1].  Higher = stricter.
+
+        Returns:
+            MCTSTrajectory with per-step intervention flags, or None.
+        """
+        root = self._last_root
+        if root is None or not root.Q:
+            return None
+
+        threshold = 1.0 - gamma
+
+        path = [root]
+        intervention_flags = []
+        node = root
+
+        while not node.is_terminal(self._horizon):
+            if not node.Q:
+                break
+
+            # Human's preferred action: argmax_a Q_{θ*}(s, a)
+            a_H = None
+            best_q_star = -float('inf')
+            for act, q_dict in node.Q.items():
+                q = q_dict.get(theta_star, -float('inf'))
+                if q > best_q_star:
+                    best_q_star = q
+                    a_H = act
+
+            if a_H is None:
+                break
+
+            # Q values under true state θ_R
+            q_R = {}
+            for act, q_dict in node.Q.items():
+                q_R[act] = q_dict.get(theta_R, -float('inf'))
+
+            q_max = max(q_R.values())
+            q_min = min(q_R.values())
+
+            # Relative regret of human's action under true state
+            if q_max == q_min:
+                relative_regret = 0.0
+            else:
+                relative_regret = (q_max - q_R.get(a_H, -float('inf'))) / (q_max - q_min)
+
+            # Safety filter
+            if relative_regret <= threshold:
+                chosen_action = a_H
+                intervention = False
+            else:
+                chosen_action = max(q_R, key=q_R.get)
+                intervention = True
+
+            if chosen_action not in node.children or node.children[chosen_action] is None:
+                break
+
+            child = node.children[chosen_action]
+            path.append(child)
+            intervention_flags.append(intervention)
+            node = child
+
+        s0 = float(root.state[0])
+        theta_visible = {
+            cfg: belief.visible_aids(cfg) for cfg in belief.configs
+        }
+        traj = self._path_to_trajectory(
+            path, road_left, road_right, obstacles, s0,
+            theta_R, theta_visible)
+
+        if traj is not None:
+            # Pad intervention flags to match trajectory length (tree + padding)
+            n_tree = len(path) - 1
+            n_total = len(traj.controls)
+            padded_flags = list(intervention_flags)
+            # Padding steps beyond the tree: no intervention (heuristic policy)
+            padded_flags.extend([False] * (n_total - n_tree))
+            traj.interventions = padded_flags
+
+        return traj
 
     # ==================================================================
     # Helper methods

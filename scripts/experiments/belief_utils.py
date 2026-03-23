@@ -385,9 +385,11 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
     true_other_agents = getattr(true_policy, 'last_other_agents', None) if true_policy else None
     true_trajectories = dict(ego_agent._true_agent_trajectories)
 
-    # Frenet state from the true policy
+    # Frenet state from whichever policy ran (prefer true, fallback to human)
     ego_frenet_state = None
     fs = getattr(true_policy, 'last_frenet_state', None) if true_policy else None
+    if fs is None:
+        fs = getattr(human_policy, 'last_frenet_state', None) if human_policy else None
     if fs is not None:
         ego_frenet_state = np.array(fs, dtype=float)
 

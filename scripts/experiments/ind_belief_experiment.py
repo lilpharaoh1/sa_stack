@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
                         choices=["none", "agency_only", "combined", "policy_only", "mcts", "always_policy"],
                         help="Intervention scheme for the ego agent (default: none)")
     parser.add_argument("--ref-controls", type=str, default="opt",
-                        choices=["opt", "mcts-greedy"],
+                        choices=["opt", "mcts-greedy", "mcts-qcbf"],
                         help="Source of reference controls for intervention (default: opt)")
     parser.add_argument("--inference-type", type=str, default="naive",
                         choices=["none", "naive", "mcts_naive", "mcts_resample"],

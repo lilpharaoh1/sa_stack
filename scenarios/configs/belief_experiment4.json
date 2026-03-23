@@ -31,7 +31,7 @@
   "dynamic_groups": [
     {
       "agent_type": "TrafficAgent",
-      "count": [1, 2],
+      "count": [2, 2],
       "spawn": {
         "box": {
           "center": [35, -2.5],

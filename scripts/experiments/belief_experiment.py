@@ -49,8 +49,9 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch BeliefAgent experiment runner")
-    parser.add_argument("--map", "-m", type=str, required=True,
-                        help="Scenario config name under scenarios/configs/")
+    parser.add_argument("--map", "-m", type=str, default=None,
+                        help="Scenario config name under scenarios/configs/ "
+                             "(required unless --resume is used)")
     parser.add_argument("-n", "--n-samples", type=int, default=100,
                         help="Number of samples to run (default: 100)")
     parser.add_argument("--seed", type=int, default=21,
@@ -69,17 +70,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--intervention-type", type=str, default="none",
                         choices=["none", "agency_only", "combined", "policy_only", "mcts"],
                         help="Intervention scheme for the ego agent (default: none)")
+    parser.add_argument("--ref-controls", type=str, default="opt",
+                        choices=["opt", "mcts-greedy", "mcts-qcbf"],
+                        help="Source of reference controls for intervention (default: opt)")
     parser.add_argument("--inference-type", type=str, default="naive",
-                        choices=["naive", "mcts_naive", "mcts_resample"],
+                        choices=["none", "naive", "mcts_naive", "mcts_resample"],
                         help="Belief inference strategy (default: naive)")
-    parser.add_argument("--relevance-method", type=str, default="dual",
-                        choices=["corridor", "dual"],
+    parser.add_argument("--relevance-method", type=str, default="naive",
+                        choices=["corridor", "dual", "naive"],
                         help="Relevance detection method for belief inference "
-                             "(default: dual)")
+                             "(default: naive)")
     parser.add_argument("--planning-mode", type=str, default="2d",
                         choices=["2d", "longitudinal"],
                         help="Planning mode: 2d (full lateral+longitudinal) "
                              "or longitudinal (d=0, accel only) (default: 2d)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Resume from an existing run directory. "
+                             "Loads previous results and continues with -n "
+                             "additional samples. Other flags (--map, --seed, "
+                             "etc.) are inherited from the original run.")
     return parser.parse_args()
 
 
@@ -236,8 +245,59 @@ def print_summary(scenario_name: str,
 def main():
     args = parse_args()
 
+    if args.resume is None and args.map is None:
+        print("Error: --map/-m is required unless --resume is used.")
+        sys.exit(1)
+
     ip.setup_logging(level=logging.DEBUG)
     np.seterr(divide="ignore")
+
+    # --- Resume from existing run ---
+    prev_results: List[ExperimentResult] = []
+    prev_n_viable = 0
+    prev_n_nonviable = 0
+    prev_batch_time = 0.0
+
+    if args.resume:
+        import dill
+        resume_dir = args.resume.rstrip('/')
+        # If just a folder name (not a path), look in RESULTS_DIR
+        if not os.path.isdir(resume_dir):
+            resume_dir = os.path.join(RESULTS_DIR, args.resume.rstrip('/'))
+        if not os.path.isdir(resume_dir):
+            print(f"Error: resume directory not found: {args.resume}")
+            sys.exit(1)
+
+        # Load previous metadata to inherit settings
+        prev_meta_path = os.path.join(resume_dir, "metadata.json")
+        with open(prev_meta_path) as f:
+            prev_meta = json.load(f)
+
+        # Override args from previous run's settings
+        args.map = prev_meta["scenario"]
+        args.seed = prev_meta["seed"]
+        args.steps = prev_meta["max_steps"]
+        args.intervention_type = prev_meta["intervention_type"]
+        args.inference_type = prev_meta["inference_type"]
+        args.planning_mode = prev_meta["planning_mode"]
+        args.ref_controls = prev_meta.get("ref_controls", "opt")
+        args.relevance_method = prev_meta.get("relevance_method", "naive")
+
+        # Load previous results
+        prev_pkl_path = os.path.join(resume_dir, "results.pkl")
+        with open(prev_pkl_path, 'rb') as f:
+            prev_data = dill.load(f)
+        prev_results = prev_data["results"]
+        prev_n_viable = prev_data["n_viable"]
+        prev_n_nonviable = prev_data["n_nonviable"]
+        prev_batch_time = prev_data.get("batch_wall_time", 0.0)
+
+        print(f"\n{'='*60}")
+        print(f"  Resuming from: {resume_dir}")
+        print(f"  Previous: {prev_n_viable} viable, "
+              f"{prev_n_nonviable} non-viable")
+        print(f"  Adding {args.n_samples} more samples")
+        print(f"{'='*60}\n")
 
     # Load scenario config
     config_path = os.path.join("scenarios", "configs", f"{args.map}.json")
@@ -264,33 +324,46 @@ def main():
         fps=fps,
     )
 
-    results: List[ExperimentResult] = []
-    n_viable = 0
-    n_nonviable = 0
+    results: List[ExperimentResult] = list(prev_results)
+    n_viable = prev_n_viable
+    n_nonviable = prev_n_nonviable
 
-    # Create run directory and write metadata before the loop so we have it
-    # even if the run crashes mid-way.
-    run_dir = make_run_dir(
-        scenario_name=args.map,
-        intervention_type=args.intervention_type,
-        seed=args.seed,
-        n_samples=args.n_samples,
-    )
+    if args.resume:
+        # Reuse existing run directory
+        run_dir = resume_dir
+    else:
+        # Create run directory and write metadata before the loop so we have it
+        # even if the run crashes mid-way.
+        run_dir = make_run_dir(
+            scenario_name=args.map,
+            intervention_type=args.intervention_type,
+            seed=args.seed,
+            n_samples=args.n_samples,
+        )
+
     metadata = build_run_metadata(args, config)
+    metadata["n_samples"] = prev_n_viable + args.n_samples  # total target
+    if args.resume:
+        metadata["resumed_from"] = prev_n_viable
     os.makedirs(run_dir, exist_ok=True)
     with open(os.path.join(run_dir, "metadata.json"), 'w') as _mf:
         json.dump(metadata, _mf, indent=2, default=str)
 
+    total_target = prev_n_viable + args.n_samples
     print(f"\n{'='*60}")
     print(f"  Batch Experiment: {args.map}")
-    print(f"  Samples: {args.n_samples}  |  Base seed: {args.seed}")
+    print(f"  Samples: {args.n_samples} new"
+          + (f" (+{prev_n_viable} previous = {total_target} total)"
+             if prev_n_viable else "")
+          + f"  |  Base seed: {args.seed}")
     print(f"  FPS: {fps}  |  Max steps: {args.steps}")
     print(f"  Run directory: {run_dir}")
     print(f"{'='*60}\n")
 
     batch_t0 = time.time()
 
-    next_seed = args.seed
+    # Continue seeds from where the previous run left off
+    next_seed = args.seed + prev_n_viable + prev_n_nonviable
 
     for i in range(args.n_samples):
         # Keep trying seeds until we get a viable configuration
@@ -331,7 +404,8 @@ def main():
         n_viable += 1
 
         n_agents = len(expanded["agents"])
-        print(f"\n[Sample {i+1:4d}/{args.n_samples}] seed={sample_seed}  "
+        sample_num = prev_n_viable + i + 1
+        print(f"\n[Sample {sample_num:4d}/{total_target}] seed={sample_seed}  "
               f"agents={n_agents}")
 
         if args.preview:
@@ -353,6 +427,7 @@ def main():
             inference_type=args.inference_type,
             relevance_method=args.relevance_method,
             planning_mode=args.planning_mode,
+            ref_controls=args.ref_controls,
         )
         results.append(result)
 
@@ -366,7 +441,8 @@ def main():
                 carla_sim.remove_agent(aid)
         carla_sim.clear_static_objects()
 
-    batch_time = time.time() - batch_t0
+    new_batch_time = time.time() - batch_t0
+    batch_time = prev_batch_time + new_batch_time
 
     # Save results to a structured run directory
     batch_data = {
@@ -382,7 +458,9 @@ def main():
     save_summary(summary, run_dir)
 
     print_summary(args.map, results, n_viable, n_nonviable, run_dir)
-    print(f"  Total batch time: {batch_time:.1f}s")
+    print(f"  Total batch time: {batch_time:.1f}s"
+          + (f" ({prev_batch_time:.1f}s previous + {new_batch_time:.1f}s new)"
+             if prev_batch_time > 0 else ""))
 
 
 if __name__ == "__main__":

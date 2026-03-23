@@ -378,10 +378,20 @@ class BeliefAgent(Agent):
             policy_type, fps, scenario_map,
             planning_mode=planning_mode, **policy_kwargs,
         )
-        # Enable collision dual analysis on the true policy only
+        # Enable collision dual analysis only when dual relevance needs it
         if isinstance(self._true_policy, TwoStagePolicy):
-            self._true_policy.analyse_duals = True
+            self._true_policy.analyse_duals = (relevance_method == 'dual')
             self._true_policy.label = "true"
+
+        # Determine whether the true policy solve is needed each step.
+        # It is only required for:
+        #   - 'dual' relevance (needs dual analysis from true NLP)
+        #   - 'policy_only' intervention (uses true NLP result directly)
+        #   - 'always_policy' intervention (uses true action)
+        self._need_true_policy = (
+            relevance_method == 'dual'
+            or intervention_type in ('policy_only', 'always_policy')
+        )
 
         # Per-step timing breakdown (seconds)
         self.last_step_timing: Dict[str, float] = {}
@@ -409,7 +419,8 @@ class BeliefAgent(Agent):
                 inference_type=inference_type,
                 relevance_method=relevance_method,
                 planning_mode=planning_mode,
-                ref_controls=ref_controls)
+                ref_controls=ref_controls,
+                plot=plot_interval)
 
     def _build_policy(self, policy_type, fps, scenario_map,
                        planning_mode='2d', **kwargs):
@@ -663,10 +674,10 @@ class BeliefAgent(Agent):
             human_policy_time = _time.perf_counter() - t0
 
         # --- Run true (ground-truth) policy ---
-        # When using MCTS inference, the true policy is not needed.
+        # Only needed for dual relevance, policy_only, or always_policy.
         true_action, true_candidates, true_best = None, None, None
         true_policy_time = 0.0
-        if self._inference_type not in ('mcts_naive', 'mcts_resample'):
+        if self._need_true_policy:
             t0 = _time.perf_counter()
             if isinstance(self._true_policy, TwoStagePolicy):
                 true_action, true_candidates, true_best = self._true_policy.select_action(
@@ -700,7 +711,7 @@ class BeliefAgent(Agent):
     def _plot(self, ego_state, candidates, best_idx):
         """Dispatch to the correct plotter depending on policy type."""
         if isinstance(self._plotter, OptimisationPlotter):
-            # True policy data (always available)
+            # True policy data (may be None if true policy was skipped)
             true_rollout = getattr(self._true_policy, 'last_rollout', None)
             true_milp = getattr(self._true_policy, 'last_milp_rollout', None)
             true_other_agents = getattr(self._true_policy, 'last_other_agents', None)
@@ -781,11 +792,10 @@ class BeliefAgent(Agent):
         timing: Dict[str, float] = {}
 
         # 1. Predict trajectories for both policies
-        # When using MCTS inference, the true policy is not needed — MCTS
-        # builds its own obstacle predictions and the intervention generates
-        # its own trajectory.  Skip the true prediction and true policy to
-        # save time.
-        skip_true = (self._inference_type in ('mcts_naive', 'mcts_resample'))
+        # Skip the true policy (and its trajectory prediction) when it's not
+        # needed.  MCTS inference builds its own obstacle predictions, and
+        # non-dual relevance methods don't need the true NLP duals.
+        skip_true = not self._need_true_policy
 
         if self._other_agents:
             if self._human_enabled:
@@ -870,9 +880,9 @@ class BeliefAgent(Agent):
         true_result = None
         human_result = None
         active_agents = None
+        true_obstacles = None
 
-        if self._inference_type not in ('mcts_naive', 'mcts_resample'):
-            # These are only needed for naive inference / non-MCTS interventions
+        if self._need_true_policy:
             if (self._true_policy._prev_nlp_states is not None and
                     self._true_policy._prev_nlp_controls is not None):
                 true_result = (self._true_policy._prev_nlp_states,
@@ -886,10 +896,10 @@ class BeliefAgent(Agent):
             if isinstance(self._true_policy, TwoStagePolicy):
                 active_agents = self._true_policy.last_dual_analysis
 
+            true_obstacles = self._true_policy.last_obstacles
+
         # Run inference step
         t0 = _time.perf_counter()
-        true_obstacles = (self._true_policy.last_obstacles
-                          if self._inference_type not in ('mcts_naive', 'mcts_resample') else None)
         # Previous executed action for MCTS root jerk continuity
         prev_exec_tuple = None
         if self._last_executed_action is not None:
@@ -905,7 +915,12 @@ class BeliefAgent(Agent):
             true_policy_result=true_result,
             human_policy_result=human_result,
             active_agents=active_agents)
-        timing['belief_inference'] = _time.perf_counter() - t0
+        # Include inference sub-timings (replaces aggregate belief_inference)
+        if self._belief_inference.last_step_timing:
+            for k, v in self._belief_inference.last_step_timing.items():
+                timing[f'bi_{k}'] = v
+        else:
+            timing['bi_total'] = _time.perf_counter() - t0
 
         # Propagate inference marginals into belief state
         self.update_beliefs(observation)

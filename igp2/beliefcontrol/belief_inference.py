@@ -25,6 +25,7 @@ from igp2.beliefcontrol.plotting import (
     InferencePlotter, InterventionPlotter,
     MCTSBeliefPlotter, MCTSTreePlotter,
     MCTSNodePlotter, MCTSInterventionPlotter,
+    MCTSResamplePlotter,
 )
 from igp2.beliefcontrol.planning_utils import (
     milp_to_nlp_warmstart as _milp_to_nlp_warmstart,
@@ -183,6 +184,7 @@ class BeliefInference:
         self._intervention_type = intervention_type
         self._ref_controls = ref_controls
         self._w_agency = w_agency
+        self._qcbf_gamma = 0.8  # safety strictness for mcts-qcbf
 
         # History buffer
         self._history: List[HistoryEntry] = []
@@ -242,6 +244,9 @@ class BeliefInference:
                 **resample_kwargs,
             )
 
+        # Per-step timing breakdown (seconds)
+        self.last_step_timing: Dict[str, float] = {}
+
         # Persistent MCTS belief state (across timesteps)
         self._mcts_belief_state = None  # created on first MCTS call
 
@@ -250,6 +255,7 @@ class BeliefInference:
         self._mcts_tree_plotter: Optional[MCTSTreePlotter] = None
         self._mcts_node_plotter: Optional[MCTSNodePlotter] = None
         self._mcts_intervention_plotter: Optional['MCTSInterventionPlotter'] = None
+        self._mcts_resample_plotter: Optional[MCTSResamplePlotter] = None
         if plot and inference_type in ('mcts_naive', 'mcts_resample') and self._frenet is not None:
             self._mcts_belief_plotter = MCTSBeliefPlotter(
                 hidden_threshold=self._hidden_threshold)
@@ -262,6 +268,8 @@ class BeliefInference:
             self._mcts_intervention_plotter = MCTSInterventionPlotter(
                 scenario_map, policy.reference_waypoints, self._frenet,
                 ego_length=self._ego_length, ego_width=self._ego_width)
+            self._mcts_resample_plotter = MCTSResamplePlotter(
+                self._frenet, mcts_horizon, self._dt)
 
     def reset(self):
         """Clear history and results."""
@@ -352,7 +360,9 @@ class BeliefInference:
             intervention_aids = sorted(marginals.keys()) if marginals else relevant_aids
 
             # Intervention (if enabled)
+            _t_intervention = 0.0
             if self._intervention_type not in ('none', 'always_policy') and intervention_aids:
+                _t0_interv = _time.perf_counter()
                 w = self._frenet.frenet_to_world(
                     frenet_state[0], frenet_state[1], heading=frenet_state[2])
                 ego_heading = w['heading']
@@ -362,15 +372,22 @@ class BeliefInference:
                     ego_position=ego_position, step_count=step_count,
                     ego_heading=ego_heading,
                     true_obstacles=true_obstacles)
+                _t_intervention = _time.perf_counter() - _t0_interv
         else:
-            # Naive mode: requires warmup history
-            sim_steps_per_plan_step = max(1, int(round(self._dt / self._dt_sim)))
-            warmup_sim_steps = self._warmup_steps * sim_steps_per_plan_step
-            if len(self._history) < warmup_sim_steps:
+            # Naive mode: use available history up to warmup window size
+            import time as _time
+            _t_infer_start = _time.perf_counter()
+            _t_relevance = 0.0
+            _t_intervention = 0.0
+            t_elapsed = 0.0
+
+            if len(self._history) < 1:
                 return
 
-            # Fixed observation window
-            window_sim_steps = self._warmup_steps * sim_steps_per_plan_step
+            sim_steps_per_plan_step = max(1, int(round(self._dt / self._dt_sim)))
+            max_window_sim_steps = self._warmup_steps * sim_steps_per_plan_step
+            # Use whatever history we have, up to the max window
+            window_sim_steps = min(len(self._history), max_window_sim_steps)
             start_idx = len(self._history) - window_sim_steps
 
             hist_frenet = self._history[start_idx].frenet_state
@@ -384,11 +401,12 @@ class BeliefInference:
             observed_sd = self._simulate_human_trajectory(
                 start_idx, len(self._history) - 1, sim_steps_per_plan_step)
 
+            _t0_rel = _time.perf_counter()
             relevant_aids = self._find_relevant_agents(
                 frenet_state, other_agent_states, active_agents=active_agents)
+            _t_relevance = _time.perf_counter() - _t0_rel
 
             results: List[InferenceResult] = []
-            t_elapsed = 0.0
 
             if not relevant_aids:
                 self._last_intervention = None
@@ -406,6 +424,7 @@ class BeliefInference:
                     frenet_state[0], frenet_state[1], heading=frenet_state[2])
                 ego_heading = w['heading']
 
+                _t0_interv = _time.perf_counter()
                 self._compute_intervention(
                     marginals, frenet_state, other_agent_states,
                     relevant_aids,
@@ -414,11 +433,14 @@ class BeliefInference:
                     true_obstacles=true_obstacles,
                     true_policy_result=true_policy_result,
                     human_policy_result=human_policy_result)
+                _t_intervention = _time.perf_counter() - _t0_interv
 
         self._last_results = results
         self._last_observed_sd = observed_sd
 
-        # 6. Update debug plot (naive mode only — requires observed_sd)
+        # 6. Update debug plots
+        _t_plot_start = _time.perf_counter()
+
         if (self._plotter is not None and ego_position is not None
                 and observed_sd is not None):
             if not relevant_aids:
@@ -430,10 +452,6 @@ class BeliefInference:
                 other_agent_states=other_agent_states,
                 marginals=marginals if relevant_aids else {},
                 ego_heading=ego_heading)
-
-        # 7. Update MCTS-specific debug plots
-        if self._inference_type in ('mcts_naive', 'mcts_resample'):
-            _t_plot_start = _time.perf_counter()
 
         if (self._mcts_belief_plotter is not None
                 and self._mcts_belief_state is not None):
@@ -458,13 +476,30 @@ class BeliefInference:
                 step_count,
                 other_agent_states=other_agent_states)
 
-        if self._inference_type in ('mcts_naive', 'mcts_resample'):
-            _t_plot = _time.perf_counter() - _t_plot_start
-            _t_total = _time.perf_counter() - _t_infer_start
-            logger.info(
-                "[Step %4d] Belief inference timing: "
-                "relevance=%.3fs  mcts=%.3fs  plotting=%.3fs  total=%.3fs",
-                step_count, _t_relevance, t_elapsed, _t_plot, _t_total)
+        if (self._mcts_resample_plotter is not None
+                and self._mcts_planner is not None
+                and self._mcts_planner._last_root is not None):
+            self._mcts_resample_plotter.update(
+                self._mcts_planner._last_root,
+                getattr(self, '_last_road_left', np.zeros(1)),
+                getattr(self, '_last_road_right', np.zeros(1)),
+                step_count)
+
+        _t_plot = _time.perf_counter() - _t_plot_start
+        _t_total = _time.perf_counter() - _t_infer_start
+
+        self.last_step_timing = {
+            'relevance': _t_relevance,
+            'inference': t_elapsed,
+            'intervention': _t_intervention,
+            'plotting': _t_plot,
+        }
+        logger.info(
+            "[Step %4d] Belief inference timing: "
+            "relevance=%.3fs  inference=%.3fs  intervention=%.3fs  "
+            "plotting=%.3fs  total=%.3fs",
+            step_count, _t_relevance, t_elapsed, _t_intervention,
+            _t_plot, _t_total)
 
     def _run_naive_inference(self, hist_frenet: np.ndarray,
                              hist_agents: Dict[int, AgentState],
@@ -559,8 +594,9 @@ class BeliefInference:
         results.sort(key=lambda r: r.pos_cost)
 
         # Print results and get marginal posteriors
+        n_observed = len(observed_sd) - 1 if observed_sd is not None else 0
         marginals = self._print_results(results, step_count, relevant_aids,
-                                        t_elapsed, self._warmup_steps)
+                                        t_elapsed, n_observed)
 
         return results, marginals, t_elapsed
 
@@ -1085,7 +1121,7 @@ class BeliefInference:
         # --- agency_only / combined ---
 
         # 3. Get reference controls using the configured scheme
-        ref_controls, nlp_states, warm_states, warm_controls = \
+        ref_controls, nlp_states, warm_states, warm_controls, n_agency_steps = \
             self._get_reference_controls(
                 believed_config, frenet_state, other_agent_states,
                 road_left, road_right, true_obstacles, cfg_str)
@@ -1129,7 +1165,8 @@ class BeliefInference:
             road_left, road_right, true_obstacles,
             ref_controls=ref_controls,
             w_agency=self._w_agency,
-            agency_only=(self._intervention_type == 'agency_only'))
+            agency_only=(self._intervention_type == 'agency_only'),
+            n_agency_steps=n_agency_steps)
 
         logger.info("  INTERVENTION DEBUG: NLP success=%s", success)
 
@@ -1192,11 +1229,16 @@ class BeliefInference:
         """Generate reference controls using the configured scheme.
 
         Returns:
-            (ref_controls, ref_states, warm_states, warm_controls)
-            Any may be None if generation failed.
+            (ref_controls, ref_states, warm_states, warm_controls, n_agency_steps)
+            Any may be None if generation failed.  n_agency_steps=None means
+            apply the agency term over the full horizon.
         """
         if self._ref_controls == 'mcts-greedy':
             return self._ref_controls_mcts_greedy(
+                believed_config, frenet_state, other_agent_states,
+                road_left, road_right, true_obstacles, cfg_str)
+        elif self._ref_controls == 'mcts-qcbf':
+            return self._ref_controls_mcts_qcbf(
                 believed_config, frenet_state, other_agent_states,
                 road_left, road_right, true_obstacles, cfg_str)
         else:  # 'opt'
@@ -1217,7 +1259,7 @@ class BeliefInference:
             warm_controls = best.nlp_controls
             logger.info("  ref_controls(opt): using best MCTS trajectory "
                         "(cost=%.4f) as ref + warm-start", best.pos_cost)
-            return ref_controls, nlp_states, warm_states, warm_controls
+            return ref_controls, nlp_states, warm_states, warm_controls, None
 
         # Naive path: full MILP → NLP for believed trajectory
         visible_aids = {aid for aid, vis in believed_config.items() if vis}
@@ -1231,7 +1273,7 @@ class BeliefInference:
         if milp_states is None:
             logger.info("  ref_controls(opt): {%s} -- believed MILP failed, "
                         "falling back to pure tracking", cfg_str)
-            return None, None, None, None
+            return None, None, None, None, None
 
         warm_states, warm_controls = self._milp_to_nlp_warmstart(
             milp_states, frenet_state)
@@ -1245,7 +1287,7 @@ class BeliefInference:
             nlp_states = warm_states
             nlp_controls = warm_controls
 
-        return nlp_controls, nlp_states, None, None
+        return nlp_controls, nlp_states, None, None, None
 
     def _ref_controls_mcts_greedy(self, believed_config, frenet_state,
                                     other_agent_states, road_left, road_right,
@@ -1272,7 +1314,7 @@ class BeliefInference:
 
         if coarse_traj is None:
             logger.info("  ref_controls(mcts-greedy): no trajectory for θ=(%s)", cfg_str)
-            return None, None, None, None
+            return None, None, None, None, None
 
         coarse_states = coarse_traj.states
         coarse_controls = coarse_traj.controls
@@ -1280,25 +1322,23 @@ class BeliefInference:
         logger.info("  ref_controls(mcts-greedy): θ=(%s), coarse %d pts, reward=%.2f",
                      cfg_str, len(coarse_states), coarse_traj.mcts_reward)
 
-        # Spline coarse → fine resolution
-        from scipy.interpolate import CubicSpline
-
+        # Expand coarse controls to fine resolution by repeating each
+        # coarse control for `coarseness` fine steps.  Only the steps
+        # covered by actual MCTS tree controls are used for the agency
+        # term — no interpolation or padding beyond the trajectory.
         H = self._horizon
-        K = len(coarse_states) - 1
+        K = len(coarse_states) - 1  # number of coarse controls
+        coarseness = self._mcts_planner._coarseness
 
-        fine_ctrl_t = np.linspace(0.0, 1.0, H)
-        if K >= 2:
-            coarse_ctrl_t = np.linspace(0.0, 1.0, K)
-            cs_ctrl = CubicSpline(coarse_ctrl_t, coarse_controls, bc_type='clamped')
-            ref_controls = cs_ctrl(fine_ctrl_t)
-        elif K > 0:
-            coarse_ctrl_t = np.linspace(0.0, 1.0, K)
-            ref_controls = np.column_stack([
-                np.interp(fine_ctrl_t, coarse_ctrl_t, coarse_controls[:, col])
-                for col in range(coarse_controls.shape[1])
-            ])
-        else:
-            ref_controls = np.zeros((H, 2))
+        n_agency_steps = min(K * coarseness, H)
+        ref_controls = np.zeros((H, 2))
+        for i in range(K):
+            start = i * coarseness
+            end = min((i + 1) * coarseness, H)
+            ref_controls[start:end] = coarse_controls[i]
+
+        logger.info("  ref_controls(mcts-greedy): %d coarse → %d/%d fine agency steps",
+                     K, n_agency_steps, H)
 
         # Warm-start: constant-velocity straight line from current state
         s0, d0, phi0, v0 = frenet_state[:4]
@@ -1308,7 +1348,82 @@ class BeliefInference:
             warm_states[k] = [s0 + v0 * k * dt, d0, phi0, v0]
         warm_controls = np.zeros((H, 2))
 
-        return ref_controls, coarse_states, warm_states, warm_controls
+        return ref_controls, coarse_states, warm_states, warm_controls, n_agency_steps
+
+    def _ref_controls_mcts_qcbf(self, believed_config, frenet_state,
+                                  other_agent_states, road_left, road_right,
+                                  true_obstacles, cfg_str):
+        """Reference controls via safety-filtered MCTS tree traversal.
+
+        Follows the human's preferred action (under θ*) at each node
+        unless the relative regret under the true config θ_R exceeds
+        (1 − γ), in which case overrides with the best action under θ_R.
+        """
+        if (self._mcts_planner is None
+                or self._mcts_belief_state is None
+                or self._mcts_planner._last_root is None):
+            logger.info("  ref_controls(mcts-qcbf): no MCTS tree available")
+            return None, None, None, None, None
+
+        belief = self._mcts_belief_state
+        agent_ids = belief.agent_ids
+
+        # θ* = MAP belief (human's estimated perception)
+        theta_star = tuple(
+            1 if believed_config.get(aid, True) else 0
+            for aid in agent_ids
+        )
+
+        # θ_R = true config (all agents visible)
+        theta_R = tuple(1 for _ in agent_ids)
+
+        coarse_traj = self._mcts_planner.extract_safe_trajectory(
+            theta_star, theta_R, belief,
+            road_left, road_right, true_obstacles,
+            gamma=self._qcbf_gamma)
+
+        if coarse_traj is None:
+            logger.info("  ref_controls(mcts-qcbf): no trajectory for θ*=(%s)", cfg_str)
+            return None, None, None, None, None
+
+        coarse_states = coarse_traj.states
+        coarse_controls = coarse_traj.controls
+
+        # Count interventions in the tree portion
+        n_interv = 0
+        if coarse_traj.interventions:
+            n_interv = sum(coarse_traj.interventions)
+
+        logger.info("  ref_controls(mcts-qcbf): θ*=(%s), γ=%.2f, coarse %d pts, "
+                     "reward=%.2f, %d/%d steps overridden",
+                     cfg_str, self._qcbf_gamma, len(coarse_states),
+                     coarse_traj.mcts_reward, n_interv,
+                     len(coarse_traj.interventions or []))
+
+        # Expand coarse controls to fine resolution (same as mcts-greedy)
+        H = self._horizon
+        K = len(coarse_states) - 1
+        coarseness = self._mcts_planner._coarseness
+
+        n_agency_steps = min(K * coarseness, H)
+        ref_controls = np.zeros((H, 2))
+        for i in range(K):
+            start = i * coarseness
+            end = min((i + 1) * coarseness, H)
+            ref_controls[start:end] = coarse_controls[i]
+
+        logger.info("  ref_controls(mcts-qcbf): %d coarse → %d/%d fine agency steps",
+                     K, n_agency_steps, H)
+
+        # Warm-start: constant-velocity straight line from current state
+        s0, d0, phi0, v0 = frenet_state[:4]
+        dt = self._dt
+        warm_states = np.zeros((H + 1, 4))
+        for k in range(H + 1):
+            warm_states[k] = [s0 + v0 * k * dt, d0, phi0, v0]
+        warm_controls = np.zeros((H, 2))
+
+        return ref_controls, coarse_states, warm_states, warm_controls, n_agency_steps
 
     def _compute_mcts_intervention(self, believed_config, frenet_state,
                                      other_agent_states, relevant_aids,
@@ -1370,25 +1485,21 @@ class BeliefInference:
         logger.info("  MCTS intervention: θ=(%s), coarse %d pts, reward=%.2f",
                      cfg_str, len(coarse_states), coarse_traj.mcts_reward)
 
-        # Build agency reference by splining coarse → fine
-        from scipy.interpolate import CubicSpline
-
+        # Expand coarse controls to fine resolution by repeating each
+        # coarse control for `coarseness` fine steps.
         H = self._horizon
         K = len(coarse_states) - 1
+        coarseness = self._mcts_planner._coarseness
 
-        fine_ctrl_t = np.linspace(0.0, 1.0, H)
-        if K >= 2:
-            coarse_ctrl_t = np.linspace(0.0, 1.0, K)
-            cs_ctrl = CubicSpline(coarse_ctrl_t, coarse_controls, bc_type='clamped')
-            ref_controls = cs_ctrl(fine_ctrl_t)
-        elif K > 0:
-            coarse_ctrl_t = np.linspace(0.0, 1.0, K)
-            ref_controls = np.column_stack([
-                np.interp(fine_ctrl_t, coarse_ctrl_t, coarse_controls[:, col])
-                for col in range(coarse_controls.shape[1])
-            ])
-        else:
-            ref_controls = np.zeros((H, 2))
+        n_agency_steps = min(K * coarseness, H)
+        ref_controls = np.zeros((H, 2))
+        for i in range(K):
+            start = i * coarseness
+            end = min((i + 1) * coarseness, H)
+            ref_controls[start:end] = coarse_controls[i]
+
+        logger.info("  MCTS intervention: %d coarse → %d/%d fine agency steps",
+                     K, n_agency_steps, H)
 
         # Warm-start: constant-velocity straight line from current state
         s0, d0, phi0, v0 = frenet_state[:4]
@@ -1402,7 +1513,8 @@ class BeliefInference:
             frenet_state, warm_states, warm_controls,
             road_left, road_right, true_obstacles,
             ref_controls=ref_controls,
-            w_agency=self._w_agency)
+            w_agency=self._w_agency,
+            n_agency_steps=n_agency_steps)
 
         if not success:
             logger.info("  MCTS intervention: NLP failed, using warm-start")

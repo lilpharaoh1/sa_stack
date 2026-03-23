@@ -115,7 +115,8 @@ class SecondStagePlanner:
               analyse_duals: bool = False, step_label: int = 0,
               ref_controls: Optional[np.ndarray] = None,
               w_agency: float = 1.0,
-              agency_only: bool = False):
+              agency_only: bool = False,
+              n_agency_steps: Optional[int] = None):
         """Solve the NLP using CasADi + IPOPT.
 
         Bicycle model in Frenet frame:
@@ -144,6 +145,9 @@ class SecondStagePlanner:
                 agency term (deviation from *ref_controls*).  All tracking
                 and control regularisation terms are omitted.  Requires
                 *ref_controls* to be provided.
+            n_agency_steps: Number of steps to apply the agency term for.
+                If None, applies over the full horizon H.  Used to limit
+                agency to only the steps covered by actual MCTS controls.
 
         Returns:
             (nlp_states, nlp_controls, success, debug_info) --
@@ -195,7 +199,9 @@ class SecondStagePlanner:
 
             # Agency-preserving term: penalise deviation from believed controls
             if ref_controls is not None:
-                for k in range(H):
+                n_ag = n_agency_steps if n_agency_steps is not None else H
+                n_ag = min(n_ag, H)
+                for k in range(n_ag):
                     cost += w_agency * (U[0, k] - ref_controls[k, 0])**2
                     cost += w_agency * (U[1, k] - ref_controls[k, 1])**2
 

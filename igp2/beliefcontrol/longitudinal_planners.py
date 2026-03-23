@@ -312,7 +312,8 @@ class LongitudinalSecondStage:
               analyse_duals: bool = False, step_label: int = 0,
               ref_controls: Optional[np.ndarray] = None,
               w_agency: float = 1.0,
-              agency_only: bool = False):
+              agency_only: bool = False,
+              n_agency_steps: Optional[int] = None):
         """Solve the longitudinal NLP.
 
         Same signature and return format as
@@ -359,7 +360,9 @@ class LongitudinalSecondStage:
 
             # Agency-preserving term (acceleration only)
             if ref_controls is not None:
-                for k in range(H):
+                n_ag = n_agency_steps if n_agency_steps is not None else H
+                n_ag = min(n_ag, H)
+                for k in range(n_ag):
                     cost += w_agency * (U[0, k] - ref_controls[k, 0])**2
 
             opti.minimize(cost)
