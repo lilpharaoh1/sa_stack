@@ -40,7 +40,7 @@ class KeyboardAgent(Agent):
     MAX_ACCELERATION = 5.0  # m/s^2
     MAX_BRAKE = 8.0  # m/s^2 (braking deceleration)
     MAX_STEER = 0.7  # radians (about 40 degrees)
-    STEER_SPEED = 0.05  # How quickly steering responds
+    STEER_SPEED = 0.15  # How quickly steering responds (rad/frame)
 
     # Class-level flag to track if we initialized pygame
     _pygame_initialized = False

@@ -11,4 +11,5 @@ from .belief_agent import (
     BernoulliBeliefVariable, GaussianBeliefVariable,
     AgentBeliefState, BeliefState,
 )
+from .keyboard_belief_agent import KeyboardBeliefAgent
 

@@ -26,6 +26,7 @@ from igp2.beliefcontrol.plotting import (
     MCTSBeliefPlotter, MCTSTreePlotter,
     MCTSNodePlotter, MCTSInterventionPlotter,
     MCTSResamplePlotter,
+    BeliefEvolutionPlotter,
 )
 from igp2.beliefcontrol.planning_utils import (
     milp_to_nlp_warmstart as _milp_to_nlp_warmstart,
@@ -35,7 +36,7 @@ from igp2.beliefcontrol.planning_utils import (
 
 logger = logging.getLogger(__name__)
 
-INFERENCE_TYPES = ('none', 'naive', 'mcts_naive', 'mcts_resample')
+INFERENCE_TYPES = ('none', 'naive', 'mcts_naive', 'mcts_resample', 'mcts_kalman')
 
 
 @dataclass
@@ -84,7 +85,7 @@ class BeliefInference:
                  warmup_fraction: float = 0.2,
                  relevance_s_margin: float = 10.0,
                  relevance_d_threshold: float = 7.0,
-                 boltzmann_beta: float = 1.0,
+                 boltzmann_beta: float = 10.0,
                  vel_weight: float = 1.0,
                  hidden_threshold: float = 0.6,
                  intervention_type: str = 'none',
@@ -106,7 +107,8 @@ class BeliefInference:
                  mcts_resample_gamma: float = 5.0,
                  mcts_resample_eta: float = 0.7,
                  planning_mode: str = '2d',
-                 ref_controls: str = 'opt'):
+                 ref_controls: str = 'opt',
+                 human_type: str = 'static'):
         if relevance_method not in self.RELEVANCE_METHODS:
             raise ValueError(
                 f"Unknown relevance_method {relevance_method!r}. "
@@ -117,6 +119,11 @@ class BeliefInference:
                 f"Unknown inference_type {inference_type!r}. "
                 f"Choose from: {INFERENCE_TYPES}")
         self._inference_type = inference_type
+        if human_type not in ('static', 'kalman'):
+            raise ValueError(
+                f"Unknown human_type {human_type!r}. "
+                f"Choose from: ('static', 'kalman')")
+        self._human_type = human_type
         self._scenario_map = scenario_map
         self._warmup_fraction = warmup_fraction
         self._boltzmann_beta = boltzmann_beta
@@ -195,6 +202,12 @@ class BeliefInference:
         self._last_config_probs: List[float] = []     # P(b | τ_obs) per config
         self._last_energies: List[float] = []          # E(b) per config
 
+        # Ground-truth visibility from config {aid: True if visible}
+        self._gt_visibility: Dict[int, bool] = {}
+
+        # Human's own Kalman filter (predict-only, initialised from config)
+        self._human_kalman: Optional[object] = None
+
         # Debug plotters
         self._plotter: Optional[InferencePlotter] = None
         self._intervention_plotter: Optional[InterventionPlotter] = None
@@ -212,8 +225,8 @@ class BeliefInference:
 
         # MCTS planner (created when needed for inference or ref-controls)
         self._mcts_planner = None
-        _needs_mcts = (inference_type in ('mcts_naive', 'mcts_resample')
-                       or ref_controls == 'mcts-greedy')
+        _needs_mcts = (inference_type in ('mcts_naive', 'mcts_resample', 'mcts_kalman')
+                       or ref_controls in ('mcts-greedy', 'mcts-qcbf'))
         if _needs_mcts:
             from igp2.beliefcontrol.mcts_planner import MCTSPlanner
             resample_kwargs = {}
@@ -250,13 +263,16 @@ class BeliefInference:
         # Persistent MCTS belief state (across timesteps)
         self._mcts_belief_state = None  # created on first MCTS call
 
+        # Kalman awareness tracker (persistent across timesteps)
+        self._kalman_awareness = None  # created on first mcts_kalman call
+
         # MCTS debug plotters
         self._mcts_belief_plotter: Optional[MCTSBeliefPlotter] = None
         self._mcts_tree_plotter: Optional[MCTSTreePlotter] = None
         self._mcts_node_plotter: Optional[MCTSNodePlotter] = None
         self._mcts_intervention_plotter: Optional['MCTSInterventionPlotter'] = None
         self._mcts_resample_plotter: Optional[MCTSResamplePlotter] = None
-        if plot and inference_type in ('mcts_naive', 'mcts_resample') and self._frenet is not None:
+        if plot and inference_type in ('mcts_naive', 'mcts_resample', 'mcts_kalman') and self._frenet is not None:
             self._mcts_belief_plotter = MCTSBeliefPlotter(
                 hidden_threshold=self._hidden_threshold)
             mcts_horizon = self._mcts_planner._horizon  # coarse horizon
@@ -268,8 +284,15 @@ class BeliefInference:
             self._mcts_intervention_plotter = MCTSInterventionPlotter(
                 scenario_map, policy.reference_waypoints, self._frenet,
                 ego_length=self._ego_length, ego_width=self._ego_width)
-            self._mcts_resample_plotter = MCTSResamplePlotter(
-                self._frenet, mcts_horizon, self._dt)
+            if inference_type == 'mcts_resample':
+                self._mcts_resample_plotter = MCTSResamplePlotter(
+                    self._frenet, mcts_horizon, self._dt)
+
+        # Belief evolution plotter (all inference types)
+        self._belief_evolution_plotter: Optional[BeliefEvolutionPlotter] = None
+        if plot and inference_type != 'none':
+            self._belief_evolution_plotter = BeliefEvolutionPlotter(
+                awareness_threshold=0.5)
 
     def reset(self):
         """Clear history and results."""
@@ -278,12 +301,23 @@ class BeliefInference:
         self._last_marginals = {}
         self._last_config_probs = []
         self._last_energies = []
+        self._last_kalman_diagnostics = None
         self._last_intervention = None
         self._mcts_belief_state = None
+        self._kalman_awareness = None
+        self._human_kalman = None
         self._first_stage.reset()
         self._second_stage.reset()
         if self._mcts_belief_plotter is not None:
             self._mcts_belief_plotter.reset()
+
+    def set_ground_truth_visibility(self, gt: Dict[int, bool]):
+        """Store ground-truth visibility for Kalman initialisation.
+
+        Args:
+            gt: {agent_id: True if visible, False if hidden}.
+        """
+        self._gt_visibility = dict(gt)
 
     def step(self, frenet_state: np.ndarray,
              other_agent_states: Dict[int, AgentState],
@@ -328,13 +362,22 @@ class BeliefInference:
         if self._frenet is None:
             return
 
+        # Human Kalman predict — runs when human_type is 'kalman' (any
+        # inference type) or when inference_type is 'mcts_kalman' (for
+        # debug/plotting even with a static human).
+        if (self._human_type == 'kalman'
+                or self._inference_type == 'mcts_kalman'):
+            self._step_human_kalman(
+                frenet_state, other_agent_states,
+                ego_position=ego_position, step_count=step_count)
+
         if self._inference_type == 'none':
             return
 
         observed_sd = None
 
         # MCTS mode: run every timestep from current state, no history needed
-        if self._inference_type in ('mcts_naive', 'mcts_resample'):
+        if self._inference_type in ('mcts_naive', 'mcts_resample', 'mcts_kalman'):
             import time as _time
             _t_infer_start = _time.perf_counter()
 
@@ -344,13 +387,23 @@ class BeliefInference:
             logger.info("[Step %4d] MCTS relevance: corridor_aids=%s, active_agents=%s",
                         step_count, relevant_aids, active_agents)
 
-            results, marginals, t_elapsed = self._run_mcts_inference(
-                frenet_state, other_agent_states, observed_sd=None,
-                relevant_aids=relevant_aids,
-                step_count=step_count,
-                prev_action=prev_executed_action,
-                human_action=human_action,
-                true_obstacles=true_obstacles)
+            if self._inference_type == 'mcts_kalman':
+                results, marginals, t_elapsed = self._run_mcts_kalman_inference(
+                    frenet_state, other_agent_states,
+                    relevant_aids=relevant_aids,
+                    step_count=step_count,
+                    prev_action=prev_executed_action,
+                    human_action=human_action,
+                    true_obstacles=true_obstacles,
+                    ego_position=ego_position)
+            else:
+                results, marginals, t_elapsed = self._run_mcts_inference(
+                    frenet_state, other_agent_states, observed_sd=None,
+                    relevant_aids=relevant_aids,
+                    step_count=step_count,
+                    prev_action=prev_executed_action,
+                    human_action=human_action,
+                    true_obstacles=true_obstacles)
 
             self._last_marginals = marginals
 
@@ -484,6 +537,30 @@ class BeliefInference:
                 getattr(self, '_last_road_left', np.zeros(1)),
                 getattr(self, '_last_road_right', np.zeros(1)),
                 step_count)
+
+        if self._belief_evolution_plotter is not None and self._last_marginals:
+            kalman_phi = None
+            kalman_bounds = None
+            human_phi = None
+            if self._kalman_awareness is not None:
+                phi_arr = self._kalman_awareness.phi
+                kalman_phi = {
+                    aid: float(phi_arr[i])
+                    for i, aid in enumerate(self._kalman_awareness.agent_ids)
+                }
+                kalman_bounds = self._kalman_awareness.phi_bounds()
+            if self._human_kalman is not None:
+                h_phi_arr = self._human_kalman.phi
+                human_phi = {
+                    aid: float(h_phi_arr[i])
+                    for i, aid in enumerate(self._human_kalman.agent_ids)
+                }
+            kalman_diag = getattr(self, '_last_kalman_diagnostics', None)
+            self._belief_evolution_plotter.update(
+                self._last_marginals, step_count,
+                phi=kalman_phi, phi_bounds=kalman_bounds,
+                human_phi=human_phi,
+                kalman_diagnostics=kalman_diag)
 
         _t_plot = _time.perf_counter() - _t_plot_start
         _t_total = _time.perf_counter() - _t_infer_start
@@ -700,6 +777,375 @@ class BeliefInference:
                      _t_road, _t_obs, t_mcts)
 
         return results, marginals, t_elapsed
+
+    # ------------------------------------------------------------------
+    # Human Kalman filter (shared across all inference types)
+    # ------------------------------------------------------------------
+
+    def _step_human_kalman(self, current_frenet: np.ndarray,
+                           other_agent_states: Dict[int, AgentState],
+                           ego_position=None,
+                           step_count: int = 0):
+        """Create/update the human's predict-only Kalman awareness filter.
+
+        Called every step when ``human_type == 'kalman'``, regardless of
+        inference type.  Initialises from ground-truth visibility on first
+        call and runs predict each step using Frenet features.
+        """
+        from igp2.beliefcontrol.kalman_awareness import KalmanAwareness
+
+        # Determine dynamic agent ids from current observations
+        dynamic_aids = sorted(
+            aid for aid in other_agent_states if aid >= 0)
+
+        if not dynamic_aids:
+            return
+
+        # Create / recreate when agent set changes
+        if (self._human_kalman is None
+                or self._human_kalman.agent_ids != dynamic_aids):
+            self._human_kalman = KalmanAwareness(
+                dynamic_aids,
+                initial_visibility=self._gt_visibility or None)
+            logger.info("[Step %4d] Human Kalman initialised for aids=%s "
+                        "(from config: %s)",
+                        step_count, dynamic_aids, self._gt_visibility)
+
+        # Predict step (world-frame features)
+        # Ego world position + heading
+        if ego_position is not None:
+            ego_xy = np.array(ego_position[:2], dtype=float)
+        else:
+            w = self._frenet.frenet_to_world(
+                float(current_frenet[0]), float(current_frenet[1]),
+                heading=float(current_frenet[2]))
+            ego_xy = np.array([w['x'], w['y']], dtype=float)
+        w_head = self._frenet.frenet_to_world(
+            float(current_frenet[0]), float(current_frenet[1]),
+            heading=float(current_frenet[2]))
+        ego_heading = w_head['heading']
+
+        participant_xys = {}
+        for aid in dynamic_aids:
+            if aid in other_agent_states:
+                pos = other_agent_states[aid].position
+                participant_xys[aid] = np.array(pos[:2], dtype=float)
+
+        self._human_kalman.predict(ego_xy, ego_heading, participant_xys)
+
+    def _run_mcts_kalman_inference(self, current_frenet: np.ndarray,
+                                   other_agent_states: Dict[int, AgentState],
+                                   relevant_aids: List[int],
+                                   step_count: int,
+                                   prev_action=None,
+                                   human_action=None,
+                                   true_obstacles=None,
+                                   ego_position=None,
+                                   ) -> tuple:
+        """MCTS planning with Kalman-filtered awareness dynamics.
+
+        Like ``_run_mcts_inference`` but maintains a persistent
+        :class:`KalmanAwareness` state that:
+        - drives resampling during MCTS simulations (Frenet-frame features),
+        - is updated each step via Boltzmann log-likelihood observations
+          computed from root Q values and the observed human action,
+        - provides awareness marginals for the belief state.
+
+        Returns:
+            (results, marginals, elapsed_time)
+        """
+        from igp2.beliefcontrol.mcts_planner import BeliefState
+        from igp2.beliefcontrol.kalman_awareness import KalmanAwareness
+        import math
+
+        import time as _time
+        _t0 = _time.perf_counter()
+
+        # --- Road boundaries ---
+        s_values = np.array([
+            current_frenet[0] + current_frenet[3] * np.cos(current_frenet[2]) * k * self._dt
+            for k in range(self._horizon + 1)
+        ])
+        s_values = np.clip(s_values, 0.0, self._frenet.total_length)
+        road_left, road_right = self._sample_road_boundaries(s_values)
+        _t_road = _time.perf_counter() - _t0
+
+        # --- Obstacles ---
+        _t0 = _time.perf_counter()
+        if true_obstacles is not None:
+            obstacles = true_obstacles
+        else:
+            all_dynamic_aids = {aid for aid in other_agent_states if aid >= 0}
+            obstacles = self._predict_obstacles_cv(other_agent_states, all_dynamic_aids)
+        _t_obs = _time.perf_counter() - _t0
+
+        # --- Manage persistent Kalman awareness state ---
+        dynamic_aids = sorted({obs['agent_id'] for obs in obstacles
+                               if obs['agent_id'] >= 0})
+        if (self._kalman_awareness is None
+                or self._kalman_awareness.agent_ids != dynamic_aids):
+            self._kalman_awareness = KalmanAwareness(dynamic_aids)
+            logger.info("[Step %4d] Vehicle Kalman initialised for aids=%s "
+                        "(psi_0=0, phi_0=0.5)",
+                        step_count, dynamic_aids)
+
+        # --- Set belief state from Kalman ---
+        if (self._mcts_belief_state is None
+                or self._mcts_belief_state.agent_ids != dynamic_aids):
+            self._mcts_belief_state = BeliefState(dynamic_aids)
+
+        b_theta = self._kalman_awareness.compute_b_theta(
+            self._mcts_belief_state.configs)
+        self._mcts_belief_state._probs = b_theta
+
+        # --- Run MCTS with Kalman-driven resampling ---
+        # Pass human_action=None so search() skips its own Boltzmann update;
+        # the Kalman observation update below handles belief updates.
+        t_start = time.perf_counter()
+        trajectories, self._mcts_belief_state = self._mcts_planner.search(
+            current_frenet, road_left, road_right, obstacles,
+            prev_action=prev_action,
+            belief=self._mcts_belief_state,
+            human_action=None,
+            kalman=self._kalman_awareness)
+
+        self._last_road_left = road_left
+        self._last_road_right = road_right
+        t_mcts = time.perf_counter() - t_start
+
+        # --- Kalman predict step (world-frame features) ---
+        # Ego world position + heading
+        if ego_position is not None:
+            ego_xy = np.array(ego_position[:2], dtype=float)
+        else:
+            w = self._frenet.frenet_to_world(
+                float(current_frenet[0]), float(current_frenet[1]),
+                heading=float(current_frenet[2]))
+            ego_xy = np.array([w['x'], w['y']], dtype=float)
+        w_head = self._frenet.frenet_to_world(
+            float(current_frenet[0]), float(current_frenet[1]),
+            heading=float(current_frenet[2]))
+        ego_heading = w_head['heading']
+
+        participant_xys = {}
+        for aid in dynamic_aids:
+            if aid in other_agent_states:
+                pos = other_agent_states[aid].position
+                participant_xys[aid] = np.array(pos[:2], dtype=float)
+
+        # Vehicle's estimate — predict step
+        psi_before = self._kalman_awareness.psi_hat.copy()
+        self._kalman_awareness.predict(ego_xy, ego_heading, participant_xys)
+        psi_after_predict = self._kalman_awareness.psi_hat.copy()
+        # Human Kalman predict already ran in _step_human_kalman()
+        predict_ran = True
+
+        # --- Kalman observation update from human action ---
+        obs_update_ran = False
+        y_obs = None
+        root = self._mcts_planner._last_root
+        if human_action is not None and root is not None and root.Q:
+            u_h = self._mcts_planner._nearest_action(human_action)
+            beta = self._mcts_planner._beta
+
+            likelihoods = self._compute_boltzmann_likelihoods(
+                root, human_action, self._mcts_belief_state.configs)
+
+            # --- Boltzmann debug ---
+            logger.info("[Step %4d] Boltzmann: human_action=(%.3f, %.3f) "
+                        "nearest_grid=%.3f  beta=%.2f",
+                        step_count, human_action[0], human_action[1],
+                        u_h, beta)
+
+            configs = self._mcts_belief_state.configs
+            for cfg in configs:
+                q_vals = {}
+                for act, q_dict in root.Q.items():
+                    if cfg in q_dict:
+                        q_vals[act] = q_dict[cfg]
+                q_human = q_vals.get(u_h)
+                q_best_act = max(q_vals, key=q_vals.get) if q_vals else None
+                q_best_val = q_vals[q_best_act] if q_best_act is not None else None
+                lk = likelihoods.get(cfg, 0.0)
+                logger.info(
+                    "[Step %4d]   θ=%s  P(u_H|θ)=%.4f  "
+                    "Q(u_H)=%s  Q(best)=%s(a=%.3f)  "
+                    "|Q_vals|=%d",
+                    step_count, cfg, lk,
+                    f"{q_human:.3f}" if q_human is not None else "N/A",
+                    f"{q_best_val:.3f}" if q_best_val is not None else "N/A",
+                    q_best_act if q_best_act is not None else 0.0,
+                    len(q_vals))
+
+            # Log per-agent L_aware vs L_unaware
+            n_agents = self._kalman_awareness.n
+            agent_ids = self._kalman_awareness.agent_ids
+            for i in range(n_agents):
+                L_aware = sum(likelihoods.get(cfg, 0.0)
+                              for cfg in configs if cfg[i] == 1)
+                L_unaware = sum(likelihoods.get(cfg, 0.0)
+                                for cfg in configs if cfg[i] == 0)
+                logger.info(
+                    "[Step %4d]   Agent %d: L_aware=%.6f  L_unaware=%.6f  "
+                    "ratio=%.4f",
+                    step_count, agent_ids[i], L_aware, L_unaware,
+                    L_aware / max(L_unaware, 1e-10))
+
+            y_obs = self._kalman_awareness.compute_observation(
+                likelihoods, configs)
+            self._kalman_awareness.update(y_obs)
+            obs_update_ran = True
+
+        # --- Store Kalman diagnostics for plotting ---
+        # Predict contribution: psi_after_predict - psi_before = (A-1)*psi + b*f
+        # Update contribution:  psi_final - psi_after_predict = K*(y - psi_pred)
+        psi_after = self._kalman_awareness.psi_hat.copy()
+        self._last_kalman_diagnostics = {}
+        for i, aid in enumerate(self._kalman_awareness.agent_ids):
+            predict_contrib = float(psi_after_predict[i] - psi_before[i])
+            update_contrib = float(psi_after[i] - psi_after_predict[i])
+            self._last_kalman_diagnostics[aid] = {
+                'predict': predict_contrib,   # b*f (+ (A-1)*psi if A != 1)
+                'update': update_contrib,     # K*(y - psi_pred)
+                'delta_psi': float(psi_after[i] - psi_before[i]),
+            }
+
+        # --- Update belief state from Kalman ---
+        b_theta = self._kalman_awareness.compute_b_theta(
+            self._mcts_belief_state.configs)
+        self._mcts_belief_state._probs = b_theta
+
+        # --- Package results ---
+        results: List[InferenceResult] = []
+        for tbp in trajectories:
+            planned_sdvv = np.column_stack([
+                tbp.states[:, 0],
+                tbp.states[:, 1],
+                tbp.states[:, 3] * np.cos(tbp.states[:, 2]),
+                tbp.states[:, 3] * np.sin(tbp.states[:, 2]),
+            ])
+            results.append(InferenceResult(
+                config={aid: True for aid in relevant_aids},
+                pos_cost=-tbp.mcts_reward,
+                vel_cost=0.0,
+                planned_sd=planned_sdvv[:, :2],
+                planned_vel=planned_sdvv[:, 2:4],
+                milp_ok=True,
+                nlp_ok=False,
+                nlp_states=tbp.states,
+                nlp_controls=tbp.controls,
+            ))
+        results.sort(key=lambda r: r.pos_cost)
+        t_elapsed = time.perf_counter() - t_start
+
+        # Marginals from Kalman state (P(hidden) = 1 - phi)
+        marginals = self._kalman_awareness.marginals()
+        for aid in relevant_aids:
+            if aid not in marginals:
+                marginals[aid] = 0.5
+
+        # --- Debug logging ---
+        veh = self._kalman_awareness
+        hum = self._human_kalman
+        for i, aid in enumerate(veh.agent_ids):
+            import math as _math
+            v_std = _math.sqrt(max(veh.P_diag[i], 1e-12))
+            h_idx = hum.agent_ids.index(aid) if aid in hum.agent_ids else None
+            h_phi = float(hum.phi[h_idx]) if h_idx is not None else None
+            h_psi = float(hum.psi_hat[h_idx]) if h_idx is not None else None
+
+            parts = [
+                f"ψ={veh.psi_hat[i]:+.3f}",
+                f"φ={float(veh.phi[i]):.3f}",
+                f"P={veh.P_diag[i]:.4f}",
+                f"σ_ψ={v_std:.3f}",
+                f"f={veh.last_features[i]:.4f}" if predict_ran else "f=N/A",
+            ]
+            if obs_update_ran and y_obs is not None:
+                # Use stored pre-update P and K for accurate reporting
+                P_pre = getattr(veh, 'last_P_pre', None)
+                K_stored = getattr(veh, 'last_K', None)
+                gated = getattr(veh, 'last_gated', None)
+                if P_pre is not None and K_stored is not None:
+                    parts.append(f"y={y_obs[i]:+.3f}")
+                    parts.append(f"P_pre={P_pre[i]:.4f}")
+                    parts.append(f"K={K_stored[i]:.3f}")
+                    if gated is not None and gated[i]:
+                        parts.append("GATED")
+                else:
+                    parts.append(f"y={y_obs[i]:+.3f}")
+            else:
+                parts.append("y=N/A (no human_action)")
+            if h_phi is not None:
+                parts.append(f"human_ψ={h_psi:+.3f}")
+                parts.append(f"human_φ={h_phi:.3f}")
+            logger.info("[Step %4d] Kalman agent %d: %s",
+                        step_count, aid, "  ".join(parts))
+
+        logger.info("[Step %4d] MCTS-Kalman: %d trajs, %.3fs "
+                    "(road=%.3fs obs=%.3fs search=%.3fs) "
+                    "predict=%s obs_update=%s",
+                    step_count, len(results), t_elapsed,
+                    _t_road, _t_obs, t_mcts,
+                    predict_ran, obs_update_ran)
+
+        return results, marginals, t_elapsed
+
+    def _compute_boltzmann_likelihoods(self, root, human_action,
+                                        configs) -> Dict[tuple, float]:
+        """Compute P(u_H | θ) for each configuration from root Q values.
+
+        Uses the same Boltzmann model as ``MCTSPlanner._update_belief``:
+        P(u_H | θ) = exp(β * Q_θ(s₀, u_H)) / Σ_a exp(β * Q_θ(s₀, a))
+
+        Args:
+            root: Root MCTSNode with Q values.
+            human_action: Observed (acceleration, steer_angle) tuple.
+            configs: List of θ configurations.
+
+        Returns:
+            Dict mapping θ -> P(u_H | θ).
+        """
+        import math
+
+        u_h = self._mcts_planner._nearest_action(human_action)
+        beta = self._mcts_planner._beta
+
+        likelihoods = {}
+        for cfg in configs:
+            q_vals = {}
+            for act, q_dict in root.Q.items():
+                if cfg in q_dict:
+                    q_vals[act] = q_dict[cfg]
+
+            if not q_vals:
+                likelihoods[cfg] = 1.0 / len(self._mcts_planner._actions)
+                continue
+
+            q_human = q_vals.get(u_h, None)
+            if q_human is None:
+                q_human = min(q_vals.values()) - 1.0
+
+            # Normalise Q values by range for scale-invariant β
+            all_q = list(q_vals.values())
+            if u_h not in q_vals:
+                all_q.append(q_human)
+            max_q = max(all_q)
+            min_q = min(all_q)
+            q_range = max_q - min_q
+            if q_range < 1e-10:
+                likelihoods[cfg] = 1.0 / len(all_q)
+                continue
+
+            numerator = math.exp(beta * (q_human - max_q) / q_range)
+            denominator = sum(math.exp(beta * (q - max_q) / q_range)
+                              for q in q_vals.values())
+            if u_h not in q_vals:
+                denominator += numerator
+
+            likelihoods[cfg] = numerator / max(denominator, 1e-30)
+
+        return likelihoods
 
     def _find_relevant_agents(self, frenet_state: np.ndarray,
                               other_agent_states: Dict[int, AgentState],
@@ -954,11 +1400,28 @@ class BeliefInference:
             else 1e10
             for r in results
         ])
-        log_likelihoods = -beta * energies
-        log_likelihoods -= np.max(log_likelihoods)  # numerical stability
-        likelihoods = np.exp(log_likelihoods)
-        Z_L = np.sum(likelihoods)
-        likelihoods = likelihoods / Z_L if Z_L > 0 else np.zeros(len(results))
+
+        # Normalise energies by range for scale-invariant β
+        finite_mask = energies < 1e9
+        if finite_mask.sum() >= 2:
+            e_min = energies[finite_mask].min()
+            e_max = energies[finite_mask].max()
+            e_range = e_max - e_min
+            if e_range < 1e-10:
+                # All finite energies are equal — uniform over finite configs
+                likelihoods = np.where(finite_mask, 1.0, 0.0)
+                Z_L = likelihoods.sum()
+                likelihoods = likelihoods / Z_L if Z_L > 0 else np.ones(len(results)) / len(results)
+            else:
+                norm_energies = (energies - e_min) / e_range
+                log_likelihoods = -beta * norm_energies
+                log_likelihoods -= np.max(log_likelihoods)  # numerical stability
+                likelihoods = np.exp(log_likelihoods)
+                Z_L = np.sum(likelihoods)
+                likelihoods = likelihoods / Z_L if Z_L > 0 else np.zeros(len(results))
+        else:
+            # 0 or 1 finite energies — uniform
+            likelihoods = np.ones(len(results)) / len(results)
 
         # Prior: use previous step's posterior, or uniform if first step / reset
         n = len(results)

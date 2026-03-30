@@ -30,6 +30,7 @@ from typing import Optional, Dict, Tuple
 import dill
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 from matplotlib.patches import Polygon as MplPolygon
 
@@ -38,6 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import igp2 as ip
 from igp2.opendrive.plot_map import plot_map
 from igp2.core.util import calculate_multiple_bboxes
+from igp2.beliefcontrol.frenet import FrenetFrame
 from belief_utils import ExperimentResult, StepRecord
 
 # Colours
@@ -48,6 +50,54 @@ COLOUR_TRUE_NLP = (0.0, 0.7, 0.0)
 COLOUR_HUMAN_NLP = (0.9, 0.1, 0.1)
 COLOUR_TRUE_MILP = (0.0, 0.5, 0.0)
 COLOUR_HUMAN_MILP = (0.7, 0.0, 0.0)
+COLOUR_INTERVENTION = (0.0, 0.7, 0.0)
+
+
+
+def _draw_speed_path(ax, xy, speeds, base_colour, linewidth=2.5,
+                     zorder=5, label=None, marker_size=12):
+    """Draw a path with points coloured by speed (dark = slow, bright = fast).
+
+    Draws a thin connecting line plus scatter points shaded by speed.
+
+    Args:
+        ax: Matplotlib axes.
+        xy: (N, 2) world positions.
+        speeds: (N,) speed values.
+        base_colour: RGB tuple used as the bright end.
+        linewidth: Line width for the connecting line.
+        zorder: Z-order.
+        label: Legend label.
+        marker_size: Size of scatter points.
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+
+    # Debug: print speed range
+    print(f"  {label or 'path'}: speeds min={speeds.min():.2f} max={speeds.max():.2f} "
+          f"mean={speeds.mean():.2f} (N={len(speeds)})")
+
+    # Thin connecting line
+    ax.plot(xy[:, 0], xy[:, 1], color=base_colour, linewidth=0.8,
+            alpha=0.3, zorder=zorder)
+
+    # Build colourmap: dark (speed=0) → base_colour (speed=max)
+    dark = tuple(c * 0.15 for c in base_colour[:3])
+    cmap = LinearSegmentedColormap.from_list(
+        f'spd_{id(base_colour)}', [dark, base_colour[:3]], N=256)
+
+    vmin = max(speeds.min() - 0.5, 0.0)
+    vmax = speeds.max() + 0.5
+    if vmax - vmin < 0.1:
+        vmax = vmin + 1.0  # avoid zero range
+
+    ax.scatter(xy[:, 0], xy[:, 1], c=speeds, cmap=cmap,
+               vmin=vmin, vmax=vmax,
+               s=marker_size, zorder=zorder + 1,
+               edgecolors='none')
+
+    # Dummy for legend
+    if label is not None:
+        ax.plot([], [], color=base_colour, linewidth=linewidth, label=label)
 
 
 def render_scene_frame(step_record: StepRecord,
@@ -59,6 +109,8 @@ def render_scene_frame(step_record: StepRecord,
                        margin: float = 40.0,
                        show_milp: bool = True,
                        show_legend: bool = True,
+                       show_paths: bool = True,
+                       show_intervention: bool = True,
                        title: Optional[str] = None):
     """Render a single scene frame onto the given axes.
 
@@ -165,29 +217,49 @@ def render_scene_frame(step_record: StepRecord,
                     fontsize=7, fontweight='bold', ha='center',
                     color=COLOUR_EGO, zorder=8)
 
-    # --- Draw true NLP rollout ---
-    if sr.true_rollout is not None and len(sr.true_rollout) > 1:
-        ax.plot(sr.true_rollout[:, 0], sr.true_rollout[:, 1],
-                color=COLOUR_TRUE_NLP, linewidth=2.0, zorder=5,
-                label='True NLP')
+    if show_paths:
+        # --- Draw human rollout (below true) ---
+        if sr.human_rollout is not None and len(sr.human_rollout) > 1:
+            _draw_speed_path(ax, sr.human_rollout[:, :2],
+                             sr.human_rollout[:, 3],
+                             COLOUR_HUMAN_NLP, linewidth=2.5, zorder=5,
+                             label='Human')
 
-    # --- Draw human NLP rollout ---
-    if sr.human_rollout is not None and len(sr.human_rollout) > 1:
-        ax.plot(sr.human_rollout[:, 0], sr.human_rollout[:, 1],
-                color=COLOUR_HUMAN_NLP, linewidth=2.0, zorder=5,
-                label='Human NLP')
+        # --- Draw true NLP rollout (on top) ---
+        if sr.true_rollout is not None and len(sr.true_rollout) > 1:
+            _draw_speed_path(ax, sr.true_rollout[:, :2],
+                             sr.true_rollout[:, 3],
+                             COLOUR_TRUE_NLP, linewidth=2.0, zorder=6,
+                             label='True NLP')
 
-    # --- Draw MILP rollouts ---
-    if show_milp:
-        if sr.true_milp_rollout is not None and len(sr.true_milp_rollout) > 1:
-            ax.plot(sr.true_milp_rollout[:, 0], sr.true_milp_rollout[:, 1],
-                    color=COLOUR_TRUE_MILP, linewidth=1.5, linestyle='--',
-                    zorder=4, label='True MILP')
+        # --- Draw intervention path (Frenet → world) ---
+        if show_intervention:
+            ref_wp = getattr(sr, 'reference_waypoints', None)
+            interv_states = sr.intervention_opt_states
+            if interv_states is not None and ref_wp is not None and len(ref_wp) >= 2:
+                frenet = FrenetFrame(ref_wp)
+                K = len(interv_states)
+                world = np.empty((K, 2))
+                for i in range(K):
+                    s_i, d_i = interv_states[i, 0], interv_states[i, 1]
+                    w = frenet.frenet_to_world(s_i, d_i)
+                    world[i] = [w['x'], w['y']]
+                interv_speeds = interv_states[:, 3]
+                _draw_speed_path(ax, world, interv_speeds,
+                                 COLOUR_INTERVENTION, linewidth=2.0, zorder=6,
+                                 label='Intervention')
 
-        if sr.human_milp_rollout is not None and len(sr.human_milp_rollout) > 1:
-            ax.plot(sr.human_milp_rollout[:, 0], sr.human_milp_rollout[:, 1],
-                    color=COLOUR_HUMAN_MILP, linewidth=1.5, linestyle='--',
-                    zorder=4, label='Human MILP')
+        # # --- Draw MILP rollouts ---
+        # if show_milp:
+        #     if sr.true_milp_rollout is not None and len(sr.true_milp_rollout) > 1:
+        #         ax.plot(sr.true_milp_rollout[:, 0], sr.true_milp_rollout[:, 1],
+        #                 color=COLOUR_TRUE_MILP, linewidth=1.5, linestyle='--',
+        #                 zorder=4, label='True MILP')
+        #
+        #     if sr.human_milp_rollout is not None and len(sr.human_milp_rollout) > 1:
+        #         ax.plot(sr.human_milp_rollout[:, 0], sr.human_milp_rollout[:, 1],
+        #                 color=COLOUR_HUMAN_MILP, linewidth=1.5, linestyle='--',
+        #                 zorder=4, label='Human MILP')
 
     # --- Legend ---
     if show_legend:
@@ -204,18 +276,18 @@ def render_scene_frame(step_record: StepRecord,
                        facecolor=(*COLOUR_STATIC, 0.5),
                        edgecolor=(*COLOUR_STATIC, 0.9),
                        linewidth=1, label='Static obstacle'),
-            Line2D([0], [0], color=COLOUR_TRUE_NLP, linewidth=2,
-                   label='True NLP'),
-            Line2D([0], [0], color=COLOUR_HUMAN_NLP, linewidth=2,
-                   label='Human NLP'),
         ]
-        if show_milp:
+        if show_paths:
             legend_handles.extend([
-                Line2D([0], [0], color=COLOUR_TRUE_MILP, linewidth=1.5,
-                       linestyle='--', label='True MILP'),
-                Line2D([0], [0], color=COLOUR_HUMAN_MILP, linewidth=1.5,
-                       linestyle='--', label='Human MILP'),
+                Line2D([0], [0], color=COLOUR_TRUE_NLP, linewidth=2,
+                       label='True NLP'),
+                Line2D([0], [0], color=COLOUR_HUMAN_NLP, linewidth=2,
+                       label='Human'),
             ])
+            if show_intervention:
+                legend_handles.append(
+                    Line2D([0], [0], color=COLOUR_INTERVENTION, linewidth=2,
+                           label='Intervention'))
         ax.legend(handles=legend_handles, loc='upper right', fontsize=7,
                   framealpha=0.9)
 
@@ -379,6 +451,10 @@ def parse_args():
                         help="Keep individual PNG frames after creating video")
     parser.add_argument("--no-milp", action="store_true",
                         help="Hide MILP rollout paths")
+    parser.add_argument("--no-paths", action="store_true",
+                        help="Hide all planned paths (show positions only)")
+    parser.add_argument("--no-intervention", action="store_true",
+                        help="Hide the intervention path")
     parser.add_argument("--dpi", type=int, default=150,
                         help="DPI for saved images (default: 150)")
     parser.add_argument("--figsize", type=float, nargs=2, default=[14, 8],
@@ -436,6 +512,8 @@ def main():
         fps=result.fps,
         ego_goal=ego_goal,
         show_milp=not args.no_milp,
+        show_paths=not args.no_paths,
+        show_intervention=not args.no_intervention,
     )
 
     figsize = tuple(args.figsize)

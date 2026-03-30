@@ -48,6 +48,7 @@ INFERENCE_LABELS = {
     'naive': 'Naive',
     'mcts_naive': 'MCTS',
     'mcts_resample': 'MCTS-R',
+    'mcts_kalman': 'MCTS-K',
 }
 INTERVENTION_LABELS = {
     'none': 'None',
@@ -61,6 +62,10 @@ REF_CONTROLS_LABELS = {
     'mcts-greedy': 'Greedy',
     'mcts-qcbf': 'QCBF',
 }
+HUMAN_TYPE_LABELS = {
+    'static': 'Static',
+    'kalman': 'Kalman',
+}
 
 # Colour palette — assigned dynamically to composite keys as they appear
 _COLOUR_PALETTE = [
@@ -70,7 +75,7 @@ _COLOUR_PALETTE = [
 
 
 def _parse_composite_key(key: str):
-    """Parse composite key into (inference, intervention, ref_controls|None)."""
+    """Parse composite key into (inference, intervention, ref_controls|None, human_type|None)."""
     # Try matching known inference prefixes (longest first)
     inf = None
     remainder = key
@@ -84,6 +89,17 @@ def _parse_composite_key(key: str):
         inf = parts[0]
         remainder = parts[1] if len(parts) > 1 else ''
 
+    # Check if remainder ends with a known human_type suffix
+    ht = None
+    for ht_key in sorted(HUMAN_TYPE_LABELS.keys(), key=len, reverse=True):
+        if ht_key == 'static':
+            continue  # static is default, not appended
+        suffix = '_' + ht_key
+        if remainder.endswith(suffix):
+            ht = ht_key
+            remainder = remainder[:-len(suffix)]
+            break
+
     # Check if remainder ends with a known ref_controls suffix
     ref = None
     interv = remainder
@@ -94,18 +110,20 @@ def _parse_composite_key(key: str):
             interv = remainder[:-len(suffix)]
             break
 
-    return inf, interv, ref
+    return inf, interv, ref, ht
 
 
 def _group_label(key: str) -> str:
     """Convert a composite key to a readable label."""
-    inf, interv, ref = _parse_composite_key(key)
+    inf, interv, ref, ht = _parse_composite_key(key)
     inf_label = INFERENCE_LABELS.get(inf, inf)
     interv_label = INTERVENTION_LABELS.get(interv, interv)
+    parts = [inf_label, interv_label]
     if ref is not None:
-        ref_label = REF_CONTROLS_LABELS.get(ref, ref)
-        return f"{inf_label} / {interv_label} / {ref_label}"
-    return f"{inf_label} / {interv_label}"
+        parts.append(REF_CONTROLS_LABELS.get(ref, ref))
+    if ht is not None:
+        parts.append(HUMAN_TYPE_LABELS.get(ht, ht))
+    return " / ".join(parts)
 
 
 def _group_colour(key: str, all_keys: list) -> str:
@@ -116,17 +134,19 @@ def _group_colour(key: str, all_keys: list) -> str:
 
 def _sort_keys(keys) -> list:
     """Sort composite group keys in a sensible order."""
-    inference_order = ['naive', 'mcts_naive', 'mcts_resample']
+    inference_order = ['naive', 'mcts_naive', 'mcts_resample', 'mcts_kalman']
     intervention_order = ['none', 'agency_only', 'combined', 'policy_only', 'mcts']
     ref_order = [None, 'opt', 'mcts-greedy', 'mcts-qcbf']
+    ht_order = [None, 'kalman']
 
     def _sort_key(k):
-        inf, interv, ref = _parse_composite_key(k)
+        inf, interv, ref, ht = _parse_composite_key(k)
         inf_idx = inference_order.index(inf) if inf in inference_order else 99
         interv_idx = (intervention_order.index(interv)
                       if interv in intervention_order else 99)
         ref_idx = ref_order.index(ref) if ref in ref_order else 99
-        return (inf_idx, interv_idx, ref_idx)
+        ht_idx = ht_order.index(ht) if ht in ht_order else 99
+        return (inf_idx, interv_idx, ref_idx, ht_idx)
 
     return sorted(keys, key=_sort_key)
 
@@ -169,13 +189,17 @@ def discover_runs(scenario_name: str) -> list:
 
 
 def _composite_key(meta: dict) -> str:
-    """Build composite grouping key: inference_intervention[_refcontrols]."""
+    """Build composite grouping key: inference_intervention[_refcontrols][_humantype]."""
     inf = meta.get("inference_type", "naive")
     interv = meta.get("intervention_type", "none")
     ref = meta.get("ref_controls", "opt")
+    ht = meta.get("human_type", "static")
+    key = f"{inf}_{interv}"
     if interv != "none" and ref != "opt":
-        return f"{inf}_{interv}_{ref}"
-    return f"{inf}_{interv}"
+        key = f"{inf}_{interv}_{ref}"
+    if ht != "static":
+        key += f"_{ht}"
+    return key
 
 
 def keep_latest(runs: list) -> list:
@@ -227,9 +251,42 @@ def extract_metrics(episodes: list) -> dict:
     n_jerk_v = sum(1 for s in all_steps if s.ego_jerk_violated)
     n_srate_v = sum(1 for s in all_steps if s.ego_steer_rate_violated)
 
-    # Per-step cost
+    # Per-step cost (total and components)
     cost_vals = [s.ego_step_cost for s in all_steps
                  if s.ego_step_cost is not None]
+
+    # Cost component breakdown — use stored fields if available, otherwise
+    # recompute from raw state (works for older pickle files too).
+    # Default NLP weights from SecondStagePlanner.DEFAULTS
+    _W = {'w_d': 10.0, 'w_v': 0.01, 'w_a': 1.0, 'w_delta': 2.0,
+           'w_phi': 2.0, 'v_target': 10.0}
+
+    cost_lateral = []
+    cost_speed = []
+    cost_accel = []
+    cost_steering = []
+    cost_heading = []
+    for s in all_steps:
+        # Try stored fields first
+        cl = getattr(s, 'ego_cost_lateral', None)
+        if cl is not None:
+            cost_lateral.append(cl)
+            cost_speed.append(getattr(s, 'ego_cost_speed', 0.0))
+            cost_accel.append(getattr(s, 'ego_cost_accel', 0.0))
+            cost_steering.append(getattr(s, 'ego_cost_steering', 0.0))
+            cost_heading.append(getattr(s, 'ego_cost_heading', 0.0))
+        elif (s.ego_step_cost is not None
+              and s.ego_frenet_state is not None
+              and s.ego_acceleration is not None):
+            # Recompute from raw state
+            _s, d, phi, v = s.ego_frenet_state[:4]
+            a = s.ego_acceleration
+            delta = s.ego_steer_angle if s.ego_steer_angle is not None else 0.0
+            cost_lateral.append(_W['w_d'] * d ** 2)
+            cost_speed.append(_W['w_v'] * (v - _W['v_target']) ** 2)
+            cost_accel.append(_W['w_a'] * a ** 2)
+            cost_steering.append(_W['w_delta'] * delta ** 2)
+            cost_heading.append(_W['w_phi'] * phi ** 2)
 
     # Action deviation (all steps, not just intervention)
     dev_a = [s.action_deviation_accel for s in all_steps
@@ -325,6 +382,11 @@ def extract_metrics(episodes: list) -> dict:
         "n_srate_violated": n_srate_v,
         # Stats
         "cost": _stats(cost_vals),
+        "cost_lateral": _stats(cost_lateral),
+        "cost_speed": _stats(cost_speed),
+        "cost_accel": _stats(cost_accel),
+        "cost_steering": _stats(cost_steering),
+        "cost_heading": _stats(cost_heading),
         "dev_accel": _stats(dev_a),
         "dev_steer": _stats(dev_d),
         "dev_l2": _stats(dev_l2),
@@ -388,6 +450,22 @@ def print_text_summary(metrics_by_type: dict):
             c = m["cost"]
             print(f"    Ego step cost: mean={c['mean']:.4f}  "
                   f"std={c['std']:.4f}  median={c['median']:.4f}")
+            # Cost breakdown by component
+            cost_parts = [
+                ("lateral  (w_d·d²)",      m.get("cost_lateral")),
+                ("speed    (w_v·Δv²)",     m.get("cost_speed")),
+                ("accel    (w_a·a²)",       m.get("cost_accel")),
+                ("steering (w_δ·δ²)",      m.get("cost_steering")),
+                ("heading  (w_φ·φ²)",      m.get("cost_heading")),
+            ]
+            has_breakdown = any(cp is not None for _, cp in cost_parts)
+            if has_breakdown:
+                print(f"      Component breakdown (mean / % of total):")
+                total_mean = c['mean'] if c['mean'] > 0 else 1e-12
+                for label, cp in cost_parts:
+                    if cp is not None:
+                        frac = 100.0 * cp['mean'] / total_mean
+                        print(f"        {label}  {cp['mean']:.4f}  ({frac:5.1f}%)")
 
         # Action deviation
         if m["dev_l2"]:
@@ -494,6 +572,20 @@ def print_latex_table(metrics_by_type: dict):
     vals = [val_or_dash(metrics_by_type[t]["cost"], "mean")
             for t in types]
     print(r"Ego cost (mean) & " + " & ".join(vals) + r" \\")
+
+    # Cost breakdown
+    for latex_label, key in [
+        (r"$\quad w_d \cdot d^2$ (lateral)", "cost_lateral"),
+        (r"$\quad w_v \cdot \Delta v^2$ (speed)", "cost_speed"),
+        (r"$\quad w_a \cdot a^2$ (accel)", "cost_accel"),
+        (r"$\quad w_\delta \cdot \delta^2$ (steering)", "cost_steering"),
+        (r"$\quad w_\phi \cdot \phi^2$ (heading)", "cost_heading"),
+    ]:
+        vals = [val_or_dash(metrics_by_type[t].get(key), "mean")
+                for t in types]
+        print(f"{latex_label} & " + " & ".join(vals) + r" \\")
+
+    print(r"\midrule")
 
     # Action deviation
     vals = [val_or_dash(metrics_by_type[t]["dev_l2"], "mean")

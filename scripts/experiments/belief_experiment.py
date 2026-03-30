@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
                         choices=["opt", "mcts-greedy", "mcts-qcbf"],
                         help="Source of reference controls for intervention (default: opt)")
     parser.add_argument("--inference-type", type=str, default="naive",
-                        choices=["none", "naive", "mcts_naive", "mcts_resample"],
+                        choices=["none", "naive", "mcts_naive", "mcts_resample", "mcts_kalman"],
                         help="Belief inference strategy (default: naive)")
     parser.add_argument("--relevance-method", type=str, default="naive",
                         choices=["corridor", "dual", "naive"],
@@ -84,11 +84,17 @@ def parse_args() -> argparse.Namespace:
                         choices=["2d", "longitudinal"],
                         help="Planning mode: 2d (full lateral+longitudinal) "
                              "or longitudinal (d=0, accel only) (default: 2d)")
+    parser.add_argument("--human-type", type=str, default="static",
+                        choices=["static", "kalman"],
+                        help="Human belief dynamics: static (from config) "
+                             "or kalman (evolving awareness) (default: static)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from an existing run directory. "
                              "Loads previous results and continues with -n "
                              "additional samples. Other flags (--map, --seed, "
                              "etc.) are inherited from the original run.")
+    parser.add_argument("--live-awareness", action="store_true",
+                        help="Show live awareness kernel plot during episodes")
     return parser.parse_args()
 
 
@@ -428,6 +434,8 @@ def main():
             relevance_method=args.relevance_method,
             planning_mode=args.planning_mode,
             ref_controls=args.ref_controls,
+            human_type=args.human_type,
+            live_awareness=args.live_awareness,
         )
         results.append(result)
 

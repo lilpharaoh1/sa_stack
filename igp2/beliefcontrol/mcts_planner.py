@@ -259,10 +259,11 @@ class MCTSPlanner:
                  gamma: float = 0.99,
                  collision_penalty: float = 100.0,
                  clearance_threshold: float = 4.0,
-                 beta: float = 1.0,
+                 beta: float = 10.0,
                  rollout_policy: str = 'heuristic',
                  resample_gamma: Optional[float] = None,
-                 resample_eta: Optional[float] = None):
+                 resample_eta: Optional[float] = None,
+                 kalman_eta: float = 0.15):
 
         self._coarseness = self.COARSENESS_FACTOR
         self._dt_fine = dt
@@ -311,6 +312,9 @@ class MCTSPlanner:
         self._resample_eta = resample_eta
         self._resample_enabled = (resample_gamma is not None
                                   and resample_eta is not None)
+
+        # Kalman-based resampling threshold
+        self._kalman_eta = kalman_eta
 
         logger.info("MCTSPlanner (1-D): coarseness=%d, dt=%.3f/%.3f, "
                      "horizon=%d/%d, actions=%d, beta=%.2f, resample=%s",
@@ -375,12 +379,18 @@ class MCTSPlanner:
         n_actions = len(actions)
         n_configs = len(all_configs)
 
-        # Step 1: Boltzmann policy per configuration
+        # Step 1: Boltzmann policy per configuration (normalised Q values)
         policies = {}
         for cfg in all_configs:
-            logits = [self._beta * node.Q[a].get(cfg, 0.0) for a in actions]
-            max_logit = max(logits)
-            exps = [math.exp(l - max_logit) for l in logits]
+            raw_q = [node.Q[a].get(cfg, 0.0) for a in actions]
+            max_q = max(raw_q)
+            min_q = min(raw_q)
+            q_range = max_q - min_q
+            if q_range < 1e-10:
+                policies[cfg] = [1.0 / n_actions] * n_actions
+                continue
+            logits = [self._beta * (q - max_q) / q_range for q in raw_q]
+            exps = [math.exp(l) for l in logits]
             total = sum(exps)
             if total < 1e-30:
                 policies[cfg] = [1.0 / n_actions] * n_actions
@@ -532,6 +542,7 @@ class MCTSPlanner:
                prev_action=None,
                belief: Optional[BeliefState] = None,
                human_action=None,
+               kalman=None,
                ) -> Tuple[List[MCTSTrajectory], Optional[BeliefState]]:
         """Run per-belief MCTS search (1-D longitudinal).
 
@@ -543,6 +554,11 @@ class MCTSPlanner:
                 element used).  For rate-limit continuity.
             belief: Current belief state (created if None).
             human_action: Observed human action for belief update.
+                When ``kalman`` is provided, pass None here — the
+                outer loop handles the Kalman observation update.
+            kalman: Optional KalmanAwareness instance for Kalman-driven
+                resampling during simulation.  Each simulation copies
+                this state and propagates it forward.
 
         Returns:
             (trajectories, updated_belief)
@@ -602,10 +618,14 @@ class MCTSPlanner:
         _t_backup = 0.0
 
         n_resamples = 0  # debug counter
+        n_kalman_resamples = 0  # Kalman resampling counter
 
         for _ in range(self._n_simulations):
             # 1. Sample θ from belief for this simulation
             theta_sampled = belief.sample()
+
+            # Copy Kalman state for this simulation (if provided)
+            kalman_sim = kalman.copy() if kalman is not None else None
 
             # 2. Selection: traverse using Q_θ for UCB
             _t0 = _time.perf_counter()
@@ -616,8 +636,8 @@ class MCTSPlanner:
                 if not node.is_fully_expanded(self._actions, self):
                     break
 
-                # Information-guided resampling
-                if self._resample_enabled:
+                # Information-guided resampling (JSD-based, when no Kalman)
+                if kalman_sim is None and self._resample_enabled:
                     jsd = self._compute_policy_divergence(node, all_configs)
                     if self._should_resample(jsd):
                         theta_sampled = random.choice(all_configs)
@@ -629,6 +649,27 @@ class MCTSPlanner:
                     break
                 path.append((node, action))
                 node = node.children[action]
+
+                # Kalman-based resampling (after moving to child)
+                if kalman_sim is not None:
+                    fine_k = node.depth * self._coarseness
+                    # Convert node Frenet state (s, v) to world position + heading
+                    _w = self._frenet.frenet_to_world(
+                        float(node.state[0]), 0.0,
+                        heading=0.0)
+                    _ego_xy = np.array([_w['x'], _w['y']], dtype=float)
+                    _ego_heading = _w['heading']
+                    kalman_sim.predict_from_obstacles(
+                        _ego_xy, _ego_heading,
+                        obstacles, fine_k)
+                    b_local = kalman_sim.compute_b_theta(all_configs)
+                    if b_local.get(theta_sampled, 0.0) < self._kalman_eta:
+                        probs = [b_local.get(cfg, 1e-10) for cfg in all_configs]
+                        total = sum(probs)
+                        probs = [p / total for p in probs]
+                        idx = np.random.choice(len(all_configs), p=probs)
+                        theta_sampled = all_configs[idx]
+                        n_kalman_resamples += 1
             _t_select += _time.perf_counter() - _t0
 
             # 3. Expansion
@@ -719,8 +760,11 @@ class MCTSPlanner:
         reject_str = ", ".join(
             f"{r}={c}" for r, c in sorted(self._reject_counts.items()))
         n_nodes, depth_counts, visit_buckets = self._tree_stats(root)
-        resample_str = (f" | resamples: {n_resamples}"
-                        if self._resample_enabled else "")
+        resample_str = ""
+        if self._resample_enabled:
+            resample_str = f" | resamples: {n_resamples}"
+        if kalman is not None:
+            resample_str += f" | kalman_resamples: {n_kalman_resamples}"
         logger.info(
             "MCTS debug: %d expanded, %d terminal, %d fully-expanded, "
             "%d all-infeasible | %d tree nodes | rejects: {%s}%s | "
@@ -884,10 +928,20 @@ class MCTSPlanner:
                 # Human action wasn't explored — use minimum Q as fallback
                 q_human = min(q_vals.values()) - 1.0
 
-            # Numerically stable softmax
-            max_q = max(max(q_vals.values()), q_human)
-            numerator = math.exp(self._beta * (q_human - max_q))
-            denominator = sum(math.exp(self._beta * (q - max_q))
+            # Normalise Q values by range for scale-invariant β
+            all_q = list(q_vals.values())
+            if u_h not in q_vals:
+                all_q.append(q_human)
+            max_q = max(all_q)
+            min_q = min(all_q)
+            q_range = max_q - min_q
+            if q_range < 1e-10:
+                likelihood[cfg] = 1.0 / len(all_q)
+                continue
+
+            # Numerically stable softmax on normalised Q values
+            numerator = math.exp(self._beta * (q_human - max_q) / q_range)
+            denominator = sum(math.exp(self._beta * (q - max_q) / q_range)
                               for q in q_vals.values())
             if u_h not in q_vals:
                 denominator += numerator

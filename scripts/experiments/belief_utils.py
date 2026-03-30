@@ -76,6 +76,11 @@ class StepRecord:
     #   - steer_rate_violated: steering rate exceeds delta_rate_max
     #   - road_boundary_violations: number of corner-timestep road violations
     #   - collision_violations: number of corner-timestep collision violations
+    # Human (belief) policy constraint diagnostics
+    human_diag_milp_ok: Optional[bool] = None
+    human_diag_nlp_ok: Optional[bool] = None
+
+    # True policy constraint diagnostics
     true_diag_milp_ok: Optional[bool] = None
     true_diag_nlp_ok: Optional[bool] = None
     true_diag_velocity_violated: Optional[bool] = None
@@ -113,6 +118,17 @@ class StepRecord:
     # Ground-truth visibility per agent from the ego's configured beliefs
     # (True = visible, False = hidden).
     belief_ground_truth: Optional[Dict[int, bool]] = None
+
+    # Human's Kalman awareness per agent: {aid: phi} where phi in [0,1].
+    # phi > phi_th means the human sees the agent.  None when Kalman is
+    # not running.
+    human_awareness: Optional[Dict[int, float]] = None
+
+    # Vehicle's Kalman estimate of human awareness: {aid: phi}.
+    vehicle_awareness: Optional[Dict[int, float]] = None
+
+    # Vehicle's Kalman uncertainty bounds: {aid: (phi_lo, phi_hi)}.
+    vehicle_awareness_bounds: Optional[Dict[int, tuple]] = None
 
     # Per-configuration inference detail.  Each entry is a dict with:
     #   'config': {aid: visible_bool}
@@ -163,6 +179,10 @@ class StepRecord:
     # Whether the intervention NLP converged.
     intervention_success: Optional[bool] = None
 
+    # Reference waypoints (N, 2) from the human policy's FrenetFrame.
+    # Used to convert Frenet intervention states to world for rendering.
+    reference_waypoints: Optional[np.ndarray] = None
+
     # Actual ego collision: True if the ego's bounding box overlaps any
     # other agent or static obstacle at this timestep.
     ego_collision: bool = False
@@ -195,6 +215,11 @@ class StepRecord:
     # Cost = w_s*(s-s_ref)^2 + w_d*d^2 + w_v*(v-v_tgt)^2
     #      + w_a*a^2 + w_delta*delta^2 + w_phi*phi^2
     ego_step_cost: Optional[float] = None
+    ego_cost_lateral: Optional[float] = None      # w_d * d^2
+    ego_cost_speed: Optional[float] = None        # w_v * (v - v_tgt)^2
+    ego_cost_accel: Optional[float] = None        # w_a * a^2
+    ego_cost_steering: Optional[float] = None     # w_delta * delta^2
+    ego_cost_heading: Optional[float] = None      # w_phi * phi^2
 
 
 @dataclass
@@ -286,6 +311,7 @@ def create_agent(agent_config, frame, fps, scenario_map, plot_interval=True):
         relevance_method = agent_config.get("relevance_method", "dual")
         planning_mode = agent_config.get("planning_mode", "2d")
         ref_controls = agent_config.get("ref_controls", "opt")
+        human_type = agent_config.get("human_type", "static")
         return ip.BeliefAgent(**base, scenario_map=scenario_map,
                               plot_interval=plot_interval,
                               agent_beliefs=agent_beliefs,
@@ -294,7 +320,8 @@ def create_agent(agent_config, frame, fps, scenario_map, plot_interval=True):
                               inference_type=inference_type,
                               relevance_method=relevance_method,
                               planning_mode=planning_mode,
-                              ref_controls=ref_controls)
+                              ref_controls=ref_controls,
+                              human_type=human_type)
     elif agent_type == "TrafficAgent":
         open_loop = agent_config.get("open_loop", False)
         return ip.TrafficAgent(**base, open_loop=open_loop)
@@ -375,6 +402,12 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
     human_other_agents = getattr(human_policy, 'last_other_agents', None) if human_policy else None
     human_trajectories = dict(ego_agent._human_agent_trajectories)
 
+    # Reference waypoints from human policy's FrenetFrame
+    ref_waypoints = None
+    human_frenet = getattr(human_policy, 'frenet_frame', None) if human_policy else None
+    if human_frenet is not None:
+        ref_waypoints = getattr(human_frenet, '_waypoints', None)
+
     # True (ground-truth) policy
     true_rollout = getattr(true_policy, 'last_rollout', None) if true_policy else None
     true_milp = getattr(true_policy, 'last_milp_rollout', None) if true_policy else None
@@ -412,6 +445,9 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
     # Actual collision check (OBB overlap)
     ego_collision, ego_collision_id = _check_ego_collision(
         ego_state, frame, ego_id)
+
+    # Human policy constraint diagnostics
+    human_diag = getattr(human_policy, 'last_diagnostics', None) if human_policy else None
 
     # True policy constraint diagnostics
     true_diag = getattr(true_policy, 'last_diagnostics', None) if true_policy else None
@@ -459,6 +495,27 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         belief_ground_truth = {
             aid: belief.visible for aid, belief in agent_beliefs.items()
         }
+
+    # Kalman awareness traces (human + vehicle)
+    human_awareness = None
+    vehicle_awareness = None
+    vehicle_awareness_bounds = None
+    if belief_inference is not None:
+        hk = getattr(belief_inference, '_human_kalman', None)
+        vk = getattr(belief_inference, '_kalman_awareness', None)
+        if hk is not None:
+            h_phi = hk.phi
+            human_awareness = {
+                aid: float(h_phi[i])
+                for i, aid in enumerate(hk.agent_ids)
+            }
+        if vk is not None:
+            v_phi = vk.phi
+            vehicle_awareness = {
+                aid: float(v_phi[i])
+                for i, aid in enumerate(vk.agent_ids)
+            }
+            vehicle_awareness_bounds = vk.phi_bounds()
 
     # Marginals, per-config costs, and accuracy from belief inference
     if belief_inference is not None:
@@ -534,6 +591,11 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
     ego_jerk_violated = False
     ego_steer_rate_violated = False
     ego_step_cost = None
+    ego_cost_lateral = None
+    ego_cost_speed = None
+    ego_cost_accel = None
+    ego_cost_steering = None
+    ego_cost_heading = None
 
     # Get NLP parameters from whichever policy is available
     _policy = human_policy or true_policy
@@ -569,13 +631,14 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
             target_speed = getattr(_policy, 'target_speed', params['v_max'])
             # Reference s: how far the ego should have travelled at target speed
             s_ref = s  # self-referencing (no absolute reference available per step)
-            ego_step_cost = float(
-                params['w_d'] * d ** 2
-                + params['w_v'] * (v - target_speed) ** 2
-                + params['w_a'] * a_exec ** 2
-                + params['w_delta'] * delta_exec ** 2
-                + params['w_phi'] * phi ** 2
-            )
+            ego_cost_lateral = float(params['w_d'] * d ** 2)
+            ego_cost_speed = float(params['w_v'] * (v - target_speed) ** 2)
+            ego_cost_accel = float(params['w_a'] * a_exec ** 2)
+            ego_cost_steering = float(params['w_delta'] * delta_exec ** 2)
+            ego_cost_heading = float(params['w_phi'] * phi ** 2)
+            ego_step_cost = (ego_cost_lateral + ego_cost_speed
+                             + ego_cost_accel + ego_cost_steering
+                             + ego_cost_heading)
 
     return StepRecord(
         step=step,
@@ -599,6 +662,9 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         dynamic_agents=dynamic_agents,
         static_obstacles=static_obstacles,
         goal_reached=goal_reached,
+        # Constraint diagnostics from human policy
+        human_diag_milp_ok=human_diag.get('milp_ok') if human_diag else None,
+        human_diag_nlp_ok=human_diag.get('nlp_ok') if human_diag else None,
         # Constraint diagnostics from true policy
         true_diag_milp_ok=true_diag.get('milp_ok') if true_diag else None,
         true_diag_nlp_ok=true_diag.get('nlp_ok') if true_diag else None,
@@ -616,6 +682,9 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         belief_accuracy=belief_accuracy,
         belief_marginals=belief_marginals,
         belief_ground_truth=belief_ground_truth,
+        human_awareness=human_awareness,
+        vehicle_awareness=vehicle_awareness,
+        vehicle_awareness_bounds=vehicle_awareness_bounds,
         belief_config_results=belief_config_results,
         believed_config=believed_config,
         action_deviation=action_deviation,
@@ -626,6 +695,7 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         intervention_ref_states=intervention_ref_states,
         intervention_ref_controls=intervention_ref_controls,
         intervention_success=intervention_success,
+        reference_waypoints=ref_waypoints,
         ego_collision=ego_collision,
         ego_collision_id=ego_collision_id,
         # Actual ego violations
@@ -640,6 +710,11 @@ def collect_step(step: int, t0: float, ego_agent, ego_goal, frame,
         action_deviation_steer=action_deviation_steer,
         # Per-step ego cost
         ego_step_cost=ego_step_cost,
+        ego_cost_lateral=ego_cost_lateral,
+        ego_cost_speed=ego_cost_speed,
+        ego_cost_accel=ego_cost_accel,
+        ego_cost_steering=ego_cost_steering,
+        ego_cost_heading=ego_cost_heading,
     )
 
 
@@ -698,6 +773,7 @@ def build_run_metadata(args, config: dict) -> dict:
         "inference_type": getattr(args, 'inference_type', 'naive'),
         "planning_mode": getattr(args, 'planning_mode', '2d'),
         "ref_controls": getattr(args, 'ref_controls', 'opt'),
+        "human_type": getattr(args, 'human_type', 'static'),
         "n_samples": n_samples,
         "timestamp": datetime.now().isoformat(),
         "config": config,

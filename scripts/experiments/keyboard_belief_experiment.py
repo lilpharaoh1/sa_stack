@@ -1,13 +1,16 @@
 """
-BeliefAgent experiment runner.
+Interactive keyboard-controlled BeliefAgent experiment runner.
 
-Loads a scenario config, runs the BeliefAgent in CARLA, collects per-step
-diagnostics, and saves the results to a pickle file.
+Like ind_belief_experiment.py but replaces the simulated human driver
+(NLP-based TwoStagePolicy) with keyboard control (WASD/arrows via pygame).
+The full inference + intervention pipeline stays intact.
 
 Usage:
-    python scripts/experiments/ind_belief_experiment.py -m belief_agent_demo_parkedcars_dynamic
-    python scripts/experiments/ind_belief_experiment.py -m belief_agent_demo_parkedcars_dynamic -o my_run --seed 42
-    python scripts/experiments/ind_belief_experiment.py -m belief_agent_demo_parkedcars_dynamic --steps 300 --no-plot
+    python scripts/experiments/keyboard_belief_experiment.py \
+        -m belief_agent_demo_mcts \
+        --no-plot --live-speed \
+        --intervention-type agency_only \
+        --inference-type mcts_kalman
 """
 
 import sys
@@ -24,13 +27,13 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import igp2 as ip
+from igp2.agents.keyboard_belief_agent import KeyboardBeliefAgent
 
 from belief_utils import (
     ExperimentResult,
     StepRecord,
     RESULTS_DIR,
     generate_random_frame,
-    create_agent,
     collect_step,
     dump_results,
     plot_spawn_preview,
@@ -55,7 +58,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="BeliefAgent experiment runner")
+    parser = argparse.ArgumentParser(
+        description="Interactive keyboard-controlled BeliefAgent experiment")
     parser.add_argument("--map", "-m", type=str, required=True,
                         help="Scenario config name under scenarios/configs/")
     parser.add_argument("--output", "-o", type=str, default=None,
@@ -74,29 +78,54 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview", action="store_true",
                         help="Show spawn preview plot before running")
     parser.add_argument("--intervention-type", type=str, default="none",
-                        choices=["none", "agency_only", "combined", "policy_only", "mcts", "always_policy"],
+                        choices=["none", "agency_only", "combined",
+                                 "policy_only", "mcts", "always_policy"],
                         help="Intervention scheme for the ego agent (default: none)")
     parser.add_argument("--ref-controls", type=str, default="opt",
                         choices=["opt", "mcts-greedy", "mcts-qcbf"],
                         help="Source of reference controls for intervention (default: opt)")
     parser.add_argument("--inference-type", type=str, default="naive",
-                        choices=["none", "naive", "mcts_naive", "mcts_resample", "mcts_kalman"],
+                        choices=["none", "naive", "mcts_naive",
+                                 "mcts_resample", "mcts_kalman"],
                         help="Belief inference strategy (default: naive)")
     parser.add_argument("--relevance-method", type=str, default="naive",
                         choices=["corridor", "dual", "naive"],
-                        help="Relevance detection method for belief inference "
-                             "(default: naive)")
+                        help="Relevance detection method (default: naive)")
     parser.add_argument("--planning-mode", type=str, default="2d",
                         choices=["2d", "longitudinal"],
-                        help="Planning mode: 2d (full lateral+longitudinal) "
-                             "or longitudinal (d=0, accel only) (default: 2d)")
+                        help="Planning mode (default: 2d)")
     parser.add_argument("--human-type", type=str, default="static",
                         choices=["static", "kalman"],
-                        help="Human belief dynamics: static (from config) "
-                             "or kalman (evolving awareness) (default: static)")
+                        help="Human belief dynamics (default: static)")
     parser.add_argument("--live-awareness", action="store_true",
                         help="Show live awareness kernel plot during episode")
+    parser.add_argument("--live-speed", action="store_true",
+                        help="Show live reference vs. intervention speed plot")
     return parser.parse_args()
+
+
+def create_keyboard_agent(agent_config, frame, fps, scenario_map,
+                          plot_interval=True):
+    """Create a KeyboardBeliefAgent from the ego agent config."""
+    base = {
+        "agent_id": agent_config["id"],
+        "initial_state": frame[agent_config["id"]],
+        "goal": ip.BoxGoal(ip.Box(**agent_config["goal"]["box"])),
+        "fps": fps,
+    }
+    return KeyboardBeliefAgent(
+        **base,
+        scenario_map=scenario_map,
+        plot_interval=plot_interval,
+        agent_beliefs=agent_config.get("beliefs", None),
+        human=agent_config.get("human", True),
+        intervention_type=agent_config.get("intervention_type", "none"),
+        inference_type=agent_config.get("inference_type", "naive"),
+        relevance_method=agent_config.get("relevance_method", "dual"),
+        planning_mode=agent_config.get("planning_mode", "2d"),
+        ref_controls=agent_config.get("ref_controls", "opt"),
+        human_type=agent_config.get("human_type", "static"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,17 +148,12 @@ def run_single_experiment(config: dict,
                           ref_controls: str = "opt",
                           human_type: str = "static",
                           live_awareness: bool = False,
+                          live_speed: bool = False,
                           ) -> ExperimentResult:
-    """Run a single experiment episode.
-
-    Creates agents, steps the simulation, collects diagnostics, and returns
-    an :class:`ExperimentResult`.  Does **not** clean up CARLA -- the caller
-    is responsible for removing agents and static objects afterwards.
-    """
+    """Run a single keyboard-controlled experiment episode."""
     ego_id = config["agents"][0]["id"]
 
-    # Inject intervention_type, inference_type, and relevance_method into
-    # the ego agent config so create_agent picks them up
+    # Inject settings into the ego agent config
     config["agents"][0]["intervention_type"] = intervention_type
     config["agents"][0]["inference_type"] = inference_type
     config["agents"][0]["relevance_method"] = relevance_method
@@ -140,8 +164,16 @@ def run_single_experiment(config: dict,
     agents = {}
     for agent_config in config["agents"]:
         aid = agent_config["id"]
-        agents[aid] = create_agent(agent_config, frame, fps, scenario_map,
-                                   plot_interval=plot_interval)
+        if aid == ego_id:
+            # Ego: use KeyboardBeliefAgent
+            agents[aid] = create_keyboard_agent(
+                agent_config, frame, fps, scenario_map,
+                plot_interval=plot_interval)
+        else:
+            # Other agents: TrafficAgent
+            from belief_utils import create_agent
+            agents[aid] = create_agent(agent_config, frame, fps, scenario_map,
+                                       plot_interval=plot_interval)
         carla_sim.add_agent(agents[aid], "ego" if aid == ego_id else None)
 
     # Add static objects from config
@@ -171,6 +203,12 @@ def run_single_experiment(config: dict,
         from live_awareness_plotter import LiveAwarenessPlotter
         awareness_plotter = LiveAwarenessPlotter(scenario_map, ego_agent)
 
+    # Live speed plotter
+    speed_plotter = None
+    if live_speed:
+        from live_speed_plotter import LiveSpeedPlotter
+        speed_plotter = LiveSpeedPlotter()
+
     # Prepare result object
     result = ExperimentResult(
         scenario_name=scenario_name,
@@ -185,11 +223,9 @@ def run_single_experiment(config: dict,
 
     t0 = time.time()
     prev_true_trajectories = None
-    prev_action = None  # (acceleration, steer_angle) from previous step
+    prev_action = None
 
     for t in range(max_steps):
-        # if t > 12:
-        #     time.sleep(12)
         t_step_start = time.perf_counter()
         obs, acts = carla_sim.step()
         carla_step_total = time.perf_counter() - t_step_start
@@ -213,7 +249,6 @@ def run_single_experiment(config: dict,
                                   prev_true_trajectories=prev_true_trajectories,
                                   prev_action=prev_action)
             prev_true_trajectories = dict(ego_agent._true_agent_trajectories)
-            # Track previous action for jerk/steer-rate computation
             if record.ego_acceleration is not None:
                 prev_action = (record.ego_acceleration, record.ego_steer_angle)
             result.steps.append(record)
@@ -221,6 +256,9 @@ def run_single_experiment(config: dict,
 
             if awareness_plotter is not None:
                 awareness_plotter.update(record)
+
+            if speed_plotter is not None:
+                speed_plotter.update(record)
 
             if record.goal_reached:
                 result.solved = True
@@ -235,7 +273,7 @@ def run_single_experiment(config: dict,
                 print(f"{'='*60}\n")
                 break
 
-            # Stop if ego collided with another agent/obstacle
+            # Stop if ego collided
             if record.ego_collision:
                 result.failed = True
                 result.failure_step = t
@@ -250,93 +288,40 @@ def run_single_experiment(config: dict,
                 print(f"{'='*60}\n")
                 break
 
-            # Stop if human policy NLP/MILP failed
+            # NOTE: Human/true policy NLP/MILP failures are NOT fatal here
+            # because the keyboard provides the actual control — the NLP
+            # only runs for infrastructure (FrenetFrame, diagnostics).
+            # Log warnings but keep going.
             if record.human_diag_milp_ok is not None and not record.human_diag_milp_ok:
-                result.failed = True
-                result.failure_step = t
-                result.wall_time_seconds = time.time() - t0
-                result.failure_reason = "human policy MILP infeasible"
-
-                print(f"\n{'='*60}")
-                print(f"  HUMAN POLICY MILP FAILED at step {t}")
-                print(f"  Ego position: {record.ego_position}")
-                print(f"  Wall time: {result.wall_time_seconds:.1f}s")
-                print(f"{'='*60}\n")
-                break
+                logger.warning("Step %d: human policy MILP infeasible (non-fatal, keyboard driving)", t)
 
             if record.human_diag_nlp_ok is not None and not record.human_diag_nlp_ok:
-                result.failed = True
-                result.failure_step = t
-                result.wall_time_seconds = time.time() - t0
-                result.failure_reason = "human policy NLP infeasible"
+                logger.warning("Step %d: human policy NLP infeasible (non-fatal, keyboard driving)", t)
 
-                print(f"\n{'='*60}")
-                print(f"  HUMAN POLICY NLP FAILED at step {t}")
-                print(f"  Ego position: {record.ego_position}")
-                print(f"  Wall time: {result.wall_time_seconds:.1f}s")
-                print(f"{'='*60}\n")
-                break
-
-            # Stop if true policy MILP failed
             if record.true_diag_milp_ok is not None and not record.true_diag_milp_ok:
-                result.failed = True
-                result.failure_step = t
-                result.wall_time_seconds = time.time() - t0
-                result.failure_reason = "MILP infeasible"
+                logger.warning("Step %d: true policy MILP infeasible (non-fatal)", t)
 
-                print(f"\n{'='*60}")
-                print(f"  TRUE POLICY MILP FAILED at step {t}")
-                print(f"  Ego position: {record.ego_position}")
-                print(f"  Wall time: {result.wall_time_seconds:.1f}s")
-                print(f"{'='*60}\n")
-                break
-
-            # Stop if true policy NLP failed
             if record.true_diag_nlp_ok is not None and not record.true_diag_nlp_ok:
-                result.failed = True
-                result.failure_step = t
-                result.wall_time_seconds = time.time() - t0
+                logger.warning("Step %d: true policy NLP infeasible (non-fatal)", t)
 
-                # Build failure reason -- one entry per violated constraint type
-                reasons = []
-                if record.true_diag_collision_violations > 0:
-                    reasons.append("collision avoidance infeasible")
-                if record.true_diag_road_violations > 0:
-                    reasons.append("road boundary infeasible")
-                if record.true_diag_velocity_violated:
-                    reasons.append("velocity bounds infeasible")
-                if record.true_diag_acceleration_violated:
-                    reasons.append("acceleration bounds infeasible")
-                if record.true_diag_steering_violated:
-                    reasons.append("steering bounds infeasible")
-                if record.true_diag_jerk_violated:
-                    reasons.append("jerk limits infeasible")
-                if record.true_diag_steer_rate_violated:
-                    reasons.append("steering rate infeasible")
-                result.failure_reason = "; ".join(reasons) if reasons else "NLP infeasible (unknown cause)"
-
-                print(f"\n{'='*60}")
-                print(f"  TRUE POLICY NLP FAILED at step {t}")
-                print(f"  Reason: {result.failure_reason}")
-                print(f"  Ego position: {record.ego_position}")
-                print(f"  Wall time: {result.wall_time_seconds:.1f}s")
-                print(f"{'='*60}\n")
-                break
     else:
         result.wall_time_seconds = time.time() - t0
         print(f"\nScenario NOT solved within {max_steps} steps "
               f"({result.wall_time_seconds:.1f}s).")
 
-    # Close any matplotlib figures opened by agent plotters
+    # Close matplotlib figures (except live plotters)
     import matplotlib.pyplot as plt
+    keep_labels = {'live_awareness', 'live_speed'}
     for fig_num in list(plt.get_fignums()):
         fig = plt.figure(fig_num)
-        if fig.get_label() == 'live_awareness':
-            continue  # keep the live awareness plotter open
+        if fig.get_label() in keep_labels:
+            continue
         plt.close(fig)
 
     if awareness_plotter is not None:
         awareness_plotter.close()
+    if speed_plotter is not None:
+        speed_plotter.close()
 
     return result
 
@@ -367,11 +352,9 @@ def main():
     rng = np.random.RandomState(args.seed)
 
     if is_new_format(config):
-        # New format: expand dynamic groups and sample viable positions
         expanded, frame = sample_viable_config(
             config, scenario_map, seed=args.seed)
     else:
-        # Old format: build spawn info and random initial frame
         expanded = config
         ego_id = config["agents"][0]["id"]
         agent_spawns = []
@@ -388,7 +371,6 @@ def main():
 
     plot_interval = False if args.no_plot else config["scenario"].get("plot_interval", True)
 
-    # Show spawn preview before connecting to CARLA
     if args.preview:
         plot_spawn_preview(scenario_map, expanded, frame,
                            title=f"Spawn Preview: {args.map}",
@@ -421,6 +403,7 @@ def main():
         ref_controls=args.ref_controls,
         human_type=args.human_type,
         live_awareness=args.live_awareness,
+        live_speed=args.live_speed,
     )
 
     run_dir = make_run_dir(

@@ -333,6 +333,7 @@ class BeliefAgent(Agent):
                  relevance_method: str = 'naive',
                  planning_mode: str = '2d',
                  ref_controls: str = 'opt',
+                 human_type: str = 'static',
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
@@ -345,6 +346,7 @@ class BeliefAgent(Agent):
         self._intervention_type = intervention_type
         self._ref_controls = ref_controls
         self._planning_mode = planning_mode
+        self._human_type = human_type
         self._other_agents: Dict[int, Any] = {}  # References to other agents in the scene
 
         # Trajectory predictions (belief-filtered and ground-truth)
@@ -420,6 +422,7 @@ class BeliefAgent(Agent):
                 relevance_method=relevance_method,
                 planning_mode=planning_mode,
                 ref_controls=ref_controls,
+                human_type=human_type,
                 plot=plot_interval)
 
     def _build_policy(self, policy_type, fps, scenario_map,
@@ -579,6 +582,16 @@ class BeliefAgent(Agent):
                 velocity_error=GaussianBeliefVariable(mean=vel_err, std=0.5),
             )
 
+        # Pass ground-truth visibility to inference and evolution plotter
+        if self._belief_inference is not None:
+            gt = {aid: not self._belief.agents[aid].hidden.mode
+                  for aid in self._belief.agents}
+            self._belief_inference.set_ground_truth_visibility(gt)
+            evol_plotter = getattr(self._belief_inference,
+                                   '_belief_evolution_plotter', None)
+            if evol_plotter is not None:
+                evol_plotter.set_ground_truth(gt)
+
     def _predict_agent_trajectories(self, frame: Dict[int, AgentState],
                                      use_beliefs: bool = True) -> Dict[int, np.ndarray]:
         """Forward-simulate other agents to predict their trajectories.
@@ -658,6 +671,7 @@ class BeliefAgent(Agent):
         # True: all other agents (no belief filtering)
         true_other_agents = {aid: s for aid, s in observation.frame.items()
                              if aid != self.agent_id}
+        self._last_all_other_agents = true_other_agents
 
         # --- Run human (belief) policy (if enabled) ---
         human_action, human_candidates, human_best = None, None, None
@@ -714,9 +728,10 @@ class BeliefAgent(Agent):
             # True policy data (may be None if true policy was skipped)
             true_rollout = getattr(self._true_policy, 'last_rollout', None)
             true_milp = getattr(self._true_policy, 'last_milp_rollout', None)
-            true_other_agents = getattr(self._true_policy, 'last_other_agents', None)
             true_obstacles = getattr(self._true_policy, 'last_obstacles', None)
             true_frenet = getattr(self._true_policy, 'frenet_frame', None)
+            # All other agents from the observation frame (always available)
+            all_other_agents = getattr(self, '_last_all_other_agents', None)
 
             if self._human_enabled:
                 # Human (belief) policy data
@@ -753,7 +768,7 @@ class BeliefAgent(Agent):
                 collision_margin=collision_margin,
                 true_rollout=true_rollout,
                 true_milp_trajectory=true_milp,
-                all_other_agents=true_other_agents,
+                all_other_agents=all_other_agents,
                 agent_beliefs=self.agent_beliefs,
                 true_obstacles=true_obstacles,
                 true_frenet=true_frenet,
@@ -797,6 +812,9 @@ class BeliefAgent(Agent):
         # non-dual relevance methods don't need the true NLP duals.
         skip_true = not self._need_true_policy
 
+        # Update human beliefs from the human's Kalman filter (if running)
+        self._update_human_beliefs_from_kalman()
+
         if self._other_agents:
             if self._human_enabled:
                 t0 = _time.perf_counter()
@@ -836,6 +854,29 @@ class BeliefAgent(Agent):
         self.last_step_timing = timing
         self._last_executed_action = action
         return action
+
+    def _update_human_beliefs_from_kalman(self):
+        """Sync human beliefs with the human's Kalman awareness filter.
+
+        Updates ``self._belief.agents[aid].hidden.p`` from the human's
+        Kalman awareness so that the human policy correctly includes or
+        excludes vehicles from collision avoidance.
+
+        P(hidden) = 1 - phi, where phi is the human's awareness
+        probability.  When phi > phi_th the agent is considered SEEN
+        and the human avoids it.
+        """
+        if self._belief_inference is None:
+            return
+        human_kalman = getattr(self._belief_inference, '_human_kalman', None)
+        if human_kalman is None:
+            return
+
+        phi_arr = human_kalman.phi
+        for i, aid in enumerate(human_kalman.agent_ids):
+            agent_belief = self._belief.get(aid)
+            if agent_belief is not None:
+                agent_belief.hidden.p = 1.0 - float(phi_arr[i])
 
     def _run_inference(self, observation: Observation, action: Action,
                        timing: Dict[str, float]) -> Action:

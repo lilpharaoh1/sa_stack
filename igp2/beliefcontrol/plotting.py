@@ -2811,3 +2811,308 @@ class MCTSInterventionPlotter:
         self._fig.tight_layout()
         self._fig.canvas.draw()
         self._fig.canvas.flush_events()
+
+
+class BeliefEvolutionPlotter:
+    """Live plot of human beliefs vs the vehicle's estimate.
+
+    Two kinds of traces per agent:
+
+    - **Human belief** (ground truth from config): constant line at
+      phi=1 (visible/seen) or phi=0 (hidden).
+    - **Vehicle estimate**: Kalman awareness phi, starting at 0.5
+      (neutral).  A shaded band shows the +-1 sigma uncertainty from
+      the Kalman covariance mapped through the sigmoid.
+
+    The awareness threshold phi_th is drawn so you can see when the
+    vehicle's estimate crosses the seen/hidden boundary.
+
+    Args:
+        awareness_threshold: phi_th — above = seen, below = hidden.
+        max_history: Maximum number of past steps to keep.
+    """
+
+    _AGENT_COLOURS = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+        '#9467bd', '#8c564b', '#e377c2', '#7f7f7f',
+    ]
+
+    def __init__(self,
+                 awareness_threshold: float = 0.5,
+                 max_history: int = 300):
+        self._awareness_threshold = awareness_threshold
+        self._max_history = max_history
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax: Optional[plt.Axes] = None
+        self._diag_axes: Dict[int, plt.Axes] = {}  # aid -> diagnostics axes
+
+        # History
+        self._steps: List[int] = []
+        self._phi: Dict[int, List[float]] = {}              # aid -> vehicle estimate (Kalman phi)
+        self._phi_lo: Dict[int, List[float]] = {}            # aid -> lower bound
+        self._phi_hi: Dict[int, List[float]] = {}            # aid -> upper bound
+        self._human_phi: Dict[int, List[float]] = {}         # aid -> human's actual awareness
+        self._colour_map: Dict[int, str] = {}
+        self._ground_truth: Dict[int, bool] = {}             # aid -> visible (static)
+
+        # Kalman diagnostics per agent
+        self._predict_contrib: Dict[int, List[float]] = {}   # aid -> predict contribution (b*f)
+        self._update_contrib: Dict[int, List[float]] = {}    # aid -> update contribution (K*(y-psi))
+        self._delta_psi: Dict[int, List[float]] = {}         # aid -> total psi change
+        self._n_diag_agents: int = 0                          # tracks layout
+
+    def _get_colour(self, aid: int) -> str:
+        if aid not in self._colour_map:
+            idx = len(self._colour_map)
+            self._colour_map[aid] = self._AGENT_COLOURS[idx % len(self._AGENT_COLOURS)]
+        return self._colour_map[aid]
+
+    def _init(self, n_diag_agents: int = 0):
+        plt.ion()
+        n_rows = 1 + n_diag_agents
+        height = 4 + 2.5 * n_diag_agents
+        ratios = [4] + [2.5] * n_diag_agents
+        self._fig, axes = plt.subplots(
+            n_rows, 1, figsize=(10, height),
+            gridspec_kw={'height_ratios': ratios},
+            squeeze=False)
+        self._ax = axes[0, 0]
+        self._diag_axes = {}
+        self._n_diag_agents = n_diag_agents
+
+    def reset(self):
+        """Clear history."""
+        self._steps = []
+        self._phi = {}
+        self._phi_lo = {}
+        self._phi_hi = {}
+        self._human_phi = {}
+        self._ground_truth = {}
+        self._predict_contrib = {}
+        self._update_contrib = {}
+        self._delta_psi = {}
+        self._n_diag_agents = 0
+
+    def set_ground_truth(self, ground_truth: Dict[int, bool]):
+        """Set static ground-truth visibility for reference lines.
+
+        Args:
+            ground_truth: {agent_id: True if visible, False if hidden}.
+        """
+        self._ground_truth = dict(ground_truth)
+
+    def update(self, marginals: Dict[int, float], step: int,
+               phi: Optional[Dict[int, float]] = None,
+               phi_bounds: Optional[Dict[int, tuple]] = None,
+               human_phi: Optional[Dict[int, float]] = None,
+               kalman_diagnostics: Optional[Dict[int, dict]] = None):
+        """Append data and redraw.
+
+        Args:
+            marginals: {agent_id: P(hidden)} from inference (used as
+                fallback vehicle estimate when Kalman is not available).
+            step: Simulation step number.
+            phi: {agent_id: awareness_probability} — vehicle's Kalman
+                estimate of human awareness.
+            phi_bounds: {agent_id: (phi_lower, phi_upper)} — +-1 sigma
+                confidence bounds from the Kalman covariance.
+            human_phi: {agent_id: awareness_probability} — human's own
+                Kalman awareness (ground truth dynamics).
+            kalman_diagnostics: {agent_id: {'f': float, 'y': float,
+                'delta_psi': float}} — per-agent Kalman filter diagnostics.
+        """
+        if not marginals and not phi:
+            return
+
+        # Determine how many diagnostic agents we have
+        diag_aids = sorted(kalman_diagnostics.keys()) if kalman_diagnostics else []
+        n_diag = len(diag_aids)
+
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init(n_diag)
+        elif n_diag != self._n_diag_agents and n_diag > 0:
+            # Agent count changed — rebuild figure
+            plt.close(self._fig)
+            self._init(n_diag)
+
+        self._steps.append(step)
+
+        # Determine vehicle estimate per agent: prefer Kalman phi, fall
+        # back to 1 - P(hidden) from marginals.
+        estimate = {}
+        if phi is not None:
+            estimate.update(phi)
+        for aid, p_h in marginals.items():
+            if aid < 0:
+                continue
+            if aid not in estimate:
+                estimate[aid] = 1.0 - p_h  # convert P(hidden) → P(aware)
+
+        # Append vehicle estimate
+        for aid, val in estimate.items():
+            if aid not in self._phi:
+                self._phi[aid] = [0.5] * (len(self._steps) - 1)
+            self._phi[aid].append(val)
+        for aid in list(self._phi.keys()):
+            if aid not in estimate:
+                prev = self._phi[aid][-1] if self._phi[aid] else 0.5
+                self._phi[aid].append(prev)
+
+        # Append uncertainty bounds
+        for aid in list(self._phi.keys()):
+            lo, hi = 0.5, 0.5
+            if phi_bounds is not None and aid in phi_bounds:
+                lo, hi = phi_bounds[aid]
+            elif aid in estimate:
+                lo = hi = estimate[aid]
+            if aid not in self._phi_lo:
+                self._phi_lo[aid] = [0.5] * (len(self._steps) - 1)
+                self._phi_hi[aid] = [0.5] * (len(self._steps) - 1)
+            self._phi_lo[aid].append(lo)
+            self._phi_hi[aid].append(hi)
+
+        # Human awareness (ground truth dynamics)
+        if human_phi is not None:
+            for aid, val in human_phi.items():
+                if aid < 0:
+                    continue
+                if aid not in self._human_phi:
+                    # Back-fill: use config ground truth if available
+                    gt = self._ground_truth.get(aid)
+                    init_val = (1.0 if gt else 0.0) if gt is not None else 0.5
+                    self._human_phi[aid] = [init_val] * (len(self._steps) - 1)
+                self._human_phi[aid].append(val)
+            for aid in list(self._human_phi.keys()):
+                if aid not in human_phi:
+                    prev = self._human_phi[aid][-1] if self._human_phi[aid] else 0.5
+                    self._human_phi[aid].append(prev)
+
+        # Append Kalman diagnostics
+        if kalman_diagnostics:
+            for aid, diag in kalman_diagnostics.items():
+                if aid not in self._predict_contrib:
+                    self._predict_contrib[aid] = [0.0] * (len(self._steps) - 1)
+                    self._update_contrib[aid] = [0.0] * (len(self._steps) - 1)
+                    self._delta_psi[aid] = [0.0] * (len(self._steps) - 1)
+                self._predict_contrib[aid].append(diag.get('predict', 0.0))
+                self._update_contrib[aid].append(diag.get('update', 0.0))
+                self._delta_psi[aid].append(diag.get('delta_psi', 0.0))
+
+        # Trim history
+        if len(self._steps) > self._max_history:
+            excess = len(self._steps) - self._max_history
+            self._steps = self._steps[excess:]
+            for d in (self._phi, self._phi_lo, self._phi_hi, self._human_phi,
+                      self._predict_contrib, self._update_contrib, self._delta_psi):
+                for aid in d:
+                    d[aid] = d[aid][excess:]
+
+        # --- Redraw ---
+        ax = self._ax
+        ax.cla()
+
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlabel('Step', fontsize=9)
+        ax.set_ylabel('Awareness  \u03c6', fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+        # Awareness threshold
+        ax.axhline(y=self._awareness_threshold, color='grey',
+                   linestyle='--', linewidth=1.2, alpha=0.6,
+                   label=f'\u03c6_th = {self._awareness_threshold}')
+
+        # Shaded regions
+        ax.axhspan(self._awareness_threshold, 1.05, alpha=0.04,
+                   color='green', zorder=0)
+        ax.axhspan(-0.05, self._awareness_threshold, alpha=0.04,
+                   color='red', zorder=0)
+
+        ax.text(0.01, 0.97, 'SEEN', transform=ax.transAxes, fontsize=7,
+                color='green', alpha=0.5, va='top', ha='left',
+                fontweight='bold')
+        ax.text(0.01, 0.03, 'HIDDEN', transform=ax.transAxes, fontsize=7,
+                color='red', alpha=0.5, va='bottom', ha='left',
+                fontweight='bold')
+
+        steps = self._steps
+        all_aids = sorted(
+            set(self._phi.keys()) | set(self._human_phi.keys()))
+
+        for aid in all_aids:
+            colour = self._get_colour(aid)
+            gt = self._ground_truth.get(aid)
+            gt_tag = ""
+            if gt is not None:
+                gt_tag = " (vis)" if gt else " (hid)"
+
+            # Human belief — evolving Kalman line (or fallback to static)
+            if aid in self._human_phi:
+                h_vals = self._human_phi[aid]
+                n_h = min(len(steps), len(h_vals))
+                ax.plot(steps[:n_h], h_vals[:n_h], color=colour,
+                        linewidth=2.5, alpha=0.5, linestyle='-',
+                        label=f'Human {aid}{gt_tag}')
+            elif gt is not None:
+                gt_y = 1.0 if gt else 0.0
+                ax.axhline(y=gt_y, color=colour, linestyle='-',
+                           linewidth=2.5, alpha=0.25)
+
+            # Vehicle estimate (Kalman phi)
+            if aid in self._phi:
+                n = min(len(steps), len(self._phi[aid]))
+                ax.plot(steps[:n], self._phi[aid][:n], color=colour,
+                        linewidth=1.8, alpha=0.9,
+                        marker='.', markersize=2,
+                        label=f'Veh. est. {aid}')
+
+                # Uncertainty band
+                if aid in self._phi_lo and aid in self._phi_hi:
+                    n_b = min(n, len(self._phi_lo[aid]),
+                              len(self._phi_hi[aid]))
+                    ax.fill_between(
+                        steps[:n_b],
+                        self._phi_lo[aid][:n_b],
+                        self._phi_hi[aid][:n_b],
+                        color=colour, alpha=0.15)
+
+        ax.legend(fontsize=7, loc='best', framealpha=0.8)
+        ax.set_title(
+            f'Human Beliefs vs Vehicle Estimate  |  step {step}',
+            fontsize=10)
+
+        # --- Diagnostic subplots: predict/update contributions per agent ---
+        diag_aids = sorted(self._predict_contrib.keys())
+        fig_axes = self._fig.get_axes()
+        for row_idx, aid in enumerate(diag_aids):
+            ax_idx = 1 + row_idx
+            if ax_idx >= len(fig_axes):
+                break
+            dax = fig_axes[ax_idx]
+            dax.cla()
+
+            n = min(len(steps), len(self._predict_contrib.get(aid, [])))
+            if n == 0:
+                continue
+
+            s = steps[:n]
+            pred_vals = self._predict_contrib[aid][:n]
+            upd_vals = self._update_contrib[aid][:n]
+            dp_vals = self._delta_psi[aid][:n]
+
+            dax.plot(s, pred_vals, '-', color='#2ca02c', linewidth=1.2,
+                     alpha=0.9, label='predict (b\u00b7f)')
+            dax.plot(s, upd_vals, '-', color='#d62728', linewidth=1.2,
+                     alpha=0.9, label='update (K\u00b7(y\u2212\u03c8))')
+            dax.plot(s, dp_vals, '-', color='#9467bd', linewidth=1.2,
+                     alpha=0.9, label='\u0394\u03c8 (total)')
+            dax.axhline(0, color='grey', linestyle='-', linewidth=0.5, alpha=0.3)
+            dax.set_ylabel(f'Agent {aid}', fontsize=8)
+            dax.legend(fontsize=6, loc='upper right', framealpha=0.7, ncol=3)
+            dax.grid(True, alpha=0.2)
+            if row_idx == len(diag_aids) - 1:
+                dax.set_xlabel('Step', fontsize=9)
+
+        self._fig.tight_layout()
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()
