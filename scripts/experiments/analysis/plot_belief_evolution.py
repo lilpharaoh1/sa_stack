@@ -24,9 +24,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
 
-from belief_utils import ExperimentResult, StepRecord, RESULTS_DIR
+from utils import ExperimentResult, StepRecord, RESULTS_DIR
 
 # Distinguishable colours for different agents
 AGENT_COLOURS = [

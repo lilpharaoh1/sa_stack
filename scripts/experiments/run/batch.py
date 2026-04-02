@@ -1,0 +1,480 @@
+"""
+Batch runner for BeliefAgent experiments.
+
+Runs N samples of a scenario config (new or old format), collects results,
+and prints summary statistics.
+
+Usage:
+    python scripts/experiments/belief_experiment.py -m belief_experiment1 -n 10
+    python scripts/experiments/belief_experiment.py -m belief_experiment1 -n 100 --seed 42 --steps 300
+"""
+
+import sys
+import os
+import logging
+import argparse
+import json
+import time
+from typing import List
+from collections import Counter
+
+import carla
+import numpy as np
+
+# Ensure repo root and experiments dir are on the path
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
+
+import igp2 as ip
+
+from utils import (
+    ExperimentResult,
+    is_new_format,
+    sample_viable_config,
+    expand_new_config,
+    generate_random_frame,
+    check_viability,
+    dump_results,
+    plot_spawn_preview,
+    RESULTS_DIR,
+    make_run_dir,
+    build_run_metadata,
+    save_experiment,
+    build_batch_summary,
+    save_summary,
+)
+from run.single import run_single_experiment
+
+logger = logging.getLogger(__name__)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Batch BeliefAgent experiment runner")
+
+    # --- Experiment config (method parameters) ---
+    parser.add_argument("--config", "-c", type=str, default="defaults.yaml",
+                        help="Experiment config YAML under scripts/experiments/configs/ "
+                             "(default: defaults.yaml)")
+
+    # --- Per-run parameters ---
+    parser.add_argument("--map", "-m", type=str, default=None,
+                        help="Scenario config name under scenarios/configs/ "
+                             "(required unless --resume is used)")
+    parser.add_argument("-n", "--n-samples", type=int, default=100,
+                        help="Number of samples to run (default: 100)")
+    parser.add_argument("--seed", type=int, default=21,
+                        help="Base seed; sample i uses seed + i")
+    parser.add_argument("--steps", type=int, default=500,
+                        help="Maximum number of simulation steps per episode")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Resume from an existing run directory. "
+                             "Loads previous results and continues with -n "
+                             "additional samples. Other flags (--map, --seed, "
+                             "etc.) are inherited from the original run.")
+
+    # --- Environment ---
+    parser.add_argument("--carla_path", "-p", type=str,
+                        default="/opt/carla-simulator",
+                        help="Path to CARLA installation")
+    parser.add_argument("--server", type=str, default="localhost")
+    parser.add_argument("--port", type=int, default=2000)
+
+    # --- Display ---
+    parser.add_argument("--no-plot", action="store_true",
+                        help="Disable all agent plotters")
+    parser.add_argument("--preview", action="store_true",
+                        help="Show spawn preview plot for the first sample before running")
+    parser.add_argument("--live-awareness", action="store_true",
+                        help="Show live awareness kernel plot during episodes")
+    parser.add_argument("--live-mcts", action="store_true",
+                        help="Show live MCTS tree plotter during episodes")
+
+    return parser.parse_args()
+
+
+def print_summary(scenario_name: str,
+                  results: List[ExperimentResult],
+                  n_viable: int,
+                  n_nonviable: int,
+                  run_dir: str):
+    """Print a formatted summary of batch experiment results."""
+    n_total = n_viable + n_nonviable
+
+    solved = [r for r in results if r.solved]
+    failed = [r for r in results if r.failed]
+    timed_out = [r for r in results if not r.solved and not r.failed]
+
+    n_solved = len(solved)
+    n_failed = len(failed)
+    n_timed = len(timed_out)
+
+    def pct(count, total):
+        return f"{100 * count / total:.1f}" if total > 0 else "0.0"
+
+    print(f"\n{'='*60}")
+    print(f"  Batch Experiment Summary: {scenario_name}")
+    print(f"  Samples: {n_total} attempted, {n_viable} viable, {n_nonviable} non-viable")
+    print(f"{'='*60}")
+    print(f"  Solved:    {n_solved:4d} ({pct(n_solved, n_viable)}%)")
+    print(f"  Failed:    {n_failed:4d} ({pct(n_failed, n_viable)}%)")
+    print(f"  Timed out: {n_timed:4d} ({pct(n_timed, n_viable)}%)")
+
+    if failed:
+        print(f"\n  Failure breakdown:")
+        reason_counts = Counter()
+        for r in failed:
+            if r.failure_reason:
+                for part in r.failure_reason.split("; "):
+                    reason_counts[part] += 1
+            else:
+                reason_counts["NLP infeasible (unknown cause)"] += 1
+        for reason, count in reason_counts.most_common():
+            print(f"    {reason}: {count}")
+
+    if solved:
+        steps_arr = np.array([r.solved_step for r in solved])
+        print(f"\n  Steps to solve ({n_solved} solved):")
+        print(f"    min={steps_arr.min()}  max={steps_arr.max()}  "
+              f"mean={steps_arr.mean():.1f}  std={steps_arr.std():.1f}")
+
+        times_arr = np.array([r.wall_time_seconds for r in solved])
+        print(f"\n  Wall time per episode ({n_solved} solved):")
+        print(f"    min={times_arr.min():.1f}s  max={times_arr.max():.1f}s  "
+              f"mean={times_arr.mean():.1f}s  std={times_arr.std():.1f}s")
+
+        # Ego speed at goal (last step's ego speed for solved runs)
+        speeds = []
+        for r in solved:
+            if r.steps and r.steps[-1].ego_speed is not None:
+                speeds.append(r.steps[-1].ego_speed)
+        if speeds:
+            sp = np.array(speeds)
+            print(f"\n  Ego speed at goal ({len(speeds)} solved):")
+            print(f"    min={sp.min():.1f}  max={sp.max():.1f}  "
+                  f"mean={sp.mean():.1f}  std={sp.std():.1f} m/s")
+
+    # Belief inference & intervention metrics (across all runs)
+    all_steps = [s for r in results for s in r.steps]
+    if all_steps:
+        # Belief accuracy (only steps where inference ran)
+        acc_vals = [s.belief_accuracy for s in all_steps
+                    if s.belief_accuracy is not None]
+        if acc_vals:
+            acc = np.array(acc_vals)
+            print(f"\n  Belief accuracy ({len(acc_vals)} steps with inference):")
+            print(f"    mean={acc.mean():.3f}  std={acc.std():.3f}")
+
+        # Intervention stats
+        n_interv = sum(1 for s in all_steps if s.intervention_active)
+        n_total_steps = len(all_steps)
+        print(f"\n  Intervention active: {n_interv}/{n_total_steps} steps "
+              f"({pct(n_interv, n_total_steps)}%)")
+
+        # Action deviation (only during intervention)
+        dev_vals = [s.action_deviation for s in all_steps
+                    if s.intervention_active and s.action_deviation is not None]
+        if dev_vals:
+            dev = np.array(dev_vals)
+            print(f"  Action deviation (during intervention, {len(dev_vals)} steps):")
+            print(f"    mean={dev.mean():.4f}  max={dev.max():.4f}  std={dev.std():.4f}")
+
+            # Decomposed deviation
+            dev_a = [s.action_deviation_accel for s in all_steps
+                     if s.action_deviation_accel is not None]
+            dev_d = [s.action_deviation_steer for s in all_steps
+                     if s.action_deviation_steer is not None]
+            if dev_a:
+                da = np.array(dev_a)
+                print(f"    accel:  mean={da.mean():.4f}  max={da.max():.4f}")
+            if dev_d:
+                dd = np.array(dev_d)
+                print(f"    steer:  mean={dd.mean():.4f}  max={dd.max():.4f}")
+
+        # --- Ego violations ---
+        n_col = sum(1 for s in all_steps if s.ego_collision)
+        n_accel_v = sum(1 for s in all_steps if s.ego_accel_violated)
+        n_steer_v = sum(1 for s in all_steps if s.ego_steering_violated)
+        n_jerk_v = sum(1 for s in all_steps if s.ego_jerk_violated)
+        n_srate_v = sum(1 for s in all_steps if s.ego_steer_rate_violated)
+
+        print(f"\n  Ego violations ({n_total_steps} steps):")
+        print(f"    Collision:     {n_col:4d} ({pct(n_col, n_total_steps)}%)")
+        print(f"    Control:")
+        print(f"      Acceleration:{n_accel_v:4d} ({pct(n_accel_v, n_total_steps)}%)")
+        print(f"      Steering:    {n_steer_v:4d} ({pct(n_steer_v, n_total_steps)}%)")
+        print(f"    Comfort:")
+        print(f"      Jerk:        {n_jerk_v:4d} ({pct(n_jerk_v, n_total_steps)}%)")
+        print(f"      Steer rate:  {n_srate_v:4d} ({pct(n_srate_v, n_total_steps)}%)")
+
+        # --- Per-step ego cost ---
+        cost_vals = [s.ego_step_cost for s in all_steps
+                     if s.ego_step_cost is not None]
+        if cost_vals:
+            cv = np.array(cost_vals)
+            print(f"\n  Ego step cost ({len(cost_vals)} steps):")
+            print(f"    mean={cv.mean():.4f}  std={cv.std():.4f}  "
+                  f"min={cv.min():.4f}  max={cv.max():.4f}")
+
+        # --- Per-step timing breakdown ---
+        timing_dicts = [s.ego_timing for s in all_steps if s.ego_timing]
+        if timing_dicts:
+            # Gather all timing keys
+            all_keys = set()
+            for td in timing_dicts:
+                all_keys.update(td.keys())
+
+            print(f"\n  Per-step timing ({len(timing_dicts)} steps):")
+            for key in sorted(all_keys):
+                vals = [td[key] * 1000 for td in timing_dicts if key in td]
+                if vals:
+                    arr = np.array(vals)
+                    print(f"    {key:20s}  mean={arr.mean():7.1f}ms  "
+                          f"std={arr.std():7.1f}ms  "
+                          f"max={arr.max():7.1f}ms")
+
+            totals = [sum(td.values()) * 1000 for td in timing_dicts]
+            ta = np.array(totals)
+            print(f"    {'total':20s}  mean={ta.mean():7.1f}ms  "
+                  f"std={ta.std():7.1f}ms  "
+                  f"max={ta.max():7.1f}ms")
+
+    print(f"\n  Run directory: {run_dir}")
+    print(f"{'='*60}\n")
+
+
+def main():
+    args = parse_args()
+
+    # Load method parameters from config
+    from configs import load_config, apply_config
+    cfg = load_config(args.config)
+    apply_config(cfg, args)
+
+    if args.resume is None and args.map is None:
+        print("Error: --map/-m is required unless --resume is used.")
+        sys.exit(1)
+
+    ip.setup_logging(level=logging.DEBUG)
+    np.seterr(divide="ignore")
+
+    # --- Resume from existing run ---
+    prev_results: List[ExperimentResult] = []
+    prev_n_viable = 0
+    prev_n_nonviable = 0
+    prev_batch_time = 0.0
+
+    if args.resume:
+        import dill
+        resume_dir = args.resume.rstrip('/')
+        # If just a folder name (not a path), look in RESULTS_DIR
+        if not os.path.isdir(resume_dir):
+            resume_dir = os.path.join(RESULTS_DIR, args.resume.rstrip('/'))
+        if not os.path.isdir(resume_dir):
+            print(f"Error: resume directory not found: {args.resume}")
+            sys.exit(1)
+
+        # Load previous metadata to inherit settings
+        prev_meta_path = os.path.join(resume_dir, "metadata.json")
+        with open(prev_meta_path) as f:
+            prev_meta = json.load(f)
+
+        # Override args from previous run's settings
+        args.map = prev_meta["scenario"]
+        args.seed = prev_meta["seed"]
+        args.steps = prev_meta["max_steps"]
+        args.intervention_type = prev_meta["intervention_type"]
+        args.inference_type = prev_meta["inference_type"]
+        args.planning_mode = prev_meta["planning_mode"]
+        args.ref_controls = prev_meta.get("ref_controls", "opt")
+        args.relevance_method = prev_meta.get("relevance_method", "naive")
+
+        # Load previous results
+        prev_pkl_path = os.path.join(resume_dir, "results.pkl")
+        with open(prev_pkl_path, 'rb') as f:
+            prev_data = dill.load(f)
+        prev_results = prev_data["results"]
+        prev_n_viable = prev_data["n_viable"]
+        prev_n_nonviable = prev_data["n_nonviable"]
+        prev_batch_time = prev_data.get("batch_wall_time", 0.0)
+
+        print(f"\n{'='*60}")
+        print(f"  Resuming from: {resume_dir}")
+        print(f"  Previous: {prev_n_viable} viable, "
+              f"{prev_n_nonviable} non-viable")
+        print(f"  Adding {args.n_samples} more samples")
+        print(f"{'='*60}\n")
+
+    # Load scenario config
+    config_path = os.path.join("scenarios", "configs", f"{args.map}.json")
+    with open(config_path) as f:
+        config = json.load(f)
+
+    fps = config["scenario"].get("fps", 20)
+    ip.Maneuver.MAX_SPEED = config["scenario"].get("max_speed", 10.0)
+
+    scenario_xodr = config["scenario"]["map_path"]
+    scenario_map = ip.Map.parse_from_opendrive(scenario_xodr)
+    map_name = config["scenario"].get("map_name", "Town01")
+
+    new_fmt = is_new_format(config)
+    plot_interval = False if args.no_plot else config["scenario"].get("plot_interval", False)
+
+    # Connect to CARLA once
+    carla_sim = ip.carlasim.CarlaSim(
+        map_name=map_name,
+        xodr=scenario_xodr,
+        carla_path=args.carla_path,
+        server=args.server,
+        port=args.port,
+        fps=fps,
+    )
+
+    results: List[ExperimentResult] = list(prev_results)
+    n_viable = prev_n_viable
+    n_nonviable = prev_n_nonviable
+
+    if args.resume:
+        # Reuse existing run directory
+        run_dir = resume_dir
+    else:
+        # Create run directory and write metadata before the loop so we have it
+        # even if the run crashes mid-way.
+        run_dir = make_run_dir(
+            scenario_name=args.map,
+            config_name=args.config,
+            seed=args.seed,
+            n_samples=args.n_samples,
+        )
+
+    metadata = build_run_metadata(args, config)
+    metadata["n_samples"] = prev_n_viable + args.n_samples  # total target
+    if args.resume:
+        metadata["resumed_from"] = prev_n_viable
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "metadata.json"), 'w') as _mf:
+        json.dump(metadata, _mf, indent=2, default=str)
+
+    total_target = prev_n_viable + args.n_samples
+    print(f"\n{'='*60}")
+    print(f"  Batch Experiment: {args.map}")
+    print(f"  Samples: {args.n_samples} new"
+          + (f" (+{prev_n_viable} previous = {total_target} total)"
+             if prev_n_viable else "")
+          + f"  |  Base seed: {args.seed}")
+    print(f"  FPS: {fps}  |  Max steps: {args.steps}")
+    print(f"  Run directory: {run_dir}")
+    print(f"{'='*60}\n")
+
+    batch_t0 = time.time()
+
+    # Continue seeds from where the previous run left off
+    next_seed = args.seed + prev_n_viable + prev_n_nonviable
+
+    for i in range(args.n_samples):
+        # Keep trying seeds until we get a viable configuration
+        while True:
+            sample_seed = next_seed
+            next_seed += 1
+            np.random.seed(sample_seed)
+            rng = np.random.RandomState(sample_seed)
+
+            if new_fmt:
+                try:
+                    expanded, frame = sample_viable_config(
+                        config, scenario_map, seed=sample_seed)
+                    break
+                except RuntimeError:
+                    n_nonviable += 1
+                    print(f"  [seed={sample_seed}] non-viable, retrying...")
+            else:
+                expanded = config
+                ego_id = config["agents"][0]["id"]
+                agent_spawns = []
+                for ac in config["agents"]:
+                    spawn_box = ip.Box(
+                        np.array(ac["spawn"]["box"]["center"]),
+                        ac["spawn"]["box"]["length"],
+                        ac["spawn"]["box"]["width"],
+                        ac["spawn"]["box"]["heading"],
+                    )
+                    vel_range = ac["spawn"]["velocity"]
+                    agent_spawns.append((spawn_box, vel_range))
+                frame = generate_random_frame(ego_id, scenario_map, agent_spawns, rng=rng)
+
+                if check_viability(frame, expanded.get("static_objects", [])):
+                    break
+                n_nonviable += 1
+                print(f"  [seed={sample_seed}] non-viable, retrying...")
+
+        n_viable += 1
+
+        n_agents = len(expanded["agents"])
+        sample_num = prev_n_viable + i + 1
+        print(f"\n[Sample {sample_num:4d}/{total_target}] seed={sample_seed}  "
+              f"agents={n_agents}")
+
+        if args.preview:
+            plot_spawn_preview(scenario_map, expanded, frame,
+                               title=f"Sample {i+1}/{args.n_samples}: {args.map} (seed={sample_seed})",
+                               raw_config=config)
+
+        result = run_single_experiment(
+            config=expanded,
+            frame=frame,
+            scenario_map=scenario_map,
+            carla_sim=carla_sim,
+            max_steps=args.steps,
+            fps=fps,
+            plot_interval=plot_interval,
+            seed=sample_seed,
+            scenario_name=args.map,
+            intervention_type=args.intervention_type,
+            inference_type=args.inference_type,
+            relevance_method=args.relevance_method,
+            planning_mode=args.planning_mode,
+            ref_controls=args.ref_controls,
+            live_awareness=args.live_awareness,
+            n_kappa_particles=args.n_kappa_particles,
+            kappa_min=args.kappa_min,
+            b_kappa=args.b_kappa,
+            q_kappa=args.q_kappa,
+            plot_mcts_tree=args.live_mcts,
+        )
+        results.append(result)
+
+        status = "SOLVED" if result.solved else ("FAILED" if result.failed else "TIMEOUT")
+        print(f"  >> {status}  steps={result.total_steps}  "
+              f"time={result.wall_time_seconds:.1f}s")
+
+        # Clean up CARLA for next sample
+        for aid in list(carla_sim.agents.keys()):
+            if carla_sim.agents[aid] is not None:
+                carla_sim.remove_agent(aid)
+        carla_sim.clear_static_objects()
+
+    new_batch_time = time.time() - batch_t0
+    batch_time = prev_batch_time + new_batch_time
+
+    # Save results to a structured run directory
+    batch_data = {
+        "results": results,
+        "n_viable": n_viable,
+        "n_nonviable": n_nonviable,
+        "args": vars(args),
+        "batch_wall_time": batch_time,
+    }
+    save_experiment(batch_data, run_dir, metadata)
+
+    summary = build_batch_summary(results, n_viable, n_nonviable, batch_time)
+    save_summary(summary, run_dir)
+
+    print_summary(args.map, results, n_viable, n_nonviable, run_dir)
+    print(f"  Total batch time: {batch_time:.1f}s"
+          + (f" ({prev_batch_time:.1f}s previous + {new_batch_time:.1f}s new)"
+             if prev_batch_time > 0 else ""))
+
+
+if __name__ == "__main__":
+    main()

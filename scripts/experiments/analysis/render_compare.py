@@ -30,12 +30,14 @@ import dill
 import numpy as np
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
 
 import igp2 as ip
 from igp2.opendrive.plot_map import plot_map
-from belief_utils import ExperimentResult, RESULTS_DIR
+from utils import ExperimentResult, RESULTS_DIR
 from render_scene import render_scene_frame, _extract_ego_goal
 
 

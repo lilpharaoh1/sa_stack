@@ -43,22 +43,40 @@ class MCTSTrajectory:
     controls: np.ndarray    # (K, 2)   [a, delta=0]         coarse, padded for compat
     mcts_reward: float      # cumulative discounted reward
     interventions: Optional[List[bool]] = None  # per-step intervention flags (QCBF)
+    tree_depth: Optional[int] = None            # steps from tree (rest is heuristic padding)
 
 
 class BeliefState:
     """Belief distribution over latent visibility configurations.
 
-    Each configuration θ = (d¹, d², ..., dⁿ) where dⁱ ∈ {0, 1}
-    indicates whether the human believes participant i is present.
+    Without velocity particles: each configuration θ = (d¹, d², ..., dⁿ)
+    where dⁱ ∈ {0, 1} indicates visibility (0 = hidden, 1 = visible).
+
+    With velocity particles (K particles per agent): each element
+    dⁱ ∈ {0, 1, 2, ..., K} where 0 = hidden, j ∈ {1..K} = visible with
+    κ particle j-1.  The ground-truth config uses the index corresponding
+    to κ = 1.0 (typically K, the last particle).
     """
 
-    def __init__(self, agent_ids: List[int]):
+    def __init__(self, agent_ids: List[int], n_kappa: int = 0):
+        """
+        Args:
+            agent_ids: Tracked participant IDs.
+            n_kappa: Number of velocity particles per agent (0 = legacy
+                binary configs).
+        """
         self._agent_ids = sorted(agent_ids)
+        self._n_kappa = n_kappa
         n = len(agent_ids)
         if n == 0:
             self._configs: List[tuple] = [()]
-        else:
+        elif n_kappa == 0:
+            # Legacy: binary visibility configs
             self._configs = list(itertools.product((0, 1), repeat=n))
+        else:
+            # Extended: 0 = hidden, 1..K = visible with κ particle index
+            vals = list(range(n_kappa + 1))  # [0, 1, ..., K]
+            self._configs = list(itertools.product(vals, repeat=n))
         self._probs: Dict[tuple, float] = {
             cfg: 1.0 / len(self._configs) for cfg in self._configs
         }
@@ -72,12 +90,34 @@ class BeliefState:
         return self._agent_ids
 
     @property
+    def n_kappa(self) -> int:
+        return self._n_kappa
+
+    @property
     def probs(self) -> Dict[tuple, float]:
         return self._probs
 
     def visible_aids(self, theta: tuple) -> Set[int]:
-        """Return the set of agent IDs visible under configuration θ."""
-        return {self._agent_ids[i] for i, v in enumerate(theta) if v == 1}
+        """Return the set of agent IDs visible under configuration θ.
+
+        An agent is visible if its config value > 0 (works for both
+        legacy binary and extended velocity-particle configs).
+        """
+        return {self._agent_ids[i] for i, v in enumerate(theta) if v > 0}
+
+    def kappa_index(self, theta: tuple, agent_idx: int) -> Optional[int]:
+        """Return the κ particle index for agent at position ``agent_idx``.
+
+        Returns None if the agent is hidden (value == 0) or if no velocity
+        particles are used (n_kappa == 0).  Otherwise returns ``value - 1``
+        (0-based particle index).
+        """
+        if self._n_kappa == 0:
+            return None
+        v = theta[agent_idx]
+        if v == 0:
+            return None
+        return v - 1  # 0-based particle index
 
     def sample(self) -> tuple:
         """Sample a θ from the current belief distribution."""
@@ -108,11 +148,12 @@ class BeliefState:
         """P(agent i hidden) for each agent.
 
         Matches the convention used by naive inference: marginals
-        represent P(hidden), not P(visible).
+        represent P(hidden), not P(visible).  An agent is visible
+        whenever its config value > 0.
         """
         result = {}
         for i, aid in enumerate(self._agent_ids):
-            p_visible = sum(prob for cfg, prob in self._probs.items() if cfg[i] == 1)
+            p_visible = sum(prob for cfg, prob in self._probs.items() if cfg[i] > 0)
             result[aid] = 1.0 - p_visible
         return result
 
@@ -485,11 +526,17 @@ class MCTSPlanner:
 
     def _collision_cost(self, state: np.ndarray, obstacles: list,
                         step_k: int,
-                        visible_aids: Optional[Set[int]] = None) -> float:
-        """1-D collision penalty (depends on θ via visible_aids).
+                        visible_aids: Optional[Set[int]] = None,
+                        kappa_map: Optional[Dict[int, float]] = None,
+                        ) -> float:
+        """1-D collision penalty (depends on θ via visible_aids and κ).
 
         Static objects (aid < 0) are always penalised.
         Dynamic agents are only penalised if their aid is in visible_aids.
+
+        When ``kappa_map`` is provided, obstacle positions are scaled by
+        the κ factor: perceived_s = s_0 + κ · (s_k - s_0), modelling
+        the human's underestimation of the obstacle's velocity.
         """
         s = state[0]
         fine_k = step_k * self._coarseness
@@ -499,8 +546,15 @@ class MCTSPlanner:
             if aid >= 0:
                 if visible_aids is not None and aid not in visible_aids:
                     continue
-            if self._check_longitudinal_collision(s, obs, fine_k):
-                collision = min(collision, -self._collision_penalty)
+            # Apply κ scaling to perceived position
+            if kappa_map is not None and aid in kappa_map:
+                kappa = kappa_map[aid]
+                if self._check_longitudinal_collision_kappa(
+                        s, obs, fine_k, kappa):
+                    collision = min(collision, -self._collision_penalty)
+            else:
+                if self._check_longitudinal_collision(s, obs, fine_k):
+                    collision = min(collision, -self._collision_penalty)
         return collision
 
     def _step_reward(self, state: np.ndarray,
@@ -508,10 +562,13 @@ class MCTSPlanner:
                      obstacles: list,
                      step_k: int,
                      s0: float,
-                     visible_aids: Optional[Set[int]] = None) -> float:
+                     visible_aids: Optional[Set[int]] = None,
+                     kappa_map: Optional[Dict[int, float]] = None,
+                     ) -> float:
         """Single-step reward under a specific visibility configuration."""
         base = self._step_reward_base(state, action, step_k, s0)
-        collision = self._collision_cost(state, obstacles, step_k, visible_aids)
+        collision = self._collision_cost(state, obstacles, step_k,
+                                         visible_aids, kappa_map)
         return base + collision
 
     def _check_longitudinal_collision(self, s_ego: float, obs: dict,
@@ -532,6 +589,27 @@ class MCTSPlanner:
         d_gap = self._ego_width / 2.0 + obs['width'] / 2.0 + self._collision_margin
         return abs(d_obs) < d_gap
 
+    def _check_longitudinal_collision_kappa(self, s_ego: float, obs: dict,
+                                            fine_k: int,
+                                            kappa: float) -> bool:
+        """Collision check using perceived (κ-scaled) obstacle position.
+
+        perceived_s = s_0 + κ · (s_k - s_0)
+        perceived_d = d_0 + κ · (d_k - d_0)
+        """
+        k = min(fine_k, len(obs['s']) - 1)
+        s_0 = float(obs['s'][0])
+        s_k = float(obs['s'][k])
+        s_perceived = s_0 + kappa * (s_k - s_0)
+        s_gap = self._half_L + obs['length'] / 2.0 + self._collision_margin
+        if abs(s_ego - s_perceived) >= s_gap:
+            return False
+        d_0 = float(obs['d'][0])
+        d_k = float(obs['d'][k])
+        d_perceived = d_0 + kappa * (d_k - d_0)
+        d_gap = self._ego_width / 2.0 + obs['width'] / 2.0 + self._collision_margin
+        return abs(d_perceived) < d_gap
+
     # ==================================================================
     # Core MCTS loop (per-belief)
     # ==================================================================
@@ -543,6 +621,7 @@ class MCTSPlanner:
                belief: Optional[BeliefState] = None,
                human_action=None,
                kalman=None,
+               velocity_particles: Optional[Dict] = None,
                ) -> Tuple[List[MCTSTrajectory], Optional[BeliefState]]:
         """Run per-belief MCTS search (1-D longitudinal).
 
@@ -559,6 +638,9 @@ class MCTSPlanner:
             kalman: Optional KalmanAwareness instance for Kalman-driven
                 resampling during simulation.  Each simulation copies
                 this state and propagates it forward.
+            velocity_particles: Optional dict {agent_id: VelocityParticles}
+                for velocity-belief configs.  When provided, belief must
+                have been created with the matching ``n_kappa``.
 
         Returns:
             (trajectories, updated_belief)
@@ -604,6 +686,20 @@ class MCTSPlanner:
         theta_visible: Dict[tuple, Set[int]] = {
             cfg: belief.visible_aids(cfg) for cfg in all_configs
         }
+
+        # Pre-compute per-config κ maps: {cfg: {aid: kappa_value}}
+        theta_kappa: Dict[tuple, Optional[Dict[int, float]]] = {}
+        if velocity_particles and belief.n_kappa > 0:
+            for cfg in all_configs:
+                km = {}
+                for i, aid in enumerate(belief.agent_ids):
+                    k_idx = belief.kappa_index(cfg, i)
+                    if k_idx is not None and aid in velocity_particles:
+                        km[aid] = velocity_particles[aid].kappa_values[k_idx]
+                theta_kappa[cfg] = km if km else None
+        else:
+            for cfg in all_configs:
+                theta_kappa[cfg] = None
 
         # Debug counters
         n_expanded = 0
@@ -690,7 +786,8 @@ class MCTSPlanner:
                         for cfg in all_configs:
                             leaf_returns[cfg] = self._step_reward(
                                 child.state, action, obstacles, child.depth, s0,
-                                visible_aids=theta_visible[cfg])
+                                visible_aids=theta_visible[cfg],
+                                kappa_map=theta_kappa[cfg])
                 else:
                     untried = node.untried_actions(self._actions, self)
                     if not untried:
@@ -717,7 +814,8 @@ class MCTSPlanner:
                     step_rewards[cfg] = self._step_reward(
                         child_node.state, act, obstacles,
                         child_node.depth, s0,
-                        visible_aids=theta_visible[cfg])
+                        visible_aids=theta_visible[cfg],
+                        kappa_map=theta_kappa[cfg])
 
                 # Update visit count (shared across θ)
                 parent_node.action_visits[act] = \
@@ -796,6 +894,8 @@ class MCTSPlanner:
         trajectories = self._extract_trajectories(
             root, self._max_trajectories, road_left, road_right,
             obstacles, s0, theta_star, theta_visible)
+        # Store greedy (always first from _extract_trajectories) before sorting
+        self._last_greedy_trajectory = trajectories[0] if trajectories else None
         trajectories.sort(key=lambda t: -t.mcts_reward)
         _t_extract = _time.perf_counter() - _t0
 
@@ -1083,7 +1183,8 @@ class MCTSPlanner:
         ]) if controls_1d else np.empty((0, 2))
 
         return MCTSTrajectory(states=padded_states, controls=padded_controls,
-                              mcts_reward=reward)
+                              mcts_reward=reward,
+                              tree_depth=len(path) - 1)
 
     # ==================================================================
     # Public trajectory extraction
@@ -1151,6 +1252,7 @@ class MCTSPlanner:
         path = [root]
         intervention_flags = []
         node = root
+        depth = 0
 
         while not node.is_terminal(self._horizon):
             if not node.Q:
@@ -1197,6 +1299,7 @@ class MCTSPlanner:
             path.append(child)
             intervention_flags.append(intervention)
             node = child
+            depth += 1
 
         s0 = float(root.state[0])
         theta_visible = {

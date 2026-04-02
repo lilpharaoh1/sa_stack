@@ -319,18 +319,33 @@ class KalmanAwareness:
     # Belief derivation
     # ------------------------------------------------------------------
 
-    def compute_b_theta(self, configs: List[tuple]) -> Dict[tuple, float]:
+    def compute_b_theta(self, configs: List[tuple],
+                        velocity_particles: Optional[Dict] = None,
+                        agent_ids: Optional[List[int]] = None,
+                        ) -> Dict[tuple, float]:
         """Compute b(theta) for each discrete configuration.
 
         Uses the Gaussian CDF in logit space:
           P(d_i=1) = 1 - Phi((psi_th - psi_hat_i) / sqrt(P_ii))
 
+        For extended configs with velocity particles, visible entries
+        (value > 0) share the awareness probability, weighted by the
+        corresponding particle weight.
+
         Args:
-            configs: List of theta tuples, e.g. [(0,0), (0,1), (1,0), (1,1)].
+            configs: List of theta tuples.  Legacy: values in {0, 1}.
+                Extended: values in {0, 1, ..., K}.
+            velocity_particles: Optional {aid: VelocityParticles}.
+                When provided, visible configs are weighted by particle
+                weights.
+            agent_ids: Agent IDs matching config tuple positions.
+                Defaults to ``self._agent_ids``.
 
         Returns:
             Dict mapping config -> probability.
         """
+        aids = agent_ids if agent_ids is not None else self._agent_ids
+
         p_aware = np.empty(self._n)
         for i in range(self._n):
             std = math.sqrt(max(self.P_diag[i], 1e-12))
@@ -341,17 +356,38 @@ class KalmanAwareness:
         for cfg in configs:
             prob = 1.0
             for i in range(self._n):
-                if cfg[i] == 1:
-                    prob *= p_aware[i]
-                else:
+                v = cfg[i]
+                if v == 0:
+                    # Hidden
                     prob *= (1.0 - p_aware[i])
+                elif velocity_particles is not None and aids[i] in velocity_particles:
+                    # Visible with κ particle (v-1 is 0-based particle index)
+                    vp = velocity_particles[aids[i]]
+                    k_idx = v - 1
+                    if 0 <= k_idx < vp.K:
+                        prob *= p_aware[i] * vp.weights[k_idx]
+                    else:
+                        prob *= p_aware[i] / max(vp.K, 1)
+                else:
+                    # Visible (legacy binary or no particles for this agent)
+                    prob *= p_aware[i]
             b_theta[cfg] = prob
+
+        # Normalise (particle weights may not sum to exactly 1)
+        total = sum(b_theta.values())
+        if total > 1e-30:
+            for cfg in b_theta:
+                b_theta[cfg] /= total
+
         return b_theta
 
     def compute_observation(self,
                             likelihoods: Dict[tuple, float],
                             configs: List[tuple]) -> np.ndarray:
         """Convert per-config likelihoods to per-participant log-LR observations.
+
+        Aggregates across all visible sub-configs (including different κ
+        particles) vs invisible for each participant.
 
         Args:
             likelihoods: {theta: P(u_H | theta)} from Boltzmann model.
@@ -366,7 +402,7 @@ class KalmanAwareness:
             L_unaware = 0.0
             for cfg in configs:
                 lk = likelihoods.get(cfg, 0.0)
-                if cfg[i] == 1:
+                if cfg[i] > 0:  # visible (any κ particle)
                     L_aware += lk
                 else:
                     L_unaware += lk

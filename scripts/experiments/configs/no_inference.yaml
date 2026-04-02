@@ -1,0 +1,8 @@
+# No inference, no intervention (baseline).
+_base: defaults.yaml
+
+inference:
+  type: none
+
+intervention:
+  type: none

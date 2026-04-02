@@ -334,6 +334,11 @@ class BeliefAgent(Agent):
                  planning_mode: str = '2d',
                  ref_controls: str = 'opt',
                  human_type: str = 'static',
+                 n_kappa_particles: int = 0,
+                 kappa_min: float = 0.3,
+                 b_kappa: float = 0.1,
+                 q_kappa: float = 0.001,
+                 plot_mcts_tree: bool = False,
                  **policy_kwargs):
         super().__init__(agent_id, initial_state, goal, fps)
         self._vehicle = KinematicVehicle(initial_state, self.metadata, fps)
@@ -347,6 +352,10 @@ class BeliefAgent(Agent):
         self._ref_controls = ref_controls
         self._planning_mode = planning_mode
         self._human_type = human_type
+        self._n_kappa_particles = n_kappa_particles
+        self._kappa_min = kappa_min
+        self._b_kappa = b_kappa
+        self._q_kappa = q_kappa
         self._other_agents: Dict[int, Any] = {}  # References to other agents in the scene
 
         # Trajectory predictions (belief-filtered and ground-truth)
@@ -423,7 +432,12 @@ class BeliefAgent(Agent):
                 planning_mode=planning_mode,
                 ref_controls=ref_controls,
                 human_type=human_type,
-                plot=plot_interval)
+                plot=plot_interval,
+                n_kappa_particles=n_kappa_particles,
+                kappa_min=kappa_min,
+                b_kappa=b_kappa,
+                q_kappa=q_kappa,
+                plot_mcts_tree=plot_mcts_tree)
 
     def _build_policy(self, policy_type, fps, scenario_map,
                        planning_mode='2d', **kwargs):
@@ -582,11 +596,19 @@ class BeliefAgent(Agent):
                 velocity_error=GaussianBeliefVariable(mean=vel_err, std=0.5),
             )
 
-        # Pass ground-truth visibility to inference and evolution plotter
+        # Pass ground-truth visibility and kappa to inference and evolution plotter
         if self._belief_inference is not None:
             gt = {aid: not self._belief.agents[aid].hidden.mode
                   for aid in self._belief.agents}
             self._belief_inference.set_ground_truth_visibility(gt)
+            # Ground-truth κ: derived from the config velocity_error
+            # κ = 1 + velocity_error  (e.g. vel_err=-0.3 → κ=0.7)
+            gt_kappa = {}
+            for aid in self._belief.agents:
+                vel_err = self._belief.agents[aid].velocity_error.mode
+                gt_kappa[aid] = max(self._kappa_min,
+                                    min(1.0, 1.0 + vel_err))
+            self._belief_inference.set_ground_truth_kappa(gt_kappa)
             evol_plotter = getattr(self._belief_inference,
                                    '_belief_evolution_plotter', None)
             if evol_plotter is not None:

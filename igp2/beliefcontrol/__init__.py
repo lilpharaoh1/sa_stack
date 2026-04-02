@@ -5,6 +5,7 @@ from igp2.beliefcontrol.second_stage import SecondStagePlanner
 from igp2.beliefcontrol.two_stage_policy import TwoStagePolicy
 from igp2.beliefcontrol.belief_inference import BeliefInference
 from igp2.beliefcontrol.mcts_planner import MCTSPlanner, MCTSTrajectory, BeliefState
+from igp2.beliefcontrol.velocity_particles import VelocityParticles, compute_velocity_feature
 from igp2.beliefcontrol.plotting import (
     BeliefPlotter, OptimisationPlotter, InterventionPlotter,
     MCTSTrajectoryPlotter, MCTSBeliefPlotter, MCTSTreePlotter,

@@ -1,21 +1,21 @@
 """
-Render scene views with dynamic agents coloured by human awareness (phi).
+Render scene views with dynamic agents coloured by velocity estimate (kappa).
 
-Agents the human is more aware of (phi -> 1) appear bright; agents the human
-is less aware of (phi -> 0) appear dark.  Uses the ``human_awareness`` field
-from StepRecord, which stores the ground-truth Kalman awareness phi per agent.
+Agents whose velocity the human estimates correctly (kappa -> 1) appear bright;
+agents whose velocity is underestimated (kappa -> kappa_min) appear dark/red.
+Uses the ``velocity_particles`` field from StepRecord.
 
 Supports single-step, multi-frame, and --frames output modes.
 
 Usage:
     # Single step:
-    python scripts/experiments/render_kscene.py results/my_run/ --step 20
+    python scripts/experiments/analysis/render_kscene_velocity.py results/my_run/ --step 20
 
     # All frames as PNGs:
-    python scripts/experiments/render_kscene.py results/my_run/ --frames out/
+    python scripts/experiments/analysis/render_kscene_velocity.py results/my_run/ --frames out/
 
     # Save single step:
-    python scripts/experiments/render_kscene.py results/my_run/ -s 20 -o scene.png
+    python scripts/experiments/analysis/render_kscene_velocity.py results/my_run/ -s 20 -o scene.png
 """
 
 import sys
@@ -30,14 +30,16 @@ import matplotlib.colors as mcolors
 from matplotlib.cm import ScalarMappable
 from matplotlib.patches import Polygon as MplPolygon
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
 
 import igp2 as ip
 from igp2.opendrive.plot_map import plot_map
 from igp2.core.util import calculate_multiple_bboxes
 from igp2.beliefcontrol.frenet import FrenetFrame
-from belief_utils import ExperimentResult, StepRecord, RESULTS_DIR
+from utils import ExperimentResult, StepRecord, RESULTS_DIR
 from render_scene import _draw_speed_path
 
 # ---------------------------------------------------------------------------
@@ -48,7 +50,6 @@ COLOUR_DYNAMIC = (0.85, 0.75, 0.3)
 COLOUR_STATIC = (0.6, 0.6, 0.6)
 COLOUR_HUMAN_NLP = (0.9, 0.1, 0.1)
 COLOUR_INTERVENTION = (0.0, 0.7, 0.0)
-
 
 def _darken(colour, factor):
     """Darken an RGB colour by *factor* (0 = black, 1 = unchanged)."""
@@ -68,22 +69,23 @@ def _draw_vehicle(ax, position, heading, length, width, facecolor,
     return poly
 
 
-def render_kscene_frame(step_record: StepRecord,
-                        scenario_map: 'ip.Map',
-                        ax: plt.Axes,
-                        *,
-                        fps: int = 10,
-                        ego_goal: Optional['ip.BoxGoal'] = None,
-                        margin: float = 40.0,
-                        show_paths: bool = True,
-                        show_intervention: bool = True,
-                        show_legend: bool = True,
-                        title: Optional[str] = None):
-    """Render a scene frame with agents coloured by human awareness.
+def render_kscene_velocity_frame(step_record: StepRecord,
+                                  scenario_map: 'ip.Map',
+                                  ax: plt.Axes,
+                                  *,
+                                  fps: int = 10,
+                                  ego_goal: Optional['ip.BoxGoal'] = None,
+                                  margin: float = 40.0,
+                                  kappa_min: float = 0.3,
+                                  show_paths: bool = True,
+                                  show_intervention: bool = True,
+                                  show_legend: bool = True,
+                                  title: Optional[str] = None):
+    """Render a scene frame with agents coloured by velocity kappa estimate.
 
-    Brightness scales with phi (awareness probability):
-      phi = 1.0 (fully aware)  -> full colour
-      phi = 0.0 (unaware)      -> dark (0.2 brightness)
+    Colour scales with kappa (velocity scaling factor):
+      kappa = 1.0 (correct estimate) -> green
+      kappa = kappa_min (underestimate) -> red
 
     Args:
         step_record: StepRecord for the timestep.
@@ -92,6 +94,7 @@ def render_kscene_frame(step_record: StepRecord,
         fps: Simulation FPS.
         ego_goal: Optional ego goal box.
         margin: View margin around ego in metres.
+        kappa_min: Minimum kappa for colour scaling.
         show_paths: Whether to draw planned paths.
         show_legend: Whether to show the legend.
         title: Optional title override.
@@ -121,36 +124,38 @@ def render_kscene_frame(step_record: StepRecord,
                       COLOUR_STATIC, COLOUR_STATIC,
                       linewidth=1.0, zorder=4)
 
-    # --- Dynamic agents (coloured by human awareness phi) ---
-    awareness = sr.human_awareness or {}
+    # --- Dynamic agents (coloured by human's velocity belief kappa) ---
+    gt_kappa = sr.velocity_kappa_gt or {}
     for aid, state in sr.dynamic_agents.items():
         meta = getattr(state, 'metadata', None)
         vl = meta.length if meta else 4.5
         vw = meta.width if meta else 1.8
 
-        # phi: 1.0 = fully aware (bright), 0.0 = unaware (dark)
-        phi = awareness.get(aid, 1.0)
-        brightness = 0.2 + 0.8 * phi  # range [0.2, 1.0]
+        # Human's velocity belief: kappa from config (what the human believes)
+        # kappa=1.0 means correct perception, kappa<1 means underestimate
+        kappa_human = gt_kappa.get(aid, 1.0)
 
+        # Brightness scales with kappa: 1.0 (correct) -> bright, kappa_min -> dark
+        t = max(0.0, min(1.0, (kappa_human - kappa_min) / (1.0 - kappa_min)))
+        brightness = 0.2 + 0.8 * t  # range [0.2, 1.0]
         face = _darken(COLOUR_DYNAMIC, brightness)
-        edge = _darken(COLOUR_DYNAMIC, brightness)
+        edge = face
 
         _draw_vehicle(ax, state.position, state.heading, vl, vw,
                       face, edge, linewidth=1.5, zorder=5)
 
         # Heading arrow
-        arrow_colour = _darken(COLOUR_DYNAMIC, brightness)
         arrow_len = 2.5
         dx = arrow_len * np.cos(state.heading)
         dy = arrow_len * np.sin(state.heading)
         ax.annotate("", xy=(state.position[0] + dx, state.position[1] + dy),
                     xytext=(state.position[0], state.position[1]),
-                    arrowprops=dict(arrowstyle='->', color=arrow_colour,
-                                   lw=1.5),
+                    arrowprops=dict(arrowstyle='->', color=face, lw=1.5),
                     zorder=6)
 
-        # Phi label
-        ax.annotate(f"$\\phi$={phi:.2f}",
+        # Kappa label
+        label = f"$\\kappa$={kappa_human:.2f}"
+        ax.annotate(label,
                     xy=(state.position[0], state.position[1] - 4.0),
                     fontsize=7, ha='center', color=face,
                     alpha=0.9, zorder=7)
@@ -239,11 +244,12 @@ def render_kscene_frame(step_record: StepRecord,
         ax.set_title("  |  ".join(parts), fontsize=11)
 
 
-def create_kscene_figure(step_record: StepRecord,
-                         scenario_map: 'ip.Map',
-                         figsize: Tuple[float, float] = (14, 8),
-                         **kwargs) -> Tuple[plt.Figure, plt.Axes]:
-    """Create a figure with map, awareness-coloured agents, and colorbar."""
+def create_kscene_velocity_figure(step_record: StepRecord,
+                                   scenario_map: 'ip.Map',
+                                   figsize: Tuple[float, float] = (14, 8),
+                                   kappa_min: float = 0.3,
+                                   **kwargs) -> Tuple[plt.Figure, plt.Axes]:
+    """Create a figure with map, kappa-coloured agents, and colorbar."""
     fig = plt.figure(figsize=figsize)
 
     ax = fig.add_axes([0.02, 0.02, 0.82, 0.93])
@@ -254,21 +260,23 @@ def create_kscene_figure(step_record: StepRecord,
     ax.set_aspect('equal')
     ax.set_xticks([])
     ax.set_yticks([])
-    render_kscene_frame(step_record, scenario_map, ax, **kwargs)
+    render_kscene_velocity_frame(step_record, scenario_map, ax,
+                                  kappa_min=kappa_min, **kwargs)
 
-    # --- Awareness (phi) colour bar ---
+    # --- Kappa colour bar ---
     n_steps = 256
-    phi_vals = np.linspace(0, 1, n_steps)
+    kappa_vals = np.linspace(kappa_min, 1.0, n_steps)
     colours_list = []
-    for phi in phi_vals:
-        b = 0.2 + 0.8 * phi
+    for k in kappa_vals:
+        t = (k - kappa_min) / (1.0 - kappa_min)
+        b = 0.2 + 0.8 * t
         colours_list.append((*_darken(COLOUR_DYNAMIC, b), 1.0))
-    awareness_cmap = mcolors.ListedColormap(colours_list)
-    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
-    sm = ScalarMappable(cmap=awareness_cmap, norm=norm)
+    kappa_cmap = mcolors.ListedColormap(colours_list)
+    norm = mcolors.Normalize(vmin=kappa_min, vmax=1.0)
+    sm = ScalarMappable(cmap=kappa_cmap, norm=norm)
     sm.set_array([])
     fig.colorbar(sm, cax=cbar_ax)
-    cbar_ax.set_ylabel(r"Human awareness $\phi$", fontsize=9)
+    cbar_ax.set_ylabel(r"Human velocity belief $\kappa$", fontsize=9)
 
     return fig, ax
 
@@ -319,7 +327,7 @@ def _load_result(path: str, episode: int) -> ExperimentResult:
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Render scene with agents coloured by human awareness")
+        description="Render scene with agents coloured by velocity kappa estimate")
     p.add_argument("path", type=str,
                    help="Run directory or .pkl results file")
     p.add_argument("--step", "-s", type=int, default=None,
@@ -334,6 +342,8 @@ def parse_args():
                    help="Hide planned paths")
     p.add_argument("--no-intervention", action="store_true",
                    help="Hide the intervention path")
+    p.add_argument("--kappa-min", type=float, default=0.3,
+                   help="Minimum kappa for colour scale (default: 0.3)")
     p.add_argument("--dpi", type=int, default=150)
     p.add_argument("--figsize", type=float, nargs=2, default=[14, 8],
                    metavar=("W", "H"))
@@ -366,6 +376,7 @@ def main():
     render_kwargs = dict(
         fps=result.fps,
         ego_goal=ego_goal,
+        kappa_min=args.kappa_min,
         show_paths=not args.no_paths,
         show_intervention=not args.no_intervention,
         margin=args.margin,
@@ -376,8 +387,9 @@ def main():
         os.makedirs(args.frames, exist_ok=True)
         n = len(result.steps)
         for i, sr in enumerate(result.steps):
-            fig, ax = create_kscene_figure(sr, scenario_map,
-                                           figsize=figsize, **render_kwargs)
+            fig, ax = create_kscene_velocity_figure(
+                sr, scenario_map, figsize=figsize,
+                **render_kwargs)
             frame_path = os.path.join(args.frames, f"frame_{i:04d}.png")
             fig.savefig(frame_path, dpi=args.dpi)
             plt.close(fig)
@@ -398,13 +410,17 @@ def main():
     sr = result.steps[step_idx]
     print(f"Rendering step {sr.step} (index {step_idx})")
 
-    # Print awareness info
-    if sr.human_awareness:
-        for aid, phi in sr.human_awareness.items():
-            print(f"  Agent {aid}: phi={phi:.3f}")
+    # Print velocity info
+    gt_kappa = sr.velocity_kappa_gt or {}
+    if gt_kappa:
+        for aid, k in gt_kappa.items():
+            print(f"  Agent {aid}: human kappa={k:.3f}")
+    else:
+        print("  No velocity belief data in this step record.")
 
-    fig, ax = create_kscene_figure(sr, scenario_map,
-                                   figsize=figsize, **render_kwargs)
+    fig, ax = create_kscene_velocity_figure(
+        sr, scenario_map, figsize=figsize,
+        **render_kwargs)
 
     if args.out:
         fig.savefig(args.out, dpi=args.dpi, bbox_inches='tight')

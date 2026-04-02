@@ -3116,3 +3116,237 @@ class BeliefEvolutionPlotter:
         self._fig.tight_layout()
         self._fig.canvas.draw()
         self._fig.canvas.flush_events()
+
+
+class VelocityEvolutionPlotter:
+    """Live plot: human velocity beliefs vs vehicle estimate.
+
+    Mirrors :class:`BeliefEvolutionPlotter` but for the velocity scaling
+    factor kappa instead of awareness phi.
+
+    Top panel: per-agent kappa over time —
+      - Human's actual kappa (thick, semi-transparent) evolving via the
+        perception model.
+      - Vehicle's estimate (weighted mean from velocity particles) with
+        +-1 std uncertainty band.
+
+    Bottom panels: per-agent particle weight distribution and ESS.
+
+    Args:
+        max_history: Maximum number of past steps to keep.
+    """
+
+    _AGENT_COLOURS = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+        '#9467bd', '#8c564b', '#e377c2', '#7f7f7f',
+    ]
+
+    def __init__(self, max_history: int = 300):
+        self._max_history = max_history
+
+        self._fig: Optional[plt.Figure] = None
+        self._ax: Optional[plt.Axes] = None
+        self._diag_axes: Dict[int, plt.Axes] = {}
+
+        # History
+        self._steps: List[int] = []
+        self._kappa_mean: Dict[int, List[float]] = {}
+        self._kappa_std: Dict[int, List[float]] = {}
+        self._kappa_ess: Dict[int, List[float]] = {}
+        self._human_kappa: Dict[int, List[float]] = {}
+        self._colour_map: Dict[int, str] = {}
+
+        self._n_diag_agents: int = 0
+
+    def _get_colour(self, aid: int) -> str:
+        if aid not in self._colour_map:
+            idx = len(self._colour_map)
+            self._colour_map[aid] = self._AGENT_COLOURS[idx % len(self._AGENT_COLOURS)]
+        return self._colour_map[aid]
+
+    def _init(self, n_diag_agents: int = 0):
+        plt.ion()
+        n_rows = 1 + n_diag_agents
+        height = 4 + 2.5 * n_diag_agents
+        ratios = [4] + [2.5] * n_diag_agents
+        self._fig, axes = plt.subplots(
+            n_rows, 1, figsize=(10, height),
+            gridspec_kw={'height_ratios': ratios},
+            squeeze=False)
+        self._ax = axes[0, 0]
+        self._diag_axes = {}
+        self._n_diag_agents = n_diag_agents
+
+    def reset(self):
+        """Clear history."""
+        self._steps = []
+        self._kappa_mean = {}
+        self._kappa_std = {}
+        self._kappa_ess = {}
+        self._human_kappa = {}
+        self._n_diag_agents = 0
+
+    def update(self, velocity_particles: Dict, step: int,
+               gt_kappa: Optional[Dict[int, float]] = None):
+        """Append data and redraw.
+
+        Args:
+            velocity_particles: {agent_id: VelocityParticles} — the
+                current velocity particle objects.
+            step: Simulation step number.
+            gt_kappa: {agent_id: kappa} — human's current kappa values
+                (evolving over time via the perception model).
+        """
+        if not velocity_particles:
+            return
+
+        agent_ids = sorted(velocity_particles.keys())
+        n_diag = len(agent_ids)
+
+        if self._fig is None or not plt.fignum_exists(self._fig.number):
+            self._init(n_diag)
+        elif n_diag != self._n_diag_agents and n_diag > 0:
+            plt.close(self._fig)
+            self._init(n_diag)
+
+        self._steps.append(step)
+
+        # Append per-agent kappa statistics
+        for aid in agent_ids:
+            vp = velocity_particles[aid]
+            mean_k = vp.weighted_mean()
+            std_k = vp.weighted_std()
+            ess = vp.effective_sample_size()
+
+            if aid not in self._kappa_mean:
+                self._kappa_mean[aid] = [1.0] * (len(self._steps) - 1)
+                self._kappa_std[aid] = [0.0] * (len(self._steps) - 1)
+                self._kappa_ess[aid] = [0.0] * (len(self._steps) - 1)
+            self._kappa_mean[aid].append(mean_k)
+            self._kappa_std[aid].append(std_k)
+            self._kappa_ess[aid].append(ess)
+
+            # Human's actual kappa
+            if gt_kappa is not None and aid in gt_kappa:
+                if aid not in self._human_kappa:
+                    self._human_kappa[aid] = [gt_kappa[aid]] * (len(self._steps) - 1)
+                self._human_kappa[aid].append(gt_kappa[aid])
+            elif aid in self._human_kappa:
+                prev = self._human_kappa[aid][-1] if self._human_kappa[aid] else 1.0
+                self._human_kappa[aid].append(prev)
+
+        # Fill missing agents
+        for aid in list(self._kappa_mean.keys()):
+            if aid not in agent_ids:
+                prev = self._kappa_mean[aid][-1] if self._kappa_mean[aid] else 1.0
+                self._kappa_mean[aid].append(prev)
+                self._kappa_std[aid].append(0.0)
+                self._kappa_ess[aid].append(0.0)
+
+        # Trim history
+        if len(self._steps) > self._max_history:
+            excess = len(self._steps) - self._max_history
+            self._steps = self._steps[excess:]
+            for d in (self._kappa_mean, self._kappa_std, self._kappa_ess,
+                      self._human_kappa):
+                for aid in d:
+                    d[aid] = d[aid][excess:]
+
+        # --- Redraw main panel ---
+        ax = self._ax
+        ax.cla()
+
+        ax.set_ylim(-0.05, 1.15)
+        ax.set_xlabel('Step', fontsize=9)
+        ax.set_ylabel('Velocity scale  \u03ba', fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+        # Reference line at kappa=1 (no velocity error)
+        ax.axhline(y=1.0, color='grey', linestyle='--', linewidth=1.2,
+                   alpha=0.6, label='\u03ba = 1 (no error)')
+
+        steps = self._steps
+        all_aids = sorted(
+            set(self._kappa_mean.keys()) | set(self._human_kappa.keys()))
+
+        for aid in all_aids:
+            colour = self._get_colour(aid)
+
+            # Human's actual kappa — evolving line (thick, semi-transparent)
+            if aid in self._human_kappa:
+                h_vals = self._human_kappa[aid]
+                n_h = min(len(steps), len(h_vals))
+                ax.plot(steps[:n_h], h_vals[:n_h], color=colour,
+                        linewidth=2.5, alpha=0.5, linestyle='-',
+                        label=f'Human {aid}')
+
+            # Vehicle estimate (weighted mean)
+            if aid in self._kappa_mean:
+                n = min(len(steps), len(self._kappa_mean[aid]))
+                means = self._kappa_mean[aid][:n]
+                stds = self._kappa_std[aid][:n]
+                ax.plot(steps[:n], means, color=colour,
+                        linewidth=1.8, alpha=0.9,
+                        marker='.', markersize=2,
+                        label=f'Veh. est. {aid}')
+
+                # +-1 std band
+                means_arr = np.array(means)
+                stds_arr = np.array(stds)
+                ax.fill_between(
+                    steps[:n],
+                    np.clip(means_arr - stds_arr, 0, 1.1),
+                    np.clip(means_arr + stds_arr, 0, 1.1),
+                    color=colour, alpha=0.15)
+
+        ax.legend(fontsize=7, loc='best', framealpha=0.8)
+        ax.set_title(
+            f'Human Beliefs vs Vehicle Estimate (\u03ba)  |  step {step}',
+            fontsize=10)
+
+        # --- Diagnostic subplots: per-agent particle weights + ESS ---
+        fig_axes = self._fig.get_axes()
+        for row_idx, aid in enumerate(agent_ids):
+            ax_idx = 1 + row_idx
+            if ax_idx >= len(fig_axes):
+                break
+            dax = fig_axes[ax_idx]
+            dax.cla()
+
+            vp = velocity_particles[aid]
+            kappas = vp.kappa_values
+            weights = vp.weights
+            colour = self._get_colour(aid)
+
+            # Bar chart of current particle weights
+            dax.bar(kappas, weights, width=0.05, color=colour,
+                    edgecolor='black', alpha=0.8)
+
+            # Mean line (vehicle estimate)
+            mean_k = vp.weighted_mean()
+            dax.axvline(mean_k, color='red', linestyle='--',
+                        linewidth=1.5, label=f'est={mean_k:.2f}')
+
+            # Human's current kappa
+            if gt_kappa is not None:
+                h_k = gt_kappa.get(aid)
+                if h_k is not None:
+                    dax.axvline(h_k, color='green', linestyle='-',
+                                linewidth=2.0, alpha=0.7,
+                                label=f'human={h_k:.2f}')
+
+            dax.set_xlim(0, 1.1)
+            if weights:
+                dax.set_ylim(0, max(max(weights) * 1.3, 0.3))
+            dax.set_ylabel(f'Agent {aid}  w', fontsize=8)
+            dax.set_xlabel('\u03ba', fontsize=8)
+
+            # ESS annotation
+            ess = vp.effective_sample_size()
+            dax.legend(fontsize=6, loc='upper left', framealpha=0.7)
+            dax.set_title(f'Agent {aid}  ESS={ess:.1f}/{vp.K}', fontsize=9)
+            dax.grid(True, alpha=0.2)
+
+        self._fig.tight_layout()
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()

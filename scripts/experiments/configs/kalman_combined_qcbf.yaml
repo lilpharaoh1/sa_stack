@@ -1,0 +1,9 @@
+# MCTS-Kalman inference, combined intervention, QCBF reference controls.
+_base: defaults.yaml
+
+inference:
+  type: mcts_kalman
+
+intervention:
+  type: combined
+  ref_controls: mcts-qcbf

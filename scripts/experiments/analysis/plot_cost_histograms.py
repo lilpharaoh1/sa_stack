@@ -21,9 +21,12 @@ import dill
 import numpy as np
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
 
-from belief_utils import ExperimentResult, RESULTS_DIR
+from utils import ExperimentResult, RESULTS_DIR
 
 # ── NLP cost weights (SecondStagePlanner.DEFAULTS) ────────────────────
 _W = {'w_d': 10.0, 'w_v': 0.01, 'w_a': 1.0, 'w_delta': 2.0,

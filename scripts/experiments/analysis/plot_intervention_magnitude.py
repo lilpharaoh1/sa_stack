@@ -24,12 +24,15 @@ import matplotlib.colors as mcolors
 from matplotlib.cm import ScalarMappable
 from matplotlib.patches import Polygon as MplPolygon
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
 
 import igp2 as ip
 from igp2.opendrive.plot_map import plot_map
 from igp2.core.util import calculate_multiple_bboxes
-from belief_utils import ExperimentResult, StepRecord
+from utils import ExperimentResult, StepRecord
 
 # ---------------------------------------------------------------------------
 # Colours

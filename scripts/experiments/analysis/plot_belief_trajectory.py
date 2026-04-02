@@ -22,11 +22,12 @@ from collections import defaultdict
 import dill
 import numpy as np
 
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_script_dir, "..", ".."))
-sys.path.insert(0, _script_dir)
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
 
-from belief_utils import ExperimentResult, RESULTS_DIR
+from utils import ExperimentResult, RESULTS_DIR
 from plot_comparison import (
     _composite_key, _sort_keys, _group_label,
 )

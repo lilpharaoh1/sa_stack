@@ -1,0 +1,9 @@
+# MCTS-Naive inference, agency-only intervention, QCBF reference controls.
+_base: defaults.yaml
+
+inference:
+  type: mcts_naive
+
+intervention:
+  type: agency_only
+  ref_controls: mcts-qcbf

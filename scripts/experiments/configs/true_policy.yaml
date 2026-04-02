@@ -1,0 +1,10 @@
+# Always use the true (ground-truth) policy — safety/agency baseline.
+# Human policy still runs (for comparison) but the true policy action
+# is executed every step. No inference overhead.
+_base: defaults.yaml
+
+inference:
+  type: none
+
+intervention:
+  type: always_policy

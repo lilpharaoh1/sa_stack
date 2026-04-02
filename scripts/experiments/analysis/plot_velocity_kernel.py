@@ -1,25 +1,31 @@
 """
-Visualise the dual-RBF awareness kernel on a road layout.
+Visualise the velocity attention kernel on a road layout.
 
-For a given ego position and heading, computes the world-frame feature value
-at every point in a grid.  Overlays the result as a heatmap on the road map.
+For a given ego position, heading, and awareness (phi), computes the
+velocity feature f_kappa at every point in a grid.  Overlays the result
+as a heatmap on the road map.
 
-The feature used matches what the Kalman awareness filter actually computes:
-  - RBF 1: omnidirectional proximity (narrow spread sigma_1)
-  - RBF 2: forward field-of-view gated (wider spread sigma_2)
+The feature is:  f_kappa = RBF(sigma) * FOV_gate * phi_i
+
+Uses a single FOV-gated RBF (no omnidirectional component), reflecting
+that velocity estimation requires direct visual observation.
+
+Two panels are shown:
+  1. Spatial kernel (dual-RBF) — ignoring phi gating
+  2. Full kernel (dual-RBF * phi) — what actually drives kappa updates
 
 Usage:
     # Single ego pose on a scenario map:
-    python scripts/experiments/plot_attention_kernel.py -m belief_experiment4 \
+    python scripts/experiments/analysis/plot_velocity_kernel.py -m belief_experiment5 \
         --ego-x 50 --ego-y -2 --ego-heading 0
 
     # From a results file (uses ego pose at a given step):
-    python scripts/experiments/plot_attention_kernel.py --from-result results/my_run/ \
+    python scripts/experiments/analysis/plot_velocity_kernel.py --from-result results/my_run/ \
         --step 10
 
     # Adjust kernel parameters:
-    python scripts/experiments/plot_attention_kernel.py -m belief_experiment4 \
-        --ego-x 50 --ego-y -2 --ego-heading 0 --sigma1 10 --sigma2 30
+    python scripts/experiments/analysis/plot_velocity_kernel.py -m belief_experiment5 \
+        --ego-x 50 --ego-y -2 --ego-heading 0 --sigma1 15 --sigma2 25 --fov 30
 """
 
 import sys
@@ -31,58 +37,60 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
 
 import igp2 as ip
 from igp2.opendrive.plot_map import plot_map
-from igp2.beliefcontrol.kalman_awareness import compute_feature_world
+from igp2.beliefcontrol.velocity_particles import compute_velocity_feature
 
 
-def plot_attention_kernel(
+def plot_velocity_kernel(
         scenario_map,
         ego_x: float,
         ego_y: float,
         ego_heading: float = 0.0,
-        sigma_1: float = 15.0,
-        sigma_2: float = 25.0,
+        sigma: float = 25.0,
         fov_half_angle: float = math.radians(30),
-        w1: float = 0.7,
-        w2: float = 0.3,
         grid_res: float = 0.5,
         extent: float = 50.0,
-        figsize=(18, 6),
+        figsize=(12, 6),
         participant_positions=None,
+        participant_phis=None,
+        participant_kappas=None,
 ):
-    """Plot the world-frame awareness kernel as a heatmap on the road map.
+    """Plot the velocity feature kernel as a heatmap on the road map.
+
+    FOV-gated RBF kernel:
+      f_kappa = RBF(sigma) * FOV_gate * phi_i
 
     Args:
         scenario_map: Parsed road map.
         ego_x, ego_y: Ego world position.
         ego_heading: Ego heading (radians).
-        sigma_1: Narrow RBF spread (omnidirectional).
-        sigma_2: Wide RBF spread (forward-gated).
+        sigma: RBF spread (m).
         fov_half_angle: Half FOV angle (radians).
-        w1: Weight for omnidirectional RBF.
-        w2: Weight for forward RBF.
         grid_res: Grid resolution in metres.
         extent: How far from ego to evaluate (metres).
         figsize: Figure size.
-        participant_positions: Optional list of (x, y) to mark on the plot.
+        participant_positions: Optional list of (x, y).
+        participant_phis: Optional list of phi values (same order).
+        participant_kappas: Optional list of kappa values (same order).
 
     Returns:
         (fig, axes) tuple.
     """
     ego_xy = np.array([ego_x, ego_y], dtype=float)
 
-    # Build evaluation grid (world coordinates)
+    # Build evaluation grid
     xs = np.arange(ego_x - extent, ego_x + extent + grid_res, grid_res)
     ys = np.arange(ego_y - extent, ego_y + extent + grid_res, grid_res)
     XX, YY = np.meshgrid(xs, ys)
 
-    # Compute feature components at each grid point
-    F_total = np.zeros_like(XX)
-    F_rbf1 = np.zeros_like(XX)
-    F_rbf2 = np.zeros_like(XX)
+    # Compute spatial kernel (phi=1)
+    F_spatial = np.zeros_like(XX)
 
     for i in range(XX.shape[0]):
         for j in range(XX.shape[1]):
@@ -90,34 +98,27 @@ def plot_attention_kernel(
             diff = p_xy - ego_xy
             dist_sq = float(np.dot(diff, diff))
 
-            rbf1 = math.exp(-dist_sq / (2.0 * sigma_1 ** 2))
-
-            rbf2 = math.exp(-dist_sq / (2.0 * sigma_2 ** 2))
+            rbf = math.exp(-dist_sq / (2.0 * sigma ** 2))
             angle_to = math.atan2(diff[1], diff[0])
             rel_angle = (angle_to - ego_heading + math.pi) % (2.0 * math.pi) - math.pi
             if abs(rel_angle) > fov_half_angle:
-                rbf2 = 0.0
+                rbf = 0.0
 
-            F_rbf1[i, j] = w1 * rbf1
-            F_rbf2[i, j] = w2 * rbf2
-            F_total[i, j] = w1 * rbf1 + w2 * rbf2
+            F_spatial[i, j] = rbf
 
-    # --- Figure: 3 panels ---
-    fig, axes = plt.subplots(1, 3, figsize=(figsize[0], figsize[1]))
+    # --- Figure: 2 panels ---
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
 
     fov_deg = math.degrees(fov_half_angle)
     panels = [
-        (F_rbf1,
-         f'w\u2081\u00b7RBF\u2081: Omnidirectional '
-         f'(w\u2081={w1:.1f}, \u03c3\u2081={sigma_1:.1f}m)'),
-        (F_rbf2,
-         f'w\u2082\u00b7RBF\u2082: Forward FOV \u00b1{fov_deg:.0f}\u00b0 '
-         f'(w\u2082={w2:.1f}, \u03c3\u2082={sigma_2:.1f}m)'),
-        (F_total,
-         f'Combined f(s) = {w1:.1f}\u00b7RBF\u2081 + {w2:.1f}\u00b7RBF\u2082'),
+        (F_spatial,
+         f'Spatial: RBF(\u03c3={sigma:.0f}m) \u00b7 FOV\u00b1{fov_deg:.0f}\u00b0'),
+        (F_spatial,
+         f'Full: RBF \u00b7 FOV \u00b7 \u03c6\u1d62 '
+         f'(per-agent \u03c6 shown at markers)'),
     ]
 
-    # FOV cone boundary lines in world coordinates
+    # FOV cone boundary lines
     cone_len = extent * 0.7
     cone_lines = []
     for sign in [-1, 1]:
@@ -133,7 +134,7 @@ def plot_attention_kernel(
 
         # Heatmap
         vmax = max(F.max(), 1e-6)
-        im = ax.pcolormesh(XX, YY, F, cmap='YlOrRd', alpha=0.6,
+        im = ax.pcolormesh(XX, YY, F, cmap='PuBu', alpha=0.6,
                            shading='auto', vmin=0, vmax=vmax, zorder=3)
         fig.colorbar(im, ax=ax, shrink=0.6, pad=0.02)
 
@@ -155,14 +156,31 @@ def plot_attention_kernel(
 
         # Participant markers
         if participant_positions:
-            for px, py in participant_positions:
+            phis = participant_phis or [1.0] * len(participant_positions)
+            kappas = participant_kappas or [None] * len(participant_positions)
+            for idx, (px, py) in enumerate(participant_positions):
+                phi_i = phis[idx] if idx < len(phis) else 1.0
+                kappa_i = kappas[idx] if idx < len(kappas) else None
+
                 p_xy = np.array([px, py], dtype=float)
-                f_val = compute_feature_world(
+                f_val = compute_velocity_feature(
                     ego_xy, ego_heading, p_xy,
-                    sigma_1, sigma_2, fov_half_angle, w1, w2)
+                    phi_i=phi_i,
+                    sigma=sigma,
+                    fov_half_angle=fov_half_angle)
+                f_spatial = compute_velocity_feature(
+                    ego_xy, ego_heading, p_xy,
+                    phi_i=1.0,
+                    sigma=sigma,
+                    fov_half_angle=fov_half_angle)
+
                 ax.plot(px, py, 's', color='blue', markersize=10,
                         markeredgecolor='black', zorder=11)
-                ax.text(px + 1.5, py + 1.5, f'f={f_val:.3f}',
+                parts = [f'f_\u03ba={f_val:.3f}',
+                         f'\u03c6={phi_i:.2f}']
+                if kappa_i is not None:
+                    parts.append(f'\u03ba={kappa_i:.2f}')
+                ax.text(px + 1.5, py + 1.5, '\n'.join(parts),
                         fontsize=7, zorder=11,
                         bbox=dict(boxstyle='round,pad=0.2',
                                   facecolor='white', alpha=0.8))
@@ -176,7 +194,7 @@ def plot_attention_kernel(
         ax.set_title(title, fontsize=10)
 
     fig.suptitle(
-        f'Awareness Kernel (World)  |  '
+        f'Velocity Kernel (World)  |  '
         f'ego=({ego_x:.1f}, {ego_y:.1f}), '
         f'heading={math.degrees(ego_heading):.1f}\u00b0',
         fontsize=12)
@@ -186,7 +204,7 @@ def plot_attention_kernel(
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Visualise world-frame dual-RBF awareness kernel on road layout")
+        description="Visualise velocity attention kernel on road layout")
     p.add_argument("-m", "--map", type=str, default=None,
                    help="Scenario config name under scenarios/configs/")
     p.add_argument("--from-result", type=str, default=None,
@@ -199,21 +217,15 @@ def parse_args():
     p.add_argument("--ego-y", type=float, default=None)
     p.add_argument("--ego-heading", type=float, default=None,
                    help="Ego heading in degrees (default: 0)")
-    p.add_argument("--sigma1", type=float, default=15.0,
-                   help="Narrow RBF spread (default: 15.0)")
-    p.add_argument("--sigma2", type=float, default=25.0,
-                   help="Wide RBF spread (default: 25.0)")
+    p.add_argument("--sigma", type=float, default=25.0,
+                   help="RBF spread (default: 25.0)")
     p.add_argument("--fov", type=float, default=30.0,
                    help="Half FOV angle in degrees (default: 30)")
-    p.add_argument("--w1", type=float, default=0.7,
-                   help="Weight for omnidirectional RBF (default: 0.7)")
-    p.add_argument("--w2", type=float, default=0.3,
-                   help="Weight for forward RBF (default: 0.3)")
     p.add_argument("--extent", type=float, default=50.0,
                    help="Grid extent from ego in metres (default: 50)")
     p.add_argument("--grid-res", type=float, default=0.5,
                    help="Grid resolution in metres (default: 0.5)")
-    p.add_argument("--figsize", type=float, nargs=2, default=[18, 6],
+    p.add_argument("--figsize", type=float, nargs=2, default=[12, 6],
                    metavar=("W", "H"))
     p.add_argument("-o", "--out", type=str, default=None,
                    help="Save figure to file")
@@ -228,11 +240,12 @@ def main():
     ego_x, ego_y = args.ego_x, args.ego_y
     ego_heading = math.radians(args.ego_heading) if args.ego_heading is not None else 0.0
     participant_positions = []
+    participant_phis = []
+    participant_kappas = []
 
     if args.from_result:
         import dill
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from belief_utils import ExperimentResult, RESULTS_DIR
+        from utils import ExperimentResult, RESULTS_DIR
 
         run_dir = args.from_result
         if not os.path.isdir(run_dir):
@@ -253,10 +266,14 @@ def main():
         if sr.ego_heading is not None:
             ego_heading = float(sr.ego_heading)
 
-        # Participant positions at this step
+        # Participant positions, awareness, kappa at this step
+        awareness = sr.human_awareness or {}
+        gt_kappa = sr.velocity_kappa_gt or {}
         for aid, state in sr.dynamic_agents.items():
             participant_positions.append(
                 (float(state.position[0]), float(state.position[1])))
+            participant_phis.append(awareness.get(aid, 1.0))
+            participant_kappas.append(gt_kappa.get(aid, 1.0))
 
         map_path = result.config.get("scenario", {}).get("map_path")
         if map_path:
@@ -282,20 +299,19 @@ def main():
         print("Error: provide --ego-x/--ego-y or --from-result")
         sys.exit(1)
 
-    fig, axes = plot_attention_kernel(
+    fig, axes = plot_velocity_kernel(
         scenario_map,
         ego_x=ego_x,
         ego_y=ego_y,
         ego_heading=ego_heading,
-        sigma_1=args.sigma1,
-        sigma_2=args.sigma2,
+        sigma=args.sigma,
         fov_half_angle=math.radians(args.fov),
-        w1=args.w1,
-        w2=args.w2,
         grid_res=args.grid_res,
         extent=args.extent,
         figsize=tuple(args.figsize),
         participant_positions=participant_positions or None,
+        participant_phis=participant_phis or None,
+        participant_kappas=participant_kappas or None,
     )
 
     if args.out:

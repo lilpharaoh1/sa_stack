@@ -29,7 +29,10 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 from matplotlib.transforms import Affine2D
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
 
 from igp2.beliefcontrol.kalman_awareness import compute_feature_world
 

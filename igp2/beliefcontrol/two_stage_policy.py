@@ -323,11 +323,13 @@ class TwoStagePolicy:
 
         # --- Stage 2: Second Stage ---
         t_nlp_start = time.time()
+        _prev_a = float(self._prev_nlp_controls[0, 0]) if self._prev_nlp_controls is not None else None
         nlp_states, nlp_controls, nlp_ok, nlp_debug = self._second_stage.solve(
             frenet_state, warm_states, warm_controls,
             road_left, road_right, obstacles,
             analyse_duals=self.analyse_duals,
-            step_label=self._step_count)
+            step_label=self._step_count,
+            prev_accel=_prev_a)
         t_nlp = time.time() - t_nlp_start
 
         tag = f" ({self.label})" if self.label else ""

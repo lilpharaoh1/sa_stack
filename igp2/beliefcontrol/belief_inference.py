@@ -23,10 +23,14 @@ from igp2.beliefcontrol.longitudinal_planners import (
 )
 from igp2.beliefcontrol.plotting import (
     InferencePlotter, InterventionPlotter,
-    MCTSBeliefPlotter, MCTSTreePlotter,
-    MCTSNodePlotter, MCTSInterventionPlotter,
+    MCTSTreePlotter, MCTSInterventionPlotter,
     MCTSResamplePlotter,
     BeliefEvolutionPlotter,
+    VelocityEvolutionPlotter,
+)
+from igp2.beliefcontrol.velocity_particles import (
+    VelocityParticles,
+    compute_velocity_feature,
 )
 from igp2.beliefcontrol.planning_utils import (
     milp_to_nlp_warmstart as _milp_to_nlp_warmstart,
@@ -72,8 +76,8 @@ class BeliefInference:
     Args:
         policy: TwoStagePolicy instance (used to extract planning config).
         scenario_map: Road layout for boundary queries.
-        warmup_fraction: Fraction of planning horizon needed before
-            inference starts.
+        warmup_fraction: Maximum history window as a fraction of the
+            planning horizon (naive inference only).
         relevance_s_margin: Longitudinal margin for relevant agent
             detection (m).
         relevance_d_threshold: Maximum lateral offset for relevance (m).
@@ -108,7 +112,13 @@ class BeliefInference:
                  mcts_resample_eta: float = 0.7,
                  planning_mode: str = '2d',
                  ref_controls: str = 'opt',
-                 human_type: str = 'static'):
+                 human_type: str = 'static',
+                 # Velocity particle parameters
+                 n_kappa_particles: int = 0,
+                 kappa_min: float = 0.3,
+                 b_kappa: float = 0.1,
+                 q_kappa: float = 0.001,
+                 plot_mcts_tree: bool = False):
         if relevance_method not in self.RELEVANCE_METHODS:
             raise ValueError(
                 f"Unknown relevance_method {relevance_method!r}. "
@@ -143,7 +153,7 @@ class BeliefInference:
         self._fps = policy.fps
         self._dt_sim = 1.0 / self._fps
 
-        # Warmup: number of planning steps worth of history needed
+        # Max history window for naive inference (in planning steps)
         self._warmup_steps = max(1, int(self._warmup_fraction * self._horizon))
 
         self._wheelbase = policy.wheelbase
@@ -198,12 +208,22 @@ class BeliefInference:
         self._last_results: Optional[List[InferenceResult]] = None
         self._last_observed_sd: Optional[np.ndarray] = None
         self._last_intervention = None  # dict or None
+        self._last_qcbf_trajectory = None  # coarse MCTSTrajectory with intervention flags
         self._last_marginals: Dict[int, float] = {}  # P(hidden | τ_obs) per agent
         self._last_config_probs: List[float] = []     # P(b | τ_obs) per config
         self._last_energies: List[float] = []          # E(b) per config
 
         # Ground-truth visibility from config {aid: True if visible}
         self._gt_visibility: Dict[int, bool] = {}
+        # Ground-truth κ from config {aid: true κ value}
+        self._gt_kappa: Dict[int, float] = {}
+
+        # Velocity particle state
+        self._n_kappa_particles = n_kappa_particles
+        self._kappa_min = kappa_min
+        self._b_kappa = b_kappa
+        self._q_kappa = q_kappa
+        self._velocity_particles: Dict[int, VelocityParticles] = {}
 
         # Human's own Kalman filter (predict-only, initialised from config)
         self._human_kalman: Optional[object] = None
@@ -267,23 +287,17 @@ class BeliefInference:
         self._kalman_awareness = None  # created on first mcts_kalman call
 
         # MCTS debug plotters
-        self._mcts_belief_plotter: Optional[MCTSBeliefPlotter] = None
         self._mcts_tree_plotter: Optional[MCTSTreePlotter] = None
-        self._mcts_node_plotter: Optional[MCTSNodePlotter] = None
         self._mcts_intervention_plotter: Optional['MCTSInterventionPlotter'] = None
         self._mcts_resample_plotter: Optional[MCTSResamplePlotter] = None
         if plot and inference_type in ('mcts_naive', 'mcts_resample', 'mcts_kalman') and self._frenet is not None:
-            self._mcts_belief_plotter = MCTSBeliefPlotter(
-                hidden_threshold=self._hidden_threshold)
             mcts_horizon = self._mcts_planner._horizon  # coarse horizon
-            self._mcts_tree_plotter = MCTSTreePlotter(
-                self._frenet, mcts_horizon, self._dt)
-            self._mcts_node_plotter = MCTSNodePlotter(
-                scenario_map, policy.reference_waypoints, self._frenet,
-                ego_length=self._ego_length, ego_width=self._ego_width)
             self._mcts_intervention_plotter = MCTSInterventionPlotter(
                 scenario_map, policy.reference_waypoints, self._frenet,
                 ego_length=self._ego_length, ego_width=self._ego_width)
+            if plot_mcts_tree:
+                self._mcts_tree_plotter = MCTSTreePlotter(
+                    self._frenet, mcts_horizon, self._dt)
             if inference_type == 'mcts_resample':
                 self._mcts_resample_plotter = MCTSResamplePlotter(
                     self._frenet, mcts_horizon, self._dt)
@@ -293,6 +307,11 @@ class BeliefInference:
         if plot and inference_type != 'none':
             self._belief_evolution_plotter = BeliefEvolutionPlotter(
                 awareness_threshold=0.5)
+
+        # Velocity evolution plotter (when particles are active)
+        self._velocity_evolution_plotter: Optional[VelocityEvolutionPlotter] = None
+        if plot and n_kappa_particles > 0:
+            self._velocity_evolution_plotter = VelocityEvolutionPlotter()
 
     def reset(self):
         """Clear history and results."""
@@ -305,11 +324,10 @@ class BeliefInference:
         self._last_intervention = None
         self._mcts_belief_state = None
         self._kalman_awareness = None
+        self._velocity_particles = {}
         self._human_kalman = None
         self._first_stage.reset()
         self._second_stage.reset()
-        if self._mcts_belief_plotter is not None:
-            self._mcts_belief_plotter.reset()
 
     def set_ground_truth_visibility(self, gt: Dict[int, bool]):
         """Store ground-truth visibility for Kalman initialisation.
@@ -318,6 +336,17 @@ class BeliefInference:
             gt: {agent_id: True if visible, False if hidden}.
         """
         self._gt_visibility = dict(gt)
+
+    def set_ground_truth_kappa(self, gt_kappa: Dict[int, float]):
+        """Store ground-truth velocity scaling factors.
+
+        Derived from the config's ``velocity_error``:
+        κ = 1 + velocity_error  (e.g. vel_err = -0.3 → κ = 0.7).
+
+        Args:
+            gt_kappa: {agent_id: true κ value in [κ_min, 1.0]}.
+        """
+        self._gt_kappa = dict(gt_kappa)
 
     def step(self, frenet_state: np.ndarray,
              other_agent_states: Dict[int, AgentState],
@@ -424,10 +453,11 @@ class BeliefInference:
                     intervention_aids,
                     ego_position=ego_position, step_count=step_count,
                     ego_heading=ego_heading,
-                    true_obstacles=true_obstacles)
+                    true_obstacles=true_obstacles,
+                    human_action=human_action)
                 _t_intervention = _time.perf_counter() - _t0_interv
         else:
-            # Naive mode: use available history up to warmup window size
+            # Naive mode: use available history up to max window size
             import time as _time
             _t_infer_start = _time.perf_counter()
             _t_relevance = 0.0
@@ -485,7 +515,8 @@ class BeliefInference:
                     ego_heading=ego_heading,
                     true_obstacles=true_obstacles,
                     true_policy_result=true_policy_result,
-                    human_policy_result=human_policy_result)
+                    human_policy_result=human_policy_result,
+                    human_action=human_action)
                 _t_intervention = _time.perf_counter() - _t0_interv
 
         self._last_results = results
@@ -506,12 +537,6 @@ class BeliefInference:
                 marginals=marginals if relevant_aids else {},
                 ego_heading=ego_heading)
 
-        if (self._mcts_belief_plotter is not None
-                and self._mcts_belief_state is not None):
-            self._mcts_belief_plotter.update(
-                self._mcts_belief_state, step_count,
-                n_trajectories=len(results))
-
         if (self._mcts_tree_plotter is not None
                 and self._mcts_planner is not None
                 and self._mcts_planner._last_root is not None):
@@ -520,14 +545,6 @@ class BeliefInference:
                 getattr(self, '_last_road_left', np.zeros(1)),
                 getattr(self, '_last_road_right', np.zeros(1)),
                 step_count)
-
-        if (self._mcts_node_plotter is not None
-                and self._mcts_planner is not None
-                and self._mcts_planner._last_root is not None):
-            self._mcts_node_plotter.update(
-                self._mcts_planner._last_root,
-                step_count,
-                other_agent_states=other_agent_states)
 
         if (self._mcts_resample_plotter is not None
                 and self._mcts_planner is not None
@@ -561,6 +578,11 @@ class BeliefInference:
                 phi=kalman_phi, phi_bounds=kalman_bounds,
                 human_phi=human_phi,
                 kalman_diagnostics=kalman_diag)
+
+        if self._velocity_evolution_plotter is not None and self._velocity_particles:
+            self._velocity_evolution_plotter.update(
+                self._velocity_particles, step_count,
+                gt_kappa=self._gt_kappa)
 
         _t_plot = _time.perf_counter() - _t_plot_start
         _t_total = _time.perf_counter() - _t_infer_start
@@ -677,6 +699,42 @@ class BeliefInference:
 
         return results, marginals, t_elapsed
 
+    def _belief_from_marginals(self, configs, agent_ids, velocity_particles):
+        """Compute config probabilities from marginals + particle weights.
+
+        Uses the current belief marginals for P(visible) per agent, and
+        distributes visible probability mass across κ particles using
+        their current weights.  This is the non-Kalman counterpart of
+        ``KalmanAwareness.compute_b_theta``.
+        """
+        marginals = self._last_marginals if self._last_marginals else {}
+
+        b_theta = {}
+        for cfg in configs:
+            prob = 1.0
+            for i, aid in enumerate(agent_ids):
+                p_vis = 1.0 - marginals.get(aid, 0.5)
+                v = cfg[i]
+                if v == 0:
+                    prob *= (1.0 - p_vis)
+                elif velocity_particles is not None and aid in velocity_particles:
+                    vp = velocity_particles[aid]
+                    k_idx = v - 1
+                    if 0 <= k_idx < vp.K:
+                        prob *= p_vis * vp.weights[k_idx]
+                    else:
+                        prob *= p_vis / max(vp.K, 1)
+                else:
+                    prob *= p_vis
+            b_theta[cfg] = prob
+
+        total = sum(b_theta.values())
+        if total > 1e-30:
+            for cfg in b_theta:
+                b_theta[cfg] /= total
+
+        return b_theta
+
     def _run_mcts_inference(self, current_frenet: np.ndarray,
                             other_agent_states: Dict[int, AgentState],
                             observed_sd: np.ndarray,
@@ -691,6 +749,13 @@ class BeliefInference:
         Runs every timestep using the current ego Frenet state directly.
         Maintains a persistent belief state across timesteps that is
         updated via Boltzmann inference on the human's observed action.
+
+        When velocity particles are active (``n_kappa_particles > 0``),
+        the belief state uses extended configs {0, 1, ..., K} and the
+        MCTS tree uses κ-scaled collision checking.  Particle
+        propagation and reweighting happen between planning steps, but
+        no evolving awareness dynamics (Kalman) are simulated during
+        tree expansion.
 
         Returns:
             (results, marginals, elapsed_time)
@@ -718,27 +783,139 @@ class BeliefInference:
             obstacles = self._predict_obstacles_cv(other_agent_states, all_dynamic_aids)
         _t_obs = _time.perf_counter() - _t0
 
+        # --- Manage velocity particles ---
+        K = self._n_kappa_particles
+        vp_dict = None
+        if K > 0:
+            dynamic_all = sorted({obs['agent_id'] for obs in obstacles
+                                  if obs['agent_id'] >= 0})
+            for aid in dynamic_all:
+                if aid not in self._velocity_particles:
+                    self._velocity_particles[aid] = VelocityParticles(
+                        K=K, kappa_min=self._kappa_min)
+            for aid in list(self._velocity_particles):
+                if aid not in dynamic_all:
+                    del self._velocity_particles[aid]
+            vp_dict = self._velocity_particles
+
         # Manage persistent belief state
         dynamic_aids = sorted({obs['agent_id'] for obs in obstacles
                                if obs['agent_id'] >= 0})
         if (self._mcts_belief_state is None
-                or self._mcts_belief_state.agent_ids != dynamic_aids):
-            self._mcts_belief_state = BeliefState(dynamic_aids)
+                or self._mcts_belief_state.agent_ids != dynamic_aids
+                or self._mcts_belief_state.n_kappa != K):
+            self._mcts_belief_state = BeliefState(dynamic_aids, n_kappa=K)
+
+        # When using velocity particles, recompute belief probs from
+        # current marginals + particle weights so updated particles are
+        # reflected before the next search.
+        if K > 0 and self._last_marginals:
+            b_theta = self._belief_from_marginals(
+                self._mcts_belief_state.configs, dynamic_aids, vp_dict)
+            self._mcts_belief_state._probs = b_theta
 
         t_start = time.perf_counter()
 
-        # Run per-belief MCTS search
+        # Run per-belief MCTS search.
+        # When K > 0 we handle the Boltzmann update externally so that
+        # we can also reweight velocity particles from the same likelihoods.
         trajectories, self._mcts_belief_state = self._mcts_planner.search(
             current_frenet, road_left, road_right, obstacles,
             prev_action=prev_action,
             belief=self._mcts_belief_state,
-            human_action=human_action)
+            human_action=None if K > 0 else human_action,
+            velocity_particles=vp_dict)
 
         # Store for tree plotter
         self._last_road_left = road_left
         self._last_road_right = road_right
 
         t_mcts = time.perf_counter() - t_start
+
+        # --- Velocity particle update (between planning steps) ---
+        if K > 0:
+            # Ego world position + heading (from Frenet)
+            w = self._frenet.frenet_to_world(
+                float(current_frenet[0]), float(current_frenet[1]),
+                heading=float(current_frenet[2]))
+            ego_xy = np.array([w['x'], w['y']], dtype=float)
+            ego_heading = w['heading']
+
+            participant_xys = {}
+            for aid in dynamic_aids:
+                if aid in other_agent_states:
+                    pos = other_agent_states[aid].position
+                    participant_xys[aid] = np.array(pos[:2], dtype=float)
+
+            # Awareness from current marginals (for f_kappa gating)
+            cur_marginals = self._mcts_belief_state.marginals()
+
+            # Propagate particles (drift toward κ=1)
+            for i, aid in enumerate(dynamic_aids):
+                if aid in self._velocity_particles and aid in participant_xys:
+                    phi_i = 1.0 - cur_marginals.get(aid, 0.5)
+                    f_kappa = compute_velocity_feature(
+                        ego_xy, ego_heading, participant_xys[aid],
+                        phi_i=phi_i)
+                    self._velocity_particles[aid].propagate(
+                        f_kappa, b_kappa=self._b_kappa, q_kappa=self._q_kappa)
+                    logger.info("[Step %4d] VelParticle agent %d: f_κ=%.4f "
+                                "κ=[%s] w=[%s] mean=%.3f",
+                                step_count, aid, f_kappa,
+                                ", ".join(f"{k:.3f}" for k in self._velocity_particles[aid].kappa_values),
+                                ", ".join(f"{w:.3f}" for w in self._velocity_particles[aid].weights),
+                                self._velocity_particles[aid].weighted_mean())
+
+            # Boltzmann observation update + particle reweighting
+            root = self._mcts_planner._last_root
+            logger.info("[Step %4d] VelParticle reweight gate: "
+                        "human_action=%s  root=%s  root.Q=%s",
+                        step_count,
+                        human_action is not None,
+                        root is not None,
+                        bool(root.Q) if root is not None else None)
+            if human_action is not None and root is not None and root.Q:
+                configs = self._mcts_belief_state.configs
+                likelihoods = self._compute_boltzmann_likelihoods(
+                    root, human_action, configs)
+
+                # Update belief probs with likelihoods
+                for cfg in configs:
+                    self._mcts_belief_state._probs[cfg] *= likelihoods.get(cfg, 1e-10)
+                total = sum(self._mcts_belief_state._probs.values())
+                if total > 1e-30:
+                    for cfg in self._mcts_belief_state._probs:
+                        self._mcts_belief_state._probs[cfg] /= total
+
+                # Reweight velocity particles
+                for i, aid in enumerate(dynamic_aids):
+                    if aid not in self._velocity_particles:
+                        continue
+                    vp = self._velocity_particles[aid]
+                    particle_likelihoods = []
+                    for j in range(vp.K):
+                        cfg_val = j + 1
+                        lk_sum = sum(
+                            likelihoods.get(cfg, 0.0)
+                            for cfg in configs if cfg[i] == cfg_val)
+                        particle_likelihoods.append(max(lk_sum, 1e-30))
+                    logger.info("[Step %4d] VelParticle PRE-reweight agent %d: "
+                                "likelihoods=[%s]",
+                                step_count, aid,
+                                ", ".join(f"{l:.6f}" for l in particle_likelihoods))
+                    vp.reweight(particle_likelihoods)
+                    logger.info("[Step %4d] VelParticle POST-reweight agent %d: "
+                                "κ=[%s] w=[%s] mean=%.3f ESS=%.2f",
+                                step_count, aid,
+                                ", ".join(f"{k:.3f}" for k in vp.kappa_values),
+                                ", ".join(f"{w:.3f}" for w in vp.weights),
+                                vp.weighted_mean(),
+                                vp.effective_sample_size())
+
+            # Recompute belief probs with updated particle weights
+            b_theta = self._belief_from_marginals(
+                self._mcts_belief_state.configs, dynamic_aids, vp_dict)
+            self._mcts_belief_state._probs = b_theta
 
         # Package trajectories for plotting
         results: List[InferenceResult] = []
@@ -833,6 +1010,26 @@ class BeliefInference:
 
         self._human_kalman.predict(ego_xy, ego_heading, participant_xys)
 
+        # --- Evolve human's true velocity belief (κ) ---
+        # Same dynamics as the particle propagation but deterministic (no noise):
+        # κ_new = κ + b_κ · f_κ · (1 - κ)
+        # f_κ uses the human's own awareness φ (not the ego's estimate).
+        if self._gt_kappa:
+            h_phi = self._human_kalman.phi
+            for i, aid in enumerate(dynamic_aids):
+                if aid in self._gt_kappa and aid in participant_xys:
+                    f_kappa = compute_velocity_feature(
+                        ego_xy, ego_heading, participant_xys[aid],
+                        phi_i=float(h_phi[i]))
+                    kappa_old = self._gt_kappa[aid]
+                    kappa_new = kappa_old + self._b_kappa * f_kappa * (1.0 - kappa_old)
+                    self._gt_kappa[aid] = max(self._kappa_min, min(1.0, kappa_new))
+                    logger.info("[Step %4d] Human κ agent %d: f_κ=%.4f "
+                                "κ=%.3f→%.3f (φ_human=%.3f)",
+                                step_count, aid, f_kappa,
+                                kappa_old, self._gt_kappa[aid],
+                                float(h_phi[i]))
+
     def _run_mcts_kalman_inference(self, current_frenet: np.ndarray,
                                    other_agent_states: Dict[int, AgentState],
                                    relevant_aids: List[int],
@@ -859,9 +1056,10 @@ class BeliefInference:
         import math
 
         import time as _time
-        _t0 = _time.perf_counter()
+        _t0_total = _time.perf_counter()
 
         # --- Road boundaries ---
+        _t0 = _time.perf_counter()
         s_values = np.array([
             current_frenet[0] + current_frenet[3] * np.cos(current_frenet[2]) * k * self._dt
             for k in range(self._horizon + 1)
@@ -884,19 +1082,41 @@ class BeliefInference:
                                if obs['agent_id'] >= 0})
         if (self._kalman_awareness is None
                 or self._kalman_awareness.agent_ids != dynamic_aids):
-            self._kalman_awareness = KalmanAwareness(dynamic_aids)
+            # Assume perfect perception: all agents initially visible
+            initial_vis = {aid: True for aid in dynamic_aids}
+            self._kalman_awareness = KalmanAwareness(
+                dynamic_aids, initial_visibility=initial_vis)
             logger.info("[Step %4d] Vehicle Kalman initialised for aids=%s "
-                        "(psi_0=0, phi_0=0.5)",
+                        "(assume visible, phi_0≈1.0)",
                         step_count, dynamic_aids)
 
-        # --- Set belief state from Kalman ---
+        # --- Manage velocity particles ---
+        K = self._n_kappa_particles
+        vp_dict = None
+        if K > 0:
+            for aid in dynamic_aids:
+                if aid not in self._velocity_particles:
+                    self._velocity_particles[aid] = VelocityParticles(
+                        K=K, kappa_min=self._kappa_min)
+            # Remove stale particles for agents that disappeared
+            for aid in list(self._velocity_particles):
+                if aid not in dynamic_aids:
+                    del self._velocity_particles[aid]
+            vp_dict = self._velocity_particles
+
+        # --- Set belief state from Kalman (+ velocity particles) ---
+        _t0 = _time.perf_counter()
         if (self._mcts_belief_state is None
-                or self._mcts_belief_state.agent_ids != dynamic_aids):
-            self._mcts_belief_state = BeliefState(dynamic_aids)
+                or self._mcts_belief_state.agent_ids != dynamic_aids
+                or self._mcts_belief_state.n_kappa != K):
+            self._mcts_belief_state = BeliefState(dynamic_aids, n_kappa=K)
 
         b_theta = self._kalman_awareness.compute_b_theta(
-            self._mcts_belief_state.configs)
+            self._mcts_belief_state.configs,
+            velocity_particles=vp_dict,
+            agent_ids=dynamic_aids)
         self._mcts_belief_state._probs = b_theta
+        _t_belief_setup = _time.perf_counter() - _t0
 
         # --- Run MCTS with Kalman-driven resampling ---
         # Pass human_action=None so search() skips its own Boltzmann update;
@@ -907,7 +1127,8 @@ class BeliefInference:
             prev_action=prev_action,
             belief=self._mcts_belief_state,
             human_action=None,
-            kalman=self._kalman_awareness)
+            kalman=self._kalman_awareness,
+            velocity_particles=vp_dict)
 
         self._last_road_left = road_left
         self._last_road_right = road_right
@@ -934,14 +1155,44 @@ class BeliefInference:
                 participant_xys[aid] = np.array(pos[:2], dtype=float)
 
         # Vehicle's estimate — predict step
+        _t0 = _time.perf_counter()
         psi_before = self._kalman_awareness.psi_hat.copy()
         self._kalman_awareness.predict(ego_xy, ego_heading, participant_xys)
         psi_after_predict = self._kalman_awareness.psi_hat.copy()
         # Human Kalman predict already ran in _step_human_kalman()
         predict_ran = True
+        _t_kalman_predict = _time.perf_counter() - _t0
+
+        # --- Velocity particle propagation ---
+        _t0 = _time.perf_counter()
+        if K > 0:
+            phi_arr = self._kalman_awareness.phi
+            for i, aid in enumerate(dynamic_aids):
+                if aid in self._velocity_particles and aid in participant_xys:
+                    f_kappa = compute_velocity_feature(
+                        ego_xy, ego_heading, participant_xys[aid],
+                        phi_i=float(phi_arr[i]))
+                    self._velocity_particles[aid].propagate(
+                        f_kappa, b_kappa=self._b_kappa, q_kappa=self._q_kappa)
+                    logger.info("[Step %4d] VelParticle agent %d: f_κ=%.4f "
+                                "κ=[%s] w=[%s] mean=%.3f",
+                                step_count, aid, f_kappa,
+                                ", ".join(f"{k:.3f}" for k in self._velocity_particles[aid].kappa_values),
+                                ", ".join(f"{w:.3f}" for w in self._velocity_particles[aid].weights),
+                                self._velocity_particles[aid].weighted_mean())
+
+        _t_vel_propagate = _time.perf_counter() - _t0
 
         # --- Kalman observation update from human action ---
+        _t0 = _time.perf_counter()
         obs_update_ran = False
+        root = self._mcts_planner._last_root
+        logger.info("[Step %4d] Kalman reweight gate: "
+                    "human_action=%s  root=%s  root.Q=%s",
+                    step_count,
+                    human_action is not None,
+                    root is not None,
+                    bool(root.Q) if root is not None else None)
         y_obs = None
         root = self._mcts_planner._last_root
         if human_action is not None and root is not None and root.Q:
@@ -982,7 +1233,7 @@ class BeliefInference:
             agent_ids = self._kalman_awareness.agent_ids
             for i in range(n_agents):
                 L_aware = sum(likelihoods.get(cfg, 0.0)
-                              for cfg in configs if cfg[i] == 1)
+                              for cfg in configs if cfg[i] > 0)
                 L_unaware = sum(likelihoods.get(cfg, 0.0)
                                 for cfg in configs if cfg[i] == 0)
                 logger.info(
@@ -995,6 +1246,36 @@ class BeliefInference:
                 likelihoods, configs)
             self._kalman_awareness.update(y_obs)
             obs_update_ran = True
+
+            # --- Velocity particle reweighting ---
+            if K > 0:
+                for i, aid in enumerate(dynamic_aids):
+                    if aid not in self._velocity_particles:
+                        continue
+                    vp = self._velocity_particles[aid]
+                    # Compute per-particle likelihoods by aggregating
+                    # across configs where agent i has each κ particle
+                    particle_likelihoods = []
+                    for j in range(vp.K):
+                        cfg_val = j + 1  # 1-based config value
+                        lk_sum = sum(
+                            likelihoods.get(cfg, 0.0)
+                            for cfg in configs if cfg[i] == cfg_val)
+                        particle_likelihoods.append(max(lk_sum, 1e-30))
+                    logger.info("[Step %4d] VelParticle PRE-reweight agent %d: "
+                                "likelihoods=[%s]",
+                                step_count, aid,
+                                ", ".join(f"{l:.6f}" for l in particle_likelihoods))
+                    vp.reweight(particle_likelihoods)
+                    logger.info("[Step %4d] VelParticle POST-reweight agent %d: "
+                                "κ=[%s] w=[%s] mean=%.3f ESS=%.2f",
+                                step_count, aid,
+                                ", ".join(f"{k:.3f}" for k in vp.kappa_values),
+                                ", ".join(f"{w:.3f}" for w in vp.weights),
+                                vp.weighted_mean(),
+                                vp.effective_sample_size())
+
+        _t_kalman_update = _time.perf_counter() - _t0
 
         # --- Store Kalman diagnostics for plotting ---
         # Predict contribution: psi_after_predict - psi_before = (A-1)*psi + b*f
@@ -1010,9 +1291,11 @@ class BeliefInference:
                 'delta_psi': float(psi_after[i] - psi_before[i]),
             }
 
-        # --- Update belief state from Kalman ---
+        # --- Update belief state from Kalman (+ velocity particles) ---
         b_theta = self._kalman_awareness.compute_b_theta(
-            self._mcts_belief_state.configs)
+            self._mcts_belief_state.configs,
+            velocity_particles=vp_dict,
+            agent_ids=dynamic_aids)
         self._mcts_belief_state._probs = b_theta
 
         # --- Package results ---
@@ -1088,6 +1371,18 @@ class BeliefInference:
                     step_count, len(results), t_elapsed,
                     _t_road, _t_obs, t_mcts,
                     predict_ran, obs_update_ran)
+
+        _t_total_kalman = _time.perf_counter() - _t0_total
+        logger.info(
+            "[Step %4d] Inference breakdown: "
+            "road=%.3fs  obstacles=%.3fs  belief_setup=%.3fs  "
+            "mcts_search=%.3fs  kalman_predict=%.3fs  "
+            "vel_propagate=%.3fs  kalman_update=%.3fs  "
+            "total=%.3fs",
+            step_count, _t_road, _t_obs, _t_belief_setup,
+            t_mcts, _t_kalman_predict,
+            _t_vel_propagate, _t_kalman_update,
+            _t_total_kalman)
 
         return results, marginals, t_elapsed
 
@@ -1478,7 +1773,8 @@ class BeliefInference:
                                ego_heading: float = 0.0,
                                true_obstacles: Optional[list] = None,
                                true_policy_result: Optional[tuple] = None,
-                               human_policy_result: Optional[tuple] = None):
+                               human_policy_result: Optional[tuple] = None,
+                               human_action: Optional[tuple] = None):
         """Compute minimum-deviation intervention from the CURRENT state.
 
         Re-plans the believed trajectory from the current ego state (not the
@@ -1504,11 +1800,6 @@ class BeliefInference:
         for aid in relevant_aids:
             p_hidden = marginals.get(aid, 0.0)
             believed_config[aid] = p_hidden <= self._hidden_threshold  # visible
-
-        # Skip if all agents are believed visible — no intervention needed
-        if all(believed_config.values()):
-            self._last_intervention = None
-            return
 
         # 2. Sample road boundaries from current state
         s_values = np.array([
@@ -1589,6 +1880,12 @@ class BeliefInference:
                 believed_config, frenet_state, other_agent_states,
                 road_left, road_right, true_obstacles, cfg_str)
 
+        # Override ref_controls[0] with the actual human action so the
+        # agency term minimises deviation from what the human really did,
+        # not the coarse MCTS approximation.
+        if human_action is not None and ref_controls is not None:
+            ref_controls[0] = np.array([human_action[0], human_action[1]])
+
         # 4. Single NLP with true obstacles (+ optional agency term)
         logger.info("  INTERVENTION DEBUG: type=%s, ref_scheme=%s, n_true_obs=%d, "
                      "ref_controls=%s, w_agency=%.2f, frenet=[s=%.2f d=%.2f phi=%.3f v=%.2f]",
@@ -1622,6 +1919,9 @@ class BeliefInference:
             true_warm_states, true_warm_controls = self._milp_to_nlp_warmstart(
                 true_milp_states, frenet_state)
 
+        # Pass previous executed acceleration for initial jerk constraint
+        _prev_a = human_action[0] if human_action is not None else None
+
         self._second_stage.reset()
         opt_states, opt_controls, success, _ = self._second_stage.solve(
             frenet_state, true_warm_states, true_warm_controls,
@@ -1629,7 +1929,8 @@ class BeliefInference:
             ref_controls=ref_controls,
             w_agency=self._w_agency,
             agency_only=(self._intervention_type == 'agency_only'),
-            n_agency_steps=n_agency_steps)
+            n_agency_steps=n_agency_steps,
+            prev_accel=_prev_a)
 
         logger.info("  INTERVENTION DEBUG: NLP success=%s", success)
 
@@ -1829,15 +2130,12 @@ class BeliefInference:
             return None, None, None, None, None
 
         belief = self._mcts_belief_state
-        agent_ids = belief.agent_ids
 
-        # θ* = MAP belief (human's estimated perception)
-        theta_star = tuple(
-            1 if believed_config.get(aid, True) else 0
-            for aid in agent_ids
-        )
+        # θ* = MAP belief (same as greedy trajectory extraction)
+        theta_star = belief.most_likely()
 
         # θ_R = true config (all agents visible)
+        agent_ids = belief.agent_ids
         theta_R = tuple(1 for _ in agent_ids)
 
         coarse_traj = self._mcts_planner.extract_safe_trajectory(
@@ -1856,6 +2154,9 @@ class BeliefInference:
         n_interv = 0
         if coarse_traj.interventions:
             n_interv = sum(coarse_traj.interventions)
+
+        # Store coarse QCBF trajectory for live plotting
+        self._last_qcbf_trajectory = coarse_traj
 
         logger.info("  ref_controls(mcts-qcbf): θ*=(%s), γ=%.2f, coarse %d pts, "
                      "reward=%.2f, %d/%d steps overridden",

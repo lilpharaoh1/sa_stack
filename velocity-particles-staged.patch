@@ -1,0 +1,48 @@
+diff --git a/scripts/experiments/belief_snapshot.py b/scripts/experiments/analysis/belief_snapshot.py
+similarity index 100%
+rename from scripts/experiments/belief_snapshot.py
+rename to scripts/experiments/analysis/belief_snapshot.py
+diff --git a/scripts/experiments/inspect_results.py b/scripts/experiments/analysis/inspect_results.py
+similarity index 100%
+rename from scripts/experiments/inspect_results.py
+rename to scripts/experiments/analysis/inspect_results.py
+diff --git a/scripts/experiments/plot_comparison.py b/scripts/experiments/analysis/plot_comparison.py
+similarity index 100%
+rename from scripts/experiments/plot_comparison.py
+rename to scripts/experiments/analysis/plot_comparison.py
+diff --git a/scripts/experiments/plot_cost.py b/scripts/experiments/analysis/plot_cost.py
+similarity index 100%
+rename from scripts/experiments/plot_cost.py
+rename to scripts/experiments/analysis/plot_cost.py
+diff --git a/scripts/experiments/plot_intervention_bars.py b/scripts/experiments/analysis/plot_intervention_bars.py
+similarity index 100%
+rename from scripts/experiments/plot_intervention_bars.py
+rename to scripts/experiments/analysis/plot_intervention_bars.py
+diff --git a/scripts/experiments/plot_intervention_heatmap.py b/scripts/experiments/analysis/plot_intervention_heatmap.py
+similarity index 100%
+rename from scripts/experiments/plot_intervention_heatmap.py
+rename to scripts/experiments/analysis/plot_intervention_heatmap.py
+diff --git a/scripts/experiments/plot_intervention_histogram.py b/scripts/experiments/analysis/plot_intervention_histogram.py
+similarity index 100%
+rename from scripts/experiments/plot_intervention_histogram.py
+rename to scripts/experiments/analysis/plot_intervention_histogram.py
+diff --git a/scripts/experiments/plot_intervention_scene.py b/scripts/experiments/analysis/plot_intervention_scene.py
+similarity index 100%
+rename from scripts/experiments/plot_intervention_scene.py
+rename to scripts/experiments/analysis/plot_intervention_scene.py
+diff --git a/scripts/experiments/render_beliefs.py b/scripts/experiments/analysis/render_beliefs.py
+similarity index 100%
+rename from scripts/experiments/render_beliefs.py
+rename to scripts/experiments/analysis/render_beliefs.py
+diff --git a/scripts/experiments/render_scene.py b/scripts/experiments/analysis/render_scene.py
+similarity index 100%
+rename from scripts/experiments/render_scene.py
+rename to scripts/experiments/analysis/render_scene.py
+diff --git a/scripts/experiments/belief_experiment.py b/scripts/experiments/run/batch.py
+similarity index 100%
+rename from scripts/experiments/belief_experiment.py
+rename to scripts/experiments/run/batch.py
+diff --git a/scripts/experiments/ind_belief_experiment.py b/scripts/experiments/run/single.py
+similarity index 100%
+rename from scripts/experiments/ind_belief_experiment.py
+rename to scripts/experiments/run/single.py

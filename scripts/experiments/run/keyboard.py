@@ -23,13 +23,16 @@ import time
 import carla
 import numpy as np
 
-# Ensure repo root is on the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+# Ensure repo root and experiments dir are on the path
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPERIMENTS_DIR = os.path.dirname(_DIR)
+sys.path.insert(0, os.path.join(_EXPERIMENTS_DIR, "..", ".."))
+sys.path.insert(0, _EXPERIMENTS_DIR)
 
 import igp2 as ip
 from igp2.agents.keyboard_belief_agent import KeyboardBeliefAgent
 
-from belief_utils import (
+from utils import (
     ExperimentResult,
     StepRecord,
     RESULTS_DIR,
@@ -171,7 +174,7 @@ def run_single_experiment(config: dict,
                 plot_interval=plot_interval)
         else:
             # Other agents: TrafficAgent
-            from belief_utils import create_agent
+            from utils import create_agent
             agents[aid] = create_agent(agent_config, frame, fps, scenario_map,
                                        plot_interval=plot_interval)
         carla_sim.add_agent(agents[aid], "ego" if aid == ego_id else None)
@@ -200,13 +203,13 @@ def run_single_experiment(config: dict,
     # Live awareness plotter
     awareness_plotter = None
     if live_awareness and ego_agent is not None:
-        from live_awareness_plotter import LiveAwarenessPlotter
+        from live.awareness_plotter import LiveAwarenessPlotter
         awareness_plotter = LiveAwarenessPlotter(scenario_map, ego_agent)
 
     # Live speed plotter
     speed_plotter = None
     if live_speed:
-        from live_speed_plotter import LiveSpeedPlotter
+        from live.speed_plotter import LiveSpeedPlotter
         speed_plotter = LiveSpeedPlotter()
 
     # Prepare result object
@@ -259,7 +262,6 @@ def run_single_experiment(config: dict,
 
             if speed_plotter is not None:
                 speed_plotter.update(record)
-
             if record.goal_reached:
                 result.solved = True
                 result.solved_step = t

@@ -1,0 +1,9 @@
+# MCTS-Kalman inference, agency-only intervention, QCBF reference controls.
+_base: defaults.yaml
+
+inference:
+  type: mcts_kalman
+
+intervention:
+  type: agency_only
+  ref_controls: mcts-qcbf

@@ -1,0 +1,12 @@
+# MCTS-Naive inference, combined intervention, QCBF, velocity particles.
+_base: defaults.yaml
+
+inference:
+  type: mcts_naive
+
+intervention:
+  type: combined
+  ref_controls: mcts-qcbf
+
+velocity:
+  n_kappa_particles: 4

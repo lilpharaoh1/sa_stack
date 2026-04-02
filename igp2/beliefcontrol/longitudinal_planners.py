@@ -313,7 +313,8 @@ class LongitudinalSecondStage:
               ref_controls: Optional[np.ndarray] = None,
               w_agency: float = 1.0,
               agency_only: bool = False,
-              n_agency_steps: Optional[int] = None):
+              n_agency_steps: Optional[int] = None,
+              prev_accel: Optional[float] = None):
         """Solve the longitudinal NLP.
 
         Same signature and return format as
@@ -417,6 +418,12 @@ class LongitudinalSecondStage:
             for k in range(H - 1):
                 opti.subject_to(opti.bounded(-jerk_limit,
                                              U[0, k + 1] - U[0, k],
+                                             jerk_limit))
+
+            # Initial jerk: constrain U[0,0] relative to previous executed accel
+            if prev_accel is not None:
+                opti.subject_to(opti.bounded(-jerk_limit,
+                                             U[0, 0] - prev_accel,
                                              jerk_limit))
 
             # --- Steering rate constraints ---
