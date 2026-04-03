@@ -1,0 +1,57 @@
+{
+  "scenario": {
+    "map_path": "scenarios/maps/Town01.xodr",
+    "map_name": "Town01",
+    "max_speed": 10.0,
+    "fps": 10,
+    "max_steps": 1000,
+    "plot_interval": true
+  },
+  "ego": {
+    "type": "SimpleBeliefAgent",
+    "spawn": {
+      "box": {
+        "center": [2.0, -280.0],
+        "length": 10,
+        "width": 3.5,
+        "heading": 1.57
+      },
+      "velocity": [5.0, 5.0]
+    },
+    "goal": {
+      "box": {
+        "center": [2.0, -200.0],
+        "length": 5,
+        "width": 7,
+        "heading": 1.57
+      }
+    },
+    "target_distance": 20.0
+  },
+  "dynamic_groups": [
+    {
+      "type": "TrafficAgent",
+      "spawn": {
+        "box": {
+          "center": [2.0, -250.0],
+          "length": 10,
+          "width": 3.5,
+          "heading": 1.57
+        },
+        "velocity": [5.0, 5.0]
+      },
+      "goal": {
+        "box": {
+          "center": [2.0, -200.0],
+          "length": 5,
+          "width": 7,
+          "heading": 1.57
+        }
+      },
+      "open_loop": true,
+      "belief": {"visible": true, "velocity_error":-0.3}
+    }
+  ],
+  "static_groups": [
+  ]
+}
