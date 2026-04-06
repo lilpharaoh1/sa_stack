@@ -498,7 +498,8 @@ def parse_args():
     parser.add_argument("--intervention", type=str, default="none",
                         choices=["none", "cbf_single", "cbf_mode",
                                  "cbf_wmean", "cbf_contmean",
-                                 "cbf_chance", "always_policy"],
+                                 "cbf_kalman", "cbf_chance",
+                                 "always_policy"],
                         help="Intervention mode")
     parser.add_argument("--gamma", type=float, default=0.99,
                         help="CBF decay rate (1.0 = reach boundary in one step, "

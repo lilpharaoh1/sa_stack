@@ -618,6 +618,49 @@ class CarFollowAgent(Agent):
 
         return states, a_H_pred
 
+    def _simulate_forward_evolving(self, a_exec, lead_speed, s0, kappa_init,
+                                   dt, N, ceiling=False):
+        """Forward-simulate with evolving kappa (RBF drift toward 0).
+
+        Same as ``_simulate_forward`` but kappa decays each step via the
+        RBF human model:
+
+            f_j = exp(-d_j^2 / (2 * sigma^2))
+            kappa_{j+1} = kappa_j * (1 - b_kappa * f_j)
+
+        This predicts that the human's perception improves over the
+        horizon, producing more realistic action predictions.
+        """
+        states = np.zeros((N + 1, 2))
+        states[0] = s0
+        a_H_pred = np.zeros(N)
+        kappa_j = kappa_init
+
+        for j in range(N):
+            d_j, v_j = states[j]
+
+            # Evolve kappa based on current distance
+            f_kappa = np.exp(-d_j ** 2 / (2.0 * self._sigma_kappa ** 2))
+            kappa_j = kappa_j * (1.0 - self._b_kappa * f_kappa)
+
+            # Human's intended action under evolving kappa
+            perceived = lead_speed * (1.0 + kappa_j)
+            desired = max(0.0, perceived
+                          + self.K_DIST * (d_j - self._target_distance))
+            a_H = float(np.clip(self.K_SPEED * (desired - v_j),
+                                -self.MAX_ACCEL, self.MAX_ACCEL))
+            a_H_pred[j] = a_H
+
+            # Effective action
+            a = min(a_H, a_exec[j]) if ceiling else a_exec[j]
+
+            # Dynamics (forward Euler)
+            v_next = max(0.0, v_j + a * dt)
+            d_next = d_j + (lead_speed - v_j) * dt
+            states[j + 1] = [d_next, v_next]
+
+        return states, a_H_pred
+
     # --- cbf_single: one-step CBF safety filter -----------------------------
 
     def _intervene_cbf_single(self, action, distance, ego_speed, lead_speed):
@@ -643,7 +686,7 @@ class CarFollowAgent(Agent):
 
     def _intervene_lookahead(self, action, distance, ego_speed, lead_speed,
                              lead_aid, robust=False,
-                             kappa_override=None):
+                             kappa_override=None, evolving=False):
         """Predictive safety filter (CBF-MPC).
 
         Solves a receding-horizon optimisation:
@@ -653,8 +696,10 @@ class CarFollowAgent(Agent):
             s.t.  h(x_{j+1}) >= (1 - gamma) * h(x_j)   (CBF condition)
                   v_j >= 0                                (speed bound)
 
-        cbf_mode:     kappa_hat from discrete belief mode.
-        cbf_contmean:   kappa_hat from continuous Kalman estimate.
+        cbf_mode:     kappa_hat from discrete belief mode (static kappa).
+        cbf_contmean: kappa_hat from continuous Kalman estimate (static).
+        cbf_kalman:   kappa_hat from Kalman, kappa evolves over horizon
+                      via RBF drift model.
         cbf_chance:   constraints over all likely kappa candidates,
                       with ceiling model.
 
@@ -672,10 +717,13 @@ class CarFollowAgent(Agent):
         else:
             kappa_hat = belief.mode if belief is not None else 0.0
 
+        # Select simulator: static or evolving kappa
+        _sim = (self._simulate_forward_evolving if evolving
+                else self._simulate_forward)
+
         # -- objective: minimise deviation from human ----------------------
         def objective(a_exec):
-            _, a_H = self._simulate_forward(
-                a_exec, lead_speed, s0, kappa_hat, dt, N)
+            _, a_H = _sim(a_exec, lead_speed, s0, kappa_hat, dt, N)
             return float(np.sum((a_exec - a_H) ** 2))
 
         # -- CBF + speed constraints ---------------------------------------
@@ -695,7 +743,7 @@ class CarFollowAgent(Agent):
 
             def _make_cbf_con(k, ceil, gamma=self._gamma):
                 def con(a_exec):
-                    st, _ = self._simulate_forward(
+                    st, _ = _sim(
                         a_exec, lead_speed, s0, k, dt, N, ceiling=ceil)
                     # CBF: h(x_{j+1}) - (1-gamma)*h(x_j) >= 0
                     h_j = self._barrier_vec(st[:-1, 0])
@@ -705,7 +753,7 @@ class CarFollowAgent(Agent):
 
             def _make_v_con(k, ceil):
                 def con(a_exec):
-                    st, _ = self._simulate_forward(
+                    st, _ = _sim(
                         a_exec, lead_speed, s0, k, dt, N, ceiling=ceil)
                     return st[1:, 1]
                 return con
@@ -791,11 +839,18 @@ class CarFollowAgent(Agent):
                     lead_aid, kappa_override=wmean)
 
             elif self._intervention == "cbf_contmean":
-                # Use continuous Kalman estimate directly (no discretisation)
+                # Use continuous Kalman estimate, static kappa over horizon
                 kf_est = self._kf_kappa.get(lead_aid, 0.0)
                 action, intervened = self._intervene_lookahead(
                     action, distance, ego_speed, lead_speed,
                     lead_aid, kappa_override=kf_est)
+
+            elif self._intervention == "cbf_kalman":
+                # Use continuous Kalman estimate, kappa evolves over horizon
+                kf_est = self._kf_kappa.get(lead_aid, 0.0)
+                action, intervened = self._intervene_lookahead(
+                    action, distance, ego_speed, lead_speed,
+                    lead_aid, kappa_override=kf_est, evolving=True)
 
             elif self._intervention == "always_policy":
                 # Perfect-perception policy: kappa=0 (no velocity error)
