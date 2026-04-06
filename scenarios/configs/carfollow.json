@@ -8,7 +8,7 @@
     "plot_interval": true
   },
   "ego": {
-    "type": "SimpleBeliefAgent",
+    "type": "CarFollowAgent",
     "spawn": {
       "box": {
         "center": [2.0, -280.0],
@@ -20,20 +20,20 @@
     },
     "goal": {
       "box": {
-        "center": [2.0, -200.0],
+        "center": [2.0, -50.0],
         "length": 5,
         "width": 7,
         "heading": 1.57
       }
     },
-    "target_distance": 20.0
+    "target_distance": 12.0
   },
   "dynamic_groups": [
     {
       "type": "TrafficAgent",
       "spawn": {
         "box": {
-          "center": [2.0, -250.0],
+          "center": [2.0, -270.0],
           "length": 10,
           "width": 3.5,
           "heading": 1.57
@@ -42,14 +42,14 @@
       },
       "goal": {
         "box": {
-          "center": [2.0, -200.0],
+          "center": [2.0, -50.0],
           "length": 5,
           "width": 7,
           "heading": 1.57
         }
       },
       "open_loop": true,
-      "belief": {"visible": true, "velocity_error":-0.3}
+      "belief": {"visible": true, "velocity_error": 0.3}
     }
   ],
   "static_groups": [

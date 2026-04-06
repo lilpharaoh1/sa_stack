@@ -1,0 +1,12 @@
+{
+  "inference": "boltzmann_reactive",
+  "intervention": "always_policy",
+  "gamma": 1.0,
+  "seed": 21,
+  "steps": 100,
+  "fps": 10,
+  "map": "carfollow",
+  "target_distance": 12.0,
+  "d_safe": 8.0,
+  "wall_time_s": 10.04
+}

@@ -12,7 +12,7 @@ from igp2.agents.agent import Agent
 from igp2.agents.keyboard_agent import KeyboardAgent
 from igp2.agents.shared_autonomy_agent import SharedAutonomyAgent
 from igp2.agents.belief_agent import BeliefAgent
-from igp2.agents.simple_belief_agent import SimpleBeliefAgent
+from igp2.agents.car_follow_agent import CarFollowAgent
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class CarlaAgentWrapper:
 
         # For KeyboardAgent, convert action directly to CARLA control (bypass LocalPlanner)
         if isinstance(self.__agent, (KeyboardAgent, SharedAutonomyAgent,
-                                      BeliefAgent, SimpleBeliefAgent)):
+                                      BeliefAgent, CarFollowAgent)):
             return self.__action_to_control(action)
 
         if hasattr(self.agent, "current_macro"):
