@@ -1,0 +1,6 @@
+_base: defaults.yaml
+
+inference:
+  type: oracle
+intervention:
+  type: cbf_single

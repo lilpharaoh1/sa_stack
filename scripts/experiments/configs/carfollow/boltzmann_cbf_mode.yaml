@@ -1,0 +1,6 @@
+_base: defaults.yaml
+
+inference:
+  type: boltzmann_reactive_floormix
+intervention:
+  type: cbf_mode

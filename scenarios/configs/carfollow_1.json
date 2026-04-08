@@ -3,9 +3,7 @@
     "map_path": "scenarios/maps/Town01.xodr",
     "map_name": "Town01",
     "max_speed": 10.0,
-    "fps": 10,
-    "max_steps": 1000,
-    "plot_interval": true
+    "fps": 10
   },
   "ego": {
     "type": "CarFollowAgent",
@@ -52,6 +50,5 @@
       "belief": {"visible": true, "velocity_error": 0.3}
     }
   ],
-  "static_groups": [
-  ]
+  "static_groups": []
 }

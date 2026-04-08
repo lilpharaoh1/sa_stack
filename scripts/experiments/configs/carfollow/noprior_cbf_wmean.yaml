@@ -1,0 +1,6 @@
+_base: defaults.yaml
+
+inference:
+  type: boltzmann_reactive_noprior
+intervention:
+  type: cbf_wmean

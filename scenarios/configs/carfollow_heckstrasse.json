@@ -1,0 +1,79 @@
+{
+  "scenario": {
+    "map_path": "scenarios/maps/heckstrasse.xodr",
+    "map_name": "heckstrasse",
+    "max_speed": 10.0,
+    "fps": 10,
+    "_comment": "Ego merges from one lane into adjacent lane"
+  },
+  "ego": {
+    "type": "CarFollowAgent",
+    "spawn": {
+      "box": {
+        "center": [18.0, -13.5],
+        "length": 10,
+        "width": 3.5,
+        "heading": -0.785
+      },
+      "velocity": [5.0, 5.0]
+    },
+    "goal": {
+      "box": {
+        "center": [102.0, -77.0],
+        "length": 5,
+        "width": 7,
+        "heading": -0.785
+      }
+    },
+    "target_distance": 12.0
+  },
+  "dynamic_groups": [
+    {
+      "_comment": "Vehicle in the same lane in front of ego",
+      "type": "TrafficAgent",
+      "spawn": {
+        "box": {
+          "center": [35.0, -26.0],
+          "length": 10,
+          "width": 3.5,
+          "heading": -0.785
+        },
+        "velocity": [5.0, 5.0]
+      },
+      "goal": {
+        "box": {
+          "center": [102.0, -77.0],
+          "length": 5,
+          "width": 7,
+          "heading": -0.785
+        }
+      },
+      "open_loop": true,
+      "belief": {"visible": true, "velocity_error": 0.3}
+    },
+    {
+      "_comment": "Vehicle merging in front/behind ego",
+      "type": "TrafficAgent",
+      "spawn": {
+        "box": {
+          "center": [59.5, -15.5],
+          "length": 10,
+          "width": 3.5,
+          "heading": -0.785
+        },
+        "velocity": [5.0, 5.0]
+      },
+      "goal": {
+        "box": {
+          "center": [102.0, -77.0],
+          "length": 1,
+          "width": 1,
+          "heading": -0.785
+        }
+      },
+      "open_loop": true,
+      "belief": {"visible": true, "velocity_error": 0.3}
+    }
+  ],
+  "static_groups": []
+}

@@ -1,0 +1,6 @@
+_base: defaults.yaml
+
+inference:
+  type: none
+intervention:
+  type: none

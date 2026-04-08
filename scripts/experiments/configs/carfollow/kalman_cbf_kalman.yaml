@@ -1,0 +1,8 @@
+_base: defaults.yaml
+
+inference:
+  type: boltzmann_kalman
+intervention:
+  type: cbf_kalman
+human:
+  type: rbf

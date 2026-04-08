@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import igp2 as ip
 from igp2.agents.car_follow_agent import CarFollowAgent
+from igp2.carfollow.recorder import EpisodeRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -218,139 +219,79 @@ class ActionPlotter:
         self._fig.canvas.flush_events()
 
 
+
 # ---------------------------------------------------------------------------
-# Episode recorder
+# Macro action building from config
 # ---------------------------------------------------------------------------
 
-class EpisodeRecorder:
-    """Collects per-step statistics for post-hoc analysis."""
+def _build_macro_actions(ma_specs, agent_id, frame, scenario_map, fps):
+    """Build a list of MacroAction objects from JSON config specs.
 
-    def __init__(self, true_vel_errors: Dict[int, float],
-                 belief_candidates: np.ndarray):
-        self._true_vel_errors = true_vel_errors
-        self._candidates = belief_candidates
+    Each spec is a dict like:
+        {"type": "continue", "termination_point": [x, y]}
+        {"type": "change_lane_left"}
+        {"type": "change_lane_right"}
+        {"type": "continue"}   (follow lane to end)
 
-        # Build oracle distribution (delta at nearest candidate)
-        self._oracle_dist = {}
-        for aid, ve in true_vel_errors.items():
-            oracle = np.zeros(len(belief_candidates))
-            oracle[np.argmin(np.abs(belief_candidates - ve))] = 1.0
-            self._oracle_dist[aid] = oracle
+    Macro actions are built sequentially — each one simulates forward
+    from the end of the previous to get the correct starting frame.
+    """
+    from igp2.planlibrary.macro_action import (
+        MacroActionConfig, Continue, ChangeLaneLeft, ChangeLaneRight)
 
-        # Per-step storage
-        self.steps: list = []
-        self.human_accel: list = []
-        self.executed_accel: list = []
-        self.jerk: list = []
-        self.distance: list = []
-        self.ego_speed: list = []
-        self.lead_speed: list = []
-        self.intervened: list = []
-        self.kl_divergence: list = []
-        self.belief_dists: list = []
-        self.human_vel_err: list = []  # human's velocity error over time
-        self.kf_kappa: list = []      # Kalman estimate over time
-        self.kf_P: list = []          # Kalman variance over time
-        self.frames: list = []  # full frame snapshots for replay
+    built = []
+    current_frame = dict(frame)  # mutable copy
 
-    def record(self, step: int, info: dict, frame: dict):
-        self.steps.append(step)
-        self.human_accel.append(info.get("accel", 0.0))
-        exec_a = info.get("executed_accel", info.get("accel", 0.0))
-        self.executed_accel.append(exec_a)
-        self.distance.append(info.get("distance"))
-        self.ego_speed.append(info.get("ego_speed", 0.0))
-        self.lead_speed.append(info.get("lead_speed", 0.0))
-        self.intervened.append(info.get("intervened", False))
+    for spec in ma_specs:
+        ma_type = spec["type"]
+        config_dict = {"fps": fps}
 
-        # Jerk: d(executed_accel)/dt
-        if len(self.executed_accel) >= 2:
-            self.jerk.append(self.executed_accel[-1] - self.executed_accel[-2])
+        if ma_type == "continue":
+            tp = spec.get("termination_point")
+            if tp is not None:
+                config_dict["termination_point"] = np.array(tp)
+            ma_config = MacroActionConfig(config_dict)
+            ma = Continue(ma_config, agent_id, current_frame, scenario_map)
+
+        elif ma_type == "change_lane_left":
+            config_dict["left"] = True
+            config_dict["target_sequence"] = None
+            ma_config = MacroActionConfig(config_dict)
+            ma = ChangeLaneLeft(ma_config, agent_id, current_frame, scenario_map)
+
+        elif ma_type == "change_lane_right":
+            config_dict["left"] = False
+            config_dict["target_sequence"] = None
+            ma_config = MacroActionConfig(config_dict)
+            ma = ChangeLaneRight(ma_config, agent_id, current_frame, scenario_map)
+
         else:
-            self.jerk.append(0.0)
+            raise ValueError(f"Unknown macro action type: {ma_type}")
 
-        # KL divergence: KL(oracle || inferred)
-        inferred_dist = info.get("inferred_dist")
-        if inferred_dist is not None:
-            probs = np.array(list(inferred_dist.values()))
-            self.belief_dists.append(probs.tolist())
-            # Use first agent's oracle (car-following has one lead)
-            oracle = list(self._oracle_dist.values())[0]
-            # KL(oracle || inferred) = sum_k oracle[k] * log(oracle[k]/p[k])
-            # With delta oracle this is -log(p[k_true])
-            eps = 1e-12
-            kl = float(np.sum(oracle * np.log((oracle + eps) / (probs + eps))))
-            self.kl_divergence.append(kl)
-        else:
-            self.belief_dists.append(None)
-            self.kl_divergence.append(None)
+        built.append(ma)
 
-        # Human's current velocity error + Kalman state
-        self.human_vel_err.append(info.get("human_vel_err"))
-        self.kf_kappa.append(info.get("kf_kappa"))
-        self.kf_P.append(info.get("kf_P"))
+        # Advance the frame to the end of this macro action so the next
+        # one starts from the right position
+        if ma.trajectory is not None and len(ma.trajectory.path) > 0:
+            end_pos = ma.trajectory.path[-1]
+            end_heading = np.arctan2(
+                ma.trajectory.path[-1][1] - ma.trajectory.path[-2][1],
+                ma.trajectory.path[-1][0] - ma.trajectory.path[-2][0]
+            ) if len(ma.trajectory.path) >= 2 else current_frame[agent_id].heading
+            end_speed = current_frame[agent_id].speed
+            from igp2.core.agentstate import AgentState
+            current_frame[agent_id] = AgentState(
+                time=0,
+                position=end_pos,
+                velocity=end_speed * np.array([np.cos(end_heading),
+                                                np.sin(end_heading)]),
+                acceleration=np.array([0.0, 0.0]),
+                heading=end_heading,
+            )
 
-        # Frame snapshot (serialise AgentState to dict)
-        frame_snap = {}
-        for aid, state in frame.items():
-            frame_snap[int(aid)] = {
-                "position": state.position.tolist(),
-                "velocity": state.velocity.tolist() if hasattr(state.velocity, 'tolist') else float(state.velocity),
-                "heading": float(state.heading),
-                "speed": float(state.speed),
-            }
-        self.frames.append(frame_snap)
-
-    def save(self, path: str):
-        """Save all recorded data to a JSON file."""
-        data = {
-            "steps": self.steps,
-            "human_accel": self.human_accel,
-            "executed_accel": self.executed_accel,
-            "jerk": self.jerk,
-            "distance": self.distance,
-            "ego_speed": self.ego_speed,
-            "lead_speed": self.lead_speed,
-            "intervened": self.intervened,
-            "kl_divergence": self.kl_divergence,
-            "belief_dists": self.belief_dists,
-            "belief_candidates": self._candidates.tolist(),
-            "true_vel_errors": {str(k): v for k, v in self._true_vel_errors.items()},
-            "human_vel_err": self.human_vel_err,
-            "kf_kappa": self.kf_kappa,
-            "kf_P": self.kf_P,
-            "frames": self.frames,
-        }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-        logger.info("Episode data saved to %s", path)
-
-    def print_summary(self):
-        n = len(self.steps)
-        if n == 0:
-            return
-        accel_dev = np.array(self.human_accel) - np.array(self.executed_accel)
-        jerk_arr = np.array(self.jerk)
-        kl_vals = [v for v in self.kl_divergence if v is not None]
-        intv_count = sum(self.intervened)
-
-        print(f"\n{'='*60}")
-        print(f"  Episode Summary  ({n} steps)")
-        print(f"{'='*60}")
-        print(f"  Accel deviation  |  mean={np.mean(accel_dev):.4f}  "
-              f"std={np.std(accel_dev):.4f}  "
-              f"max={np.max(np.abs(accel_dev)):.4f}")
-        print(f"  Jerk             |  mean={np.mean(jerk_arr):.4f}  "
-              f"std={np.std(jerk_arr):.4f}  "
-              f"max={np.max(np.abs(jerk_arr)):.4f}")
-        if kl_vals:
-            print(f"  KL(oracle||inf)  |  mean={np.mean(kl_vals):.4f}  "
-                  f"final={kl_vals[-1]:.4f}")
-        print(f"  Interventions    |  {intv_count}/{n} steps "
-              f"({100*intv_count/n:.1f}%)")
-        print(f"{'='*60}\n")
-
-
+    logger.info("Built %d macro actions for agent %d: %s",
+                len(built), agent_id, [str(m) for m in built])
+    return built
 
 
 # ---------------------------------------------------------------------------
@@ -358,15 +299,17 @@ class EpisodeRecorder:
 # ---------------------------------------------------------------------------
 
 def parse_config(config: dict, scenario_map: ip.Map, fps: int,
-                 rng=None, inference: str = "none",
-                 intervention: str = "none", gamma: float = 0.99,
-                 human: str = "static"):
+                 rng=None, **overrides):
     """Parse a car-follow config into agents and initial frame.
+
+    Experiment parameters are passed via overrides (already resolved
+    from YAML config + CLI in main).
 
     Returns:
         agents: dict mapping agent_id -> Agent
         frame:  dict mapping agent_id -> AgentState
     """
+    exp = {k: v for k, v in overrides.items() if v is not None}
     if rng is None:
         rng = np.random.RandomState()
 
@@ -423,24 +366,51 @@ def parse_config(config: dict, scenario_map: ip.Map, fps: int,
                 fps=fps,
                 scenario_map=scenario_map,
                 agent_beliefs=beliefs,
-                target_distance=cfg.get("target_distance", 20.0),
-                inference=inference,
-                intervention=intervention,
-                gamma=gamma,
-                human=human,
+                target_distance=cfg.get("target_distance",
+                                        exp.get("target_distance", 12.0)),
+                d_safe=exp.get("d_safe", 8.0),
+                beta=exp.get("beta", 1.0),
+                gamma=exp.get("gamma", 0.99),
+                inference=exp.get("inference", "none"),
+                intervention=exp.get("intervention", "none"),
+                human=exp.get("human", "static"),
+                b_kappa=exp.get("b_kappa", 0.01),
+                sigma_kappa=exp.get("sigma_kappa", 25.0),
             )
         elif agent_type == "TrafficAgent":
+            # Build pre-specified macro actions if present in config
+            macro_actions = None
+            ma_specs = cfg.get("macro_actions")
+            if ma_specs:
+                macro_actions = _build_macro_actions(
+                    ma_specs, aid, frame, scenario_map, fps)
+
             agents[aid] = ip.TrafficAgent(
                 agent_id=aid,
                 initial_state=initial_state,
                 goal=goal,
                 fps=fps,
                 open_loop=cfg.get("open_loop", False),
+                macro_actions=macro_actions,
             )
         else:
             raise ValueError(f"Unsupported agent type: {agent_type}")
 
-    return agents, frame
+    # Collect lane-change triggers from config
+    triggers = []
+    for aid, cfg in agent_configs:
+        lc = cfg.get("lane_change_at")
+        if lc is not None:
+            triggers.append({
+                "agent_id": aid,
+                "axis": lc.get("axis", "y"),
+                "threshold": lc["threshold"],
+                "compare": lc.get("compare", "gt"),  # "gt" or "lt"
+                "direction": lc["direction"],         # "left" or "right"
+                "fired": False,
+            })
+
+    return agents, frame, triggers
 
 
 def _generate_frame(ego_id, layout, spawn_vel_ranges, rng):
@@ -477,42 +447,99 @@ def _generate_frame(ego_id, layout, spawn_vel_ranges, rng):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Car-following belief-agent example")
-    parser.add_argument("--map", "-m", type=str, default="carfollow",
+    parser.add_argument("--map", "-m", type=str, default="carfollow_1",
                         help="Scenario config name under scenarios/configs/")
-    parser.add_argument("--seed", type=int, default=21)
-    parser.add_argument("--steps", type=int, default=500,
-                        help="Fixed episode length in steps")
+    parser.add_argument("--config", "-c", type=str, default="defaults.yaml",
+                        help="Experiment config YAML under "
+                             "scripts/experiments/configs/carfollow/")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--steps", type=int, default=None,
+                        help="Override episode length")
     parser.add_argument("--output_dir", "-o", type=str, default=None,
-                        help="Override output directory (default: auto-generated)")
+                        help="Override output directory")
     parser.add_argument("--carla_path", "-p", type=str,
-                        default="/opt/carla-simulator",
-                        help="Path to CARLA installation")
+                        default="/opt/carla-simulator")
     parser.add_argument("--server", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=2000)
-    parser.add_argument("--inference", type=str, default="none",
-                        choices=["none", "boltzmann_reactive",
-                                 "boltzmann_reactive_noprior",
-                                 "boltzmann_reactive_floormix",
-                                 "boltzmann_kalman", "oracle"],
-                        help="Inference mode")
-    parser.add_argument("--intervention", type=str, default="none",
-                        choices=["none", "cbf_single", "cbf_mode",
-                                 "cbf_wmean", "cbf_contmean",
-                                 "cbf_kalman", "cbf_chance",
-                                 "always_policy"],
-                        help="Intervention mode")
-    parser.add_argument("--gamma", type=float, default=0.99,
-                        help="CBF decay rate (1.0 = reach boundary in one step, "
-                             "lower = more conservative)")
-    parser.add_argument("--human", type=str, default="static",
-                        choices=["static", "rbf"],
-                        help="Human belief model: 'static' (fixed vel-error) "
-                             "or 'rbf' (RBF-based drift toward 0)")
-    parser.add_argument("--real-time", action="store_true",
-                        help="Run at real-time fps with live plots. "
-                             "Without this flag, runs as fast as possible "
-                             "with no plots.")
+    # Method overrides (None = use config value)
+    parser.add_argument("--inference", type=str, default=None)
+    parser.add_argument("--intervention", type=str, default=None)
+    parser.add_argument("--gamma", type=float, default=None)
+    parser.add_argument("--human", type=str, default=None)
+    parser.add_argument("--real-time", action="store_true")
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Experiment config loading
+# ---------------------------------------------------------------------------
+
+_CARFOLLOW_CONFIGS_DIR = os.path.join(
+    os.path.dirname(__file__), "..", "experiments", "configs", "carfollow")
+
+
+def load_experiment_config(config_name: str) -> dict:
+    """Load a carfollow experiment YAML config with _base resolution."""
+    import yaml
+
+    path = config_name
+    if not os.path.isabs(path):
+        path = os.path.join(_CARFOLLOW_CONFIGS_DIR, path)
+
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+
+    base_path = cfg.pop("_base", None)
+    if base_path is not None:
+        if not os.path.isabs(base_path):
+            base_path = os.path.join(os.path.dirname(path), base_path)
+        base = load_experiment_config(base_path)
+        for section, values in cfg.items():
+            if isinstance(values, dict) and section in base and isinstance(base[section], dict):
+                base[section].update(values)
+            else:
+                base[section] = values
+        cfg = base
+
+    return cfg
+
+
+def apply_experiment_config(exp_cfg: dict, args) -> None:
+    """Map YAML experiment config onto args, respecting CLI overrides.
+
+    CLI args that are not None take precedence over config values.
+    """
+    mapping = {
+        ("inference", "type"):         "inference",
+        ("inference", "beta"):         "beta",
+        ("intervention", "type"):      "intervention",
+        ("intervention", "gamma"):     "gamma",
+        ("human", "type"):             "human",
+        ("human", "b_kappa"):          "b_kappa",
+        ("human", "sigma_kappa"):      "sigma_kappa",
+        ("safety", "target_distance"): "target_distance",
+        ("safety", "d_safe"):          "d_safe",
+        ("simulation", "steps"):       "steps",
+        ("simulation", "seed"):        "seed",
+    }
+
+    for (section, key), attr in mapping.items():
+        # Only set if CLI didn't override (CLI value is None)
+        if getattr(args, attr, None) is None:
+            if section in exp_cfg and key in exp_cfg[section]:
+                setattr(args, attr, exp_cfg[section][key])
+
+    # Ensure all attrs have sensible defaults even if missing from YAML
+    _defaults = {
+        "inference": "none", "intervention": "none",
+        "gamma": 0.99, "human": "static", "beta": 1.0,
+        "b_kappa": 0.01, "sigma_kappa": 25.0,
+        "target_distance": 12.0, "d_safe": 8.0,
+        "steps": 300, "seed": 21,
+    }
+    for attr, default in _defaults.items():
+        if getattr(args, attr, None) is None:
+            setattr(args, attr, default)
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +548,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Load experiment config (YAML defaults + overrides), then apply
+    exp_cfg = load_experiment_config(args.config)
+    apply_experiment_config(exp_cfg, args)
 
     ip.setup_logging(level=logging.INFO)
     np.random.seed(args.seed)
@@ -539,11 +570,12 @@ def main():
     scenario_map = ip.Map.parse_from_opendrive(scenario_xodr)
 
     rng = np.random.RandomState(args.seed)
-    agents, frame = parse_config(config, scenario_map, fps, rng,
-                                  inference=args.inference,
-                                  intervention=args.intervention,
-                                  gamma=args.gamma,
-                                  human=args.human)
+    agents, frame, lane_change_triggers = parse_config(
+        config, scenario_map, fps, rng,
+        inference=args.inference,
+        intervention=args.intervention,
+        gamma=args.gamma,
+        human=args.human)
 
     ego_id = 0
     ego_agent = agents[ego_id]
@@ -571,7 +603,7 @@ def main():
     map_name = config["scenario"].get("map_name", "Town01")
     carla_sim = ip.carlasim.CarlaSim(
         map_name=map_name,
-        xodr=scenario_xodr,
+        xodr=scenario_map,  # pass patched Map object (not path)
         carla_path=args.carla_path,
         server=args.server,
         port=args.port,
@@ -638,6 +670,42 @@ def main():
 
         current_frame = obs.frame
         ego_state = current_frame.get(ego_id)
+
+        # Check lane-change triggers
+        for trig in lane_change_triggers:
+            if trig["fired"]:
+                continue
+            aid = trig["agent_id"]
+            state = current_frame.get(aid)
+            if state is None:
+                continue
+            axis_idx = 0 if trig["axis"] == "x" else 1
+            val = state.position[axis_idx]
+            triggered = (val > trig["threshold"] if trig["compare"] == "gt"
+                         else val < trig["threshold"])
+            if triggered:
+                trig["fired"] = True
+                agent = agents[aid]
+                direction = trig["direction"]
+                logger.info("Lane change triggered for agent %d "
+                            "(direction=%s, pos=%s)", aid, direction,
+                            state.position)
+                from igp2.planlibrary.macro_action import (
+                    MacroActionConfig, ChangeLaneLeft, ChangeLaneRight)
+                lc_config = MacroActionConfig({
+                    "type": "change-lane",
+                    "left": direction == "left",
+                    "target_sequence": None,
+                    "fps": fps,
+                })
+                LCClass = ChangeLaneLeft if direction == "left" else ChangeLaneRight
+                lc_ma = LCClass(lc_config, aid, current_frame, scenario_map)
+                agent.set_macro_actions([lc_ma])
+
+        # Print agent positions
+        for aid, state in current_frame.items():
+            print(f"  Agent {aid}: pos=({state.position[0]:.2f}, {state.position[1]:.2f})  "
+                  f"v={state.speed:.2f}  heading={state.heading:.3f}")
 
         # Print step diagnostics
         if isinstance(ego_agent, CarFollowAgent) and ego_agent.last_step_info:
@@ -721,6 +789,7 @@ def main():
 
         # Save run metadata
         meta = {
+            "config": args.config,
             "inference": args.inference,
             "intervention": args.intervention,
             "gamma": args.gamma,

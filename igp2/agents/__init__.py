@@ -12,5 +12,6 @@ from .belief_agent import (
     AgentBeliefState, BeliefState,
 )
 from .keyboard_belief_agent import KeyboardBeliefAgent
-from .car_follow_agent import CarFollowAgent, CarFollowBeliefState, VelocityErrorBelief
+from .car_follow_agent import CarFollowAgent
+from igp2.carfollow.beliefs import CarFollowBeliefState, VelocityErrorBelief
 

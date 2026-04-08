@@ -1,0 +1,14 @@
+{
+  "config": "kalman_cbf_kalman.yaml",
+  "inference": "boltzmann_kalman",
+  "intervention": "cbf_kalman",
+  "gamma": 0.99,
+  "human": "rbf",
+  "seed": 21,
+  "steps": 100,
+  "fps": 10,
+  "map": "carfollow_1",
+  "target_distance": 12.0,
+  "d_safe": 8.0,
+  "wall_time_s": 17.38
+}

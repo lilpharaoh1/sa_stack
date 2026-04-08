@@ -1,0 +1,84 @@
+{
+  "scenario": {
+    "map_path": "scenarios/maps/Town01.xodr",
+    "map_name": "Town01",
+    "max_speed": 10.0,
+    "fps": 10,
+    "_comment": "Ego merges from one lane into adjacent lane (use --unidirectional)"
+  },
+  "ego": {
+    "type": "CarFollowAgent",
+    "spawn": {
+      "box": {
+        "center": [2.0, -280.0],
+        "length": 10,
+        "width": 3.5,
+        "heading": 1.57
+      },
+      "velocity": [5.0, 5.0]
+    },
+    "goal": {
+      "box": {
+        "center": [2.0, -50.0],
+        "length": 5,
+        "width": 7,
+        "heading": 1.57
+      }
+    },
+    "target_distance": 12.0
+  },
+  "dynamic_groups": [
+    {
+      "_comment": "Vehicle in the same lane in front of ego",
+      "type": "TrafficAgent",
+      "spawn": {
+        "box": {
+          "center": [2.0, -270.0],
+          "length": 10,
+          "width": 3.5,
+          "heading": 1.57
+        },
+        "velocity": [5.0, 5.0]
+      },
+      "goal": {
+        "box": {
+          "center": [2.0, -50.0],
+          "length": 5,
+          "width": 7,
+          "heading": 1.57
+        }
+      },
+      "open_loop": true,
+      "belief": {"visible": true, "velocity_error": 0.3}
+    },
+    {
+      "_comment": "Vehicle in the adjacent lane that ego merges in front of / behind ego",
+      "type": "TrafficAgent",
+      "spawn": {
+        "box": {
+          "center": [-2.0, -275.0],
+          "length": 10,
+          "width": 3.5,
+          "heading": 1.57
+        },
+        "velocity": [5.0, 5.0]
+      },
+      "goal": {
+        "box": {
+          "center": [2.0, -50.0],
+          "length": 5,
+          "width": 7,
+          "heading": 1.57
+        }
+      },
+      "open_loop": true,
+      "belief": {"visible": true, "velocity_error": 0.3},
+      "macro_actions": [
+        {"type": "continue", "termination_point": [2.0, -260.0]},
+        {"type": "change_lane_left"},                                                                                                                                                                         
+        {"type": "continue"} 
+      ]
+    }
+  ],
+  "static_groups": []
+}

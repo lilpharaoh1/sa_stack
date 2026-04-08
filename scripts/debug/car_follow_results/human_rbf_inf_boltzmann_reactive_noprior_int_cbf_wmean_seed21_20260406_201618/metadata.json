@@ -1,0 +1,14 @@
+{
+  "config": "noprior_cbf_wmean.yaml",
+  "inference": "boltzmann_reactive_noprior",
+  "intervention": "cbf_wmean",
+  "gamma": 0.99,
+  "human": "rbf",
+  "seed": 21,
+  "steps": 100,
+  "fps": 10,
+  "map": "carfollow",
+  "target_distance": 12.0,
+  "d_safe": 8.0,
+  "wall_time_s": 4.79
+}

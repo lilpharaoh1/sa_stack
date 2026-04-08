@@ -1,0 +1,20 @@
+{
+  "experiment": "exp2_merge_in_front",
+  "inference": "boltzmann_kalman",
+  "intervention": "cbf_kalman",
+  "human": "rbf",
+  "gamma": 0.99,
+  "beta": 1.0,
+  "target_distance": 20.0,
+  "d_safe": 15.0,
+  "b_kappa": 0.01,
+  "sigma_kappa": 25.0,
+  "seed": 21,
+  "n_steps": 200,
+  "dt": 0.1,
+  "n_interventions": 200,
+  "velocity_errors": {
+    "100": 0.3,
+    "101": 0.3
+  }
+}

@@ -1,0 +1,43 @@
+# ============================================================
+# Car-following experiment defaults
+# ============================================================
+# Override specific fields in experiment configs that
+# use  _base: defaults.yaml
+
+# --- Inference ---
+inference:
+  type: none
+  # none | boltzmann_reactive | boltzmann_reactive_noprior
+  # boltzmann_reactive_floormix | boltzmann_kalman | oracle
+  beta: 1.0
+
+# --- Intervention (CBF safety filter) ---
+intervention:
+  type: none
+  # none | cbf_single | cbf_mode | cbf_wmean
+  # cbf_contmean | cbf_kalman | cbf_chance | always_policy
+  gamma: 0.99
+  lookahead_n: 25
+
+# --- Human model ---
+human:
+  type: static          # static | rbf
+  b_kappa: 0.01         # RBF drift rate
+  sigma_kappa: 25.0     # RBF kernel width (m)
+
+# --- Safety ---
+safety:
+  target_distance: 12.0   # desired following distance (m)
+  d_safe: 8.0             # minimum safe distance (m)
+
+# --- Kalman filter (for boltzmann_kalman inference) ---
+kalman:
+  Q: 0.001               # process noise
+  R: 0.0001              # observation noise
+  B: 0.01                # process input gain
+  P_0: 0.5               # initial variance
+
+# --- Simulation ---
+simulation:
+  steps: 100
+  seed: 21

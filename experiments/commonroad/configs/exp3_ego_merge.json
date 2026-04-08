@@ -1,0 +1,30 @@
+{
+  "scenario": {
+    "xml": "exp3_ego_merge",
+    "dt": 0.1,
+    "max_steps": 200
+  },
+  "ego": {
+    "target_distance": 20.0,
+    "d_safe": 15.0,
+    "beta": 1.0,
+    "gamma": 0.99,
+    "inference": "boltzmann_kalman",
+    "intervention": "cbf_single",
+    "human": "rbf",
+    "b_kappa": 0.01,
+    "sigma_kappa": 25.0
+  },
+  "vehicles": {
+    "100": {
+      "controller": "constant_velocity",
+      "velocity_error": 0.2,
+      "_comment": "Front vehicle in target lane"
+    },
+    "101": {
+      "controller": "constant_velocity",
+      "velocity_error": 0.2,
+      "_comment": "Rear vehicle in target lane"
+    }
+  }
+}
