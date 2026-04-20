@@ -193,6 +193,16 @@ def simple_acc_controller(obs: Observation,
     return Action(accel, 0.0)
 
 
+def accelerating_controller_factory(accel: float = 1.0,
+                                    v_max: float = 25.0):
+    """Return a controller that applies constant acceleration up to v_max."""
+    def controller(obs: Observation) -> Action:
+        if obs.ego.velocity >= v_max:
+            return Action(0.0, 0.0)
+        return Action(accel, 0.0)
+    return controller
+
+
 def playback_controller_factory(prebaked_traj: List[tuple]):
     """Return a controller that replays a pre-baked trajectory.
 

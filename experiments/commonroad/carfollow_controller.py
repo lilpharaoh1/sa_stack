@@ -84,6 +84,33 @@ def compute_accel(ego_speed: float, lead_speed: float,
     return float(np.clip(accel, -MAX_ACCEL, MAX_ACCEL))
 
 
+def compute_accel_additive(ego_speed: float, lead_speed: float,
+                           distance: float, vel_err_additive: float,
+                           target_distance: float) -> float:
+    """Proportional controller with additive velocity-error.
+
+    v_desired = (v_lead + epsilon) + k_d * (d - d*)
+    a = k_v * (v_desired - v_ego)
+    """
+    perceived = lead_speed + vel_err_additive
+    dist_error = distance - target_distance
+    desired = max(0.0, perceived + K_DIST * dist_error)
+    accel = K_SPEED * (desired - ego_speed)
+    return float(np.clip(accel, -MAX_ACCEL, MAX_ACCEL))
+
+
+def _parse_numeric(s: str) -> float:
+    """Parse a numeric string where leading zero means decimal.
+
+    '1' → 1.0, '05' → 0.5, '15' → 1.5, '025' → 0.25, '2' → 2.0
+    """
+    if '.' in s:
+        return float(s)
+    if len(s) > 1 and s[0] == '0':
+        return float(s[0] + '.' + s[1:])
+    return float(s)
+
+
 def rbf_feature(distance: float, sigma: float = 25.0) -> float:
     """RBF kernel on following distance (attention kernel)."""
     return float(np.exp(-distance ** 2 / (2.0 * sigma ** 2)))
@@ -173,6 +200,7 @@ def infer_boltzmann_reactive(belief: VelocityErrorBelief,
         "inferred_mode": belief.mode,
         "inferred_mean": belief.mean,
         "inferred_std": belief.std,
+        "inferred_std_continuous": None,  # no Kalman state
         "inferred_dist": dict(zip(
             np.round(belief.candidates, 2),
             np.round(belief.probabilities, 4))),
@@ -211,6 +239,68 @@ def infer_boltzmann_kalman(kf_kappa, kf_P,
         "inferred_mode": belief.mode,
         "inferred_mean": belief.mean,
         "inferred_std": belief.std,
+        "inferred_std_continuous": np.sqrt(P_new),
+        "inferred_dist": dict(zip(
+            np.round(belief.candidates, 2),
+            np.round(belief.probabilities, 4))),
+    }
+
+
+def infer_idkalman(kf_epsilon, kf_P,
+                   ego_speed, lead_speed, distance,
+                   human_accel, target_distance,
+                   belief: VelocityErrorBelief,
+                   kf_Q=0.001, kf_R=1.0,
+                   a_lead=0.0, alpha=0.0, dt=0.1) -> dict:
+    """Kalman filter with acceleration-aware process model in epsilon space.
+
+    State x = epsilon (velocity error in m/s, additive).
+    Process:  A = 1 + alpha * a_lead * dt
+              x_pred = A * x_prev
+              P_pred = A^2 * P + Q
+    Obs:      a = K_v * ((v_lead + epsilon) + K_d*(d - d*) - v_ego)
+              C = da/depsilon = K_v = 1.0
+    Update:   K = P_pred / (P_pred + R)
+    Convert:  kappa = epsilon / v_lead  (for intervention pipeline)
+
+    When a_lead=0 or alpha=0, reduces to the identity process model.
+    """
+    # --- Predict ---
+    A = 1.0 + alpha * a_lead * dt
+    x_pred = A * kf_epsilon
+    P_pred = A ** 2 * kf_P + kf_Q
+
+    # --- Update (additive observation model, C = K_SPEED = 1.0) ---
+    C = K_SPEED  # = 1.0
+    a_pred = compute_accel_additive(ego_speed, lead_speed, distance,
+                                    x_pred, target_distance)
+    innovation = human_accel - a_pred
+
+    S = C ** 2 * P_pred + kf_R  # P_pred + R
+    K_gain = P_pred * C / S     # P_pred / (P_pred + R)
+    norm_innovation = innovation / np.sqrt(S) if S > 0 else 0.0
+    eps_new = x_pred + K_gain * innovation
+    P_new = max((1.0 - K_gain * C) * P_pred, 1e-8)
+
+    # --- Convert to kappa space for beliefs & intervention ---
+    v = max(lead_speed, 0.1)  # avoid division by zero
+    kappa_hat = eps_new / v
+    P_kappa = P_new / (v ** 2)
+
+    log_probs = -(belief.candidates - kappa_hat) ** 2 / (2.0 * P_kappa)
+    log_probs -= log_probs.max()
+    probs = np.exp(log_probs)
+    belief.probabilities = probs / probs.sum()
+
+    return {
+        "kf_epsilon": eps_new,
+        "kf_P": P_new,
+        "kf_kappa": kappa_hat,
+        "norm_innovation": float(norm_innovation),
+        "inferred_mode": belief.mode,
+        "inferred_mean": belief.mean,
+        "inferred_std": belief.std,
+        "inferred_std_continuous": np.sqrt(P_kappa),
         "inferred_dist": dict(zip(
             np.round(belief.candidates, 2),
             np.round(belief.probabilities, 4))),
@@ -225,6 +315,7 @@ def infer_oracle(belief: VelocityErrorBelief, true_vel_err: float) -> dict:
         "inferred_mode": belief.mode,
         "inferred_mean": belief.mean,
         "inferred_std": belief.std,
+        "inferred_std_continuous": None,  # no Kalman state
         "inferred_dist": dict(zip(
             np.round(belief.candidates, 2),
             np.round(belief.probabilities, 4))),
@@ -234,7 +325,7 @@ def infer_oracle(belief: VelocityErrorBelief, true_vel_err: float) -> dict:
 # ---------------------------------------------------------------------------
 #  CBF intervention
 # ---------------------------------------------------------------------------
-LOOKAHEAD_N = 25
+LOOKAHEAD_N = 50
 
 
 def barrier(distance, d_safe):
@@ -263,71 +354,94 @@ def intervene_cbf_single(human_accel, distance, ego_speed, lead_speed,
     return human_accel, False, a_max
 
 
-def _sim_forward_static(a_exec, lead_speed, s0, kappa, dt, N,
-                        target_distance):
-    """Forward-simulate N steps with kappa held constant.
+def _sim_forward_multi(a_exec, ego_state, vehicles, dt, N,
+                       target_distance, desired_speed=15.0,
+                       evolving=False, b_kappa=0.01, sigma_kappa=25.0):
+    """Forward-simulate N steps with dynamic lead determination.
+
+    At each step, determines which vehicle (if any) is the lead based
+    on future trajectories and lane position — exactly mirroring the
+    real human controller logic:
+      - Lead exists → compute_accel(v_ego, v_lead, d, kappa, d*)
+      - No lead    → K_SPEED * (desired_speed - v_ego)
+
+    Args:
+        a_exec:    (N,) optimizer acceleration sequence.
+        ego_state: Current ego VehicleState.
+        vehicles:  List of VehicleInfo with future trajectories.
+        evolving:  If True, kappa drifts via RBF at each step.
 
     Returns:
-        states:   (N+1, 2) array of [distance, ego_speed] at each step.
-        a_H_pred: (N,) array of predicted human accelerations under kappa.
+        ego_positions: (N+1, 2) array of [ego_x, ego_speed] at each step.
+        a_H_pred:      (N,) array of predicted human accelerations.
     """
-    states = np.zeros((N + 1, 2))
-    states[0] = s0
+    ego_fwd = np.array([np.cos(ego_state.heading),
+                        np.sin(ego_state.heading)])
+    ego_right = np.array([-ego_fwd[1], ego_fwd[0]])
+
+    ego_x = ego_state.x
+    ego_y = ego_state.y
+    v_ego = ego_state.velocity
+
+    ego_positions = np.zeros((N + 1, 2))
+    ego_positions[0] = [ego_x, v_ego]
     a_H_pred = np.zeros(N)
 
-    for j in range(N):
-        d_j, v_j = states[j]
-        perceived = lead_speed * (1.0 + kappa)
-        desired = max(0.0, perceived + K_DIST * (d_j - target_distance))
-        a_H = float(np.clip(K_SPEED * (desired - v_j),
-                            -MAX_ACCEL, MAX_ACCEL))
-        a_H_pred[j] = a_H
-
-        a = a_exec[j]
-        v_next = max(0.0, v_j + a * dt)
-        d_next = d_j + (lead_speed - v_j) * dt
-        states[j + 1] = [d_next, v_next]
-
-    return states, a_H_pred
-
-
-def _sim_forward_evolving(a_exec, lead_speed, s0, kappa_init, dt, N,
-                          target_distance, b_kappa=0.01, sigma_kappa=25.0):
-    """Forward-simulate N steps with kappa evolving via RBF drift.
-
-    At each step, kappa decays toward 0 based on the current distance:
-        kappa_{j+1} = kappa_j * (1 - b_kappa * rbf(d_j))
-
-    This predicts that the human's perception will improve over the
-    lookahead horizon, making the safety filter less conservative.
-
-    Returns:
-        states:   (N+1, 2) array of [distance, ego_speed] at each step.
-        a_H_pred: (N,) array of predicted human accelerations under evolving kappa.
-    """
-    states = np.zeros((N + 1, 2))
-    states[0] = s0
-    a_H_pred = np.zeros(N)
-    kappa_j = kappa_init
+    # Per-vehicle kappa state (for evolving)
+    kappas = {vi.vid: vi.kappa_hat for vi in vehicles}
 
     for j in range(N):
-        d_j, v_j = states[j]
-        # Evolve kappa based on current distance
-        f = rbf_feature(d_j, sigma_kappa)
-        kappa_j = kappa_j * (1.0 - b_kappa * f)
-
-        perceived = lead_speed * (1.0 + kappa_j)
-        desired = max(0.0, perceived + K_DIST * (d_j - target_distance))
-        a_H = float(np.clip(K_SPEED * (desired - v_j),
-                            -MAX_ACCEL, MAX_ACCEL))
-        a_H_pred[j] = a_H
-
+        # Advance ego position
         a = a_exec[j]
-        v_next = max(0.0, v_j + a * dt)
-        d_next = d_j + (lead_speed - v_j) * dt
-        states[j + 1] = [d_next, v_next]
+        v_ego = max(0.0, v_ego + a * dt)
+        ego_x += v_ego * ego_fwd[0] * dt
+        ego_y += v_ego * ego_fwd[1] * dt
 
-    return states, a_H_pred
+        # Determine lead vehicle at this horizon step
+        best_dist = float("inf")
+        best_vid = None
+        best_speed = None
+
+        for vi in vehicles:
+            if vi.future_traj is not None and j < len(vi.future_traj):
+                vx, vy = vi.future_traj[j][0], vi.future_traj[j][1]
+                v_speed = vi.future_traj[j][3]
+            else:
+                # Constant speed extrapolation
+                vx = vi.distance * ego_fwd[0] + ego_state.x + vi.speed * ego_fwd[0] * (j + 1) * dt
+                vy = vi.lateral * ego_right[1] + ego_state.y + vi.speed * ego_fwd[1] * (j + 1) * dt
+                v_speed = vi.speed
+
+            diff = np.array([vx - ego_x, vy - ego_y])
+            along = diff @ ego_fwd
+            lat = abs(diff @ ego_right)
+
+            if along > 0 and _in_lane(lat) and along < best_dist:
+                best_dist = along
+                best_vid = vi.vid
+                best_speed = v_speed
+
+        # Compute predicted human action
+        if best_vid is not None:
+            kappa = kappas.get(best_vid, 0.0)
+            if evolving:
+                f = rbf_feature(best_dist, sigma_kappa)
+                kappa = kappa * (1.0 - b_kappa * f)
+                kappas[best_vid] = kappa
+
+            perceived = best_speed * (1.0 + kappa)
+            desired = max(0.0, perceived + K_DIST * (best_dist - target_distance))
+            a_H = float(np.clip(K_SPEED * (desired - v_ego),
+                                -MAX_ACCEL, MAX_ACCEL))
+        else:
+            # No lead → cruise at desired speed
+            a_H = float(np.clip(K_SPEED * (desired_speed - v_ego),
+                                -MAX_ACCEL, MAX_ACCEL))
+
+        a_H_pred[j] = a_H
+        ego_positions[j + 1] = [ego_x, v_ego]
+
+    return ego_positions, a_H_pred
 
 
 def intervene_lookahead(human_accel, distance, ego_speed, lead_speed,
@@ -343,9 +457,6 @@ def intervene_lookahead(human_accel, distance, ego_speed, lead_speed,
     objective:   min ||a_exec - a_H_pred(kappa_hat)||^2
     subject to:  h(x_{j+1}) >= (1-gamma) * h(x_j)   for all j
                  v(x_{j+1}) >= 0                      for all j
-
-    Different kappa_hat values produce different a_H_pred trajectories,
-    so the optimal safe action depends on which kappa estimate is used.
 
     Args:
         kappa_hat:   Estimated velocity error for the forward model.
@@ -435,27 +546,31 @@ class VehicleInfo:
     future_traj: Optional[List[tuple]] = None
 
 
-def _predict_vehicle_distance(v_info: VehicleInfo,
-                              ego_state: "VehicleState",
-                              a_exec: np.ndarray, dt: float, N: int,
-                              b_kappa: float = 0.01,
-                              sigma_kappa: float = 25.0) -> np.ndarray:
-    """Predict longitudinal distance between ego and one vehicle over N steps.
+def _predict_vehicle_distance_and_in_lane(
+        v_info: VehicleInfo, ego_state: "VehicleState",
+        a_exec: np.ndarray, dt: float, N: int,
+        b_kappa: float = 0.01, sigma_kappa: float = 25.0,
+) -> tuple:
+    """Predict longitudinal distance AND per-step lane membership between
+    ego and one vehicle over N steps.
 
-    If the vehicle has a known future trajectory, use actual positions.
-    Otherwise fall back to constant-speed extrapolation.
+    Uses the vehicle's known future trajectory to determine at each
+    timestep whether it is in the ego's lane.
 
     Returns:
         distances: (N+1,) array of ego-to-vehicle longitudinal distance.
+        in_lane:   (N+1,) boolean array — True when vehicle is in ego's lane.
     """
-    # Ego forward projection: position along heading
     ego_fwd = np.array([np.cos(ego_state.heading),
                         np.sin(ego_state.heading)])
+    ego_right = np.array([-ego_fwd[1], ego_fwd[0]])
     ego_x, ego_y = ego_state.x, ego_state.y
     v_ego = ego_state.velocity
 
     distances = np.zeros(N + 1)
+    in_lane = np.zeros(N + 1, dtype=bool)
     distances[0] = v_info.distance
+    in_lane[0] = _in_lane(v_info.lateral)
 
     has_future = (v_info.future_traj is not None
                   and len(v_info.future_traj) >= N)
@@ -470,49 +585,46 @@ def _predict_vehicle_distance(v_info: VehicleInfo,
             vx, vy = v_info.future_traj[j][0], v_info.future_traj[j][1]
             diff = np.array([vx - ego_x, vy - ego_y])
             distances[j + 1] = diff @ ego_fwd
+            lat = abs(diff @ ego_right)
+            in_lane[j + 1] = _in_lane(lat)
         else:
-            # Fallback: constant speed extrapolation
             distances[j + 1] = distances[j] + (v_info.speed - v_ego) * dt
+            in_lane[j + 1] = in_lane[j]  # hold last known state
 
-    return distances
+    return distances, in_lane
+
+
+def _in_lane(lateral_offset: float,
+             lane_width: float = LANE_WIDTH) -> bool:
+    """Binary lane check: is the vehicle in the ego's lane?"""
+    return abs(lateral_offset) < lane_width * 0.8
 
 
 def intervene_lookahead_multi(human_accel, ego_state: "VehicleState",
                               vehicles: List[VehicleInfo],
-                              lead_kappa_hat: float,
-                              lead_speed: float, lead_distance: float,
                               d_safe, gamma, dt, target_distance,
+                              desired_speed=15.0,
                               prev_sol=None,
-                              evolving=False, b_kappa=0.01, sigma_kappa=25.0):
+                              evolving=False, b_kappa=0.01, sigma_kappa=25.0,
+                              ):
     """Multi-vehicle predictive CBF safety filter.
 
-    Same as intervene_lookahead but enforces CBF constraints against
-    ALL vehicles ahead of the ego, not just the lead.  When vehicles
-    have known future trajectories, the MPC uses actual positions
-    rather than constant-speed extrapolation.
-
-    The objective still minimises deviation from the predicted human
-    actions (based on the lead vehicle's kappa), but the constraints
-    ensure safety w.r.t. every nearby vehicle.
+    Enforces CBF constraints against ALL vehicles ahead of the ego.
+    The objective minimises deviation from the predicted human actions,
+    where the forward model dynamically determines the lead vehicle
+    at each horizon step (mirroring the real human controller).
     """
     N = LOOKAHEAD_N
     ego_speed = ego_state.velocity
-    s0_lead = np.array([lead_distance, ego_speed])
 
-    # --- Objective: match predicted human actions (based on lead) ---
-    if evolving:
-        def _sim_lead(a_exec):
-            return _sim_forward_evolving(
-                a_exec, lead_speed, s0_lead, lead_kappa_hat, dt, N,
-                target_distance, b_kappa, sigma_kappa)
-    else:
-        def _sim_lead(a_exec):
-            return _sim_forward_static(
-                a_exec, lead_speed, s0_lead, lead_kappa_hat, dt, N,
-                target_distance)
-
+    # --- Objective: match predicted human actions ---
+    # Uses dynamic lead determination at each horizon step, mirroring
+    # the actual human controller (cruise when no lead, follow when lead).
     def objective(a_exec):
-        _, a_H_pred = _sim_lead(a_exec)
+        _, a_H_pred = _sim_forward_multi(
+            a_exec, ego_state, vehicles, dt, N,
+            target_distance, desired_speed=desired_speed,
+            evolving=evolving, b_kappa=b_kappa, sigma_kappa=sigma_kappa)
         return float(np.sum((a_exec - a_H_pred) ** 2))
 
     # --- Constraints: CBF against every vehicle ---
@@ -521,10 +633,14 @@ def intervene_lookahead_multi(human_accel, ego_state: "VehicleState",
     for v_info in vehicles:
         def _make_cbf_con(vi):
             def con(a_exec):
-                dists = _predict_vehicle_distance(
+                dists, in_lane_flags = _predict_vehicle_distance_and_in_lane(
                     vi, ego_state, a_exec, dt, N, b_kappa, sigma_kappa)
-                h_j = dists[:-1] - d_safe
-                h_jp1 = dists[1:] - d_safe
+                # Only enforce d_safe at timesteps where the vehicle
+                # is in the ego's lane.  When out-of-lane, d_safe=0
+                # so the constraint is trivially satisfied.
+                d_safe_t = np.where(in_lane_flags, d_safe, 0.0)
+                h_j = dists[:-1] - d_safe_t[:-1]
+                h_jp1 = dists[1:] - d_safe_t[1:]
                 return h_jp1 - (1.0 - gamma) * h_j
             return con
 
@@ -588,15 +704,20 @@ class CarFollowController:
                  velocity_errors: Dict[int, float] = None,
                  target_distance: float = 12.0,
                  d_safe: float = 8.0,
+                 desired_speed: float = 15.0,
                  beta: float = 1.0,
                  gamma: float = 0.99,
                  inference: str = "none",
                  intervention: str = "none",
                  human: str = "static",
                  b_kappa: float = 0.01,
-                 sigma_kappa: float = 25.0):
+                 sigma_kappa: float = 25.0,
+                 kf_Q: float = 0.001,
+                 kf_R: float = 0.01,
+                 kf_alpha: float = 0.0):
         self.target_distance = target_distance
         self.d_safe = d_safe
+        self.desired_speed = desired_speed
         self.beta = beta
         self.gamma = gamma
         self.inference_type = inference
@@ -617,9 +738,14 @@ class CarFollowController:
         # Kalman filter state per vehicle
         self._kf_kappa: Dict[int, float] = {v: 0.0 for v in self._true_vel_errors}
         self._kf_P: Dict[int, float] = {v: 0.5 for v in self._true_vel_errors}
-        self._kf_Q = 0.001
-        self._kf_R = 0.01    # observation noise (matches CarFollowAgent)
+        self._kf_epsilon: Dict[int, float] = {v: 0.0 for v in self._true_vel_errors}
+        self._kf_Q = kf_Q
+        self._kf_R = 1.0 if (inference == "idkalman" and kf_R == 0.01) else kf_R
         self._kf_B = 0.01
+        self._kf_alpha = kf_alpha
+
+        # Lead acceleration tracking (per vehicle)
+        self._prev_lead_speed: Dict[int, float] = {}
 
         # Lookahead warm-start
         self._prev_sol: Optional[np.ndarray] = None
@@ -637,11 +763,13 @@ class CarFollowController:
             self._true_vel_errors.setdefault(vid, 0.0)
             self._kf_kappa.setdefault(vid, 0.0)
             self._kf_P.setdefault(vid, 0.5)
+            self._kf_epsilon.setdefault(vid, 0.0)
 
     def _run_inference_for_vehicle(self, vid: int, ego_speed: float,
                                     vehicle_speed: float, distance: float,
                                     human_accel: float,
-                                    is_lead: bool = True) -> dict:
+                                    is_lead: bool = True,
+                                    obs_dt: float = 0.1) -> dict:
         """Run belief inference for one vehicle.
 
         When *is_lead* is True, the human's observed action is informative
@@ -667,21 +795,46 @@ class CarFollowController:
                 P_pred = self._kf_P[vid] + self._kf_Q
                 self._kf_kappa[vid] = x_pred
                 self._kf_P[vid] = P_pred
-                # Project onto discrete belief (wider distribution as P grows)
                 log_probs = -(belief.candidates - x_pred) ** 2 / (2.0 * P_pred)
                 log_probs -= log_probs.max()
                 probs = np.exp(log_probs)
                 belief.probabilities = probs / probs.sum()
+            elif self.inference_type == "idkalman":
+                # Acceleration-aware prediction in epsilon space
+                prev_v = self._prev_lead_speed.get(vid)
+                if prev_v is not None:
+                    a_lead = (vehicle_speed - prev_v) / obs_dt
+                else:
+                    a_lead = 0.0
+                self._prev_lead_speed[vid] = vehicle_speed
+                A = 1.0 + self._kf_alpha * a_lead * obs_dt
+                eps_pred = A * self._kf_epsilon[vid]
+                P_pred = A ** 2 * self._kf_P[vid] + self._kf_Q
+                self._kf_epsilon[vid] = eps_pred
+                self._kf_P[vid] = P_pred
+                # Convert to kappa for display / intervention
+                v = max(vehicle_speed, 0.1)
+                kappa_hat = eps_pred / v
+                P_kappa = P_pred / (v ** 2)
+                self._kf_kappa[vid] = kappa_hat
+                log_probs = -(belief.candidates - kappa_hat) ** 2 / (2.0 * P_kappa)
+                log_probs -= log_probs.max()
+                probs = np.exp(log_probs)
+                belief.probabilities = probs / probs.sum()
             # For all Boltzmann variants + oracle: posterior unchanged
+            kf_k = self._kf_kappa.get(vid)
+            kf_p = self._kf_P.get(vid)
             return {
                 "inferred_mode": belief.mode,
                 "inferred_mean": belief.mean,
                 "inferred_std": belief.std,
+                "inferred_std_continuous": (
+                    np.sqrt(kf_p) if kf_p is not None else None),
                 "inferred_dist": dict(zip(
                     np.round(belief.candidates, 2),
                     np.round(belief.probabilities, 4))),
-                "kf_kappa": self._kf_kappa.get(vid),
-                "kf_P": self._kf_P.get(vid),
+                "kf_kappa": kf_k,
+                "kf_P": kf_p,
             }
 
         # --- Lead vehicle: full observation model ---
@@ -708,9 +861,35 @@ class CarFollowController:
             self._kf_kappa[vid] = diag["kf_kappa"]
             self._kf_P[vid] = diag["kf_P"]
             return diag
+        elif self.inference_type == "idkalman":
+            # Estimate lead acceleration from speed difference
+            prev_v = self._prev_lead_speed.get(vid)
+            if prev_v is not None:
+                a_lead = (vehicle_speed - prev_v) / (obs_dt if obs_dt > 0 else 0.1)
+            else:
+                a_lead = 0.0
+            self._prev_lead_speed[vid] = vehicle_speed
+
+            diag = infer_idkalman(
+                self._kf_epsilon[vid], self._kf_P[vid],
+                belief=belief,
+                kf_Q=self._kf_Q, kf_R=self._kf_R,
+                a_lead=a_lead, alpha=self._kf_alpha,
+                dt=obs_dt if obs_dt > 0 else 0.1,
+                **common)
+            self._kf_epsilon[vid] = diag["kf_epsilon"]
+            self._kf_kappa[vid] = diag["kf_kappa"]
+            self._kf_P[vid] = diag["kf_P"]
+            return diag
         elif self.inference_type == "oracle":
-            return infer_oracle(
-                belief, self._true_vel_errors.get(vid, 0.0))
+            true_ve = self._true_vel_errors.get(vid, 0.0)
+            diag = infer_oracle(belief, true_ve)
+            # Set Kalman state so cbf_contmean can use it
+            self._kf_kappa[vid] = true_ve
+            self._kf_P[vid] = 1e-8
+            diag["kf_kappa"] = true_ve
+            diag["kf_P"] = 1e-8
+            return diag
         return {}
 
     def _get_kappa_hat(self, vid: int) -> float:
@@ -739,19 +918,46 @@ class CarFollowController:
         for vid in vehicles_ahead:
             self._ensure_belief(vid)
 
-        # --- Human belief evolution for ALL visible vehicles ---
+        # --- Human belief evolution (same-lane vehicles only) ---
         if self.human_type == "rbf":
             for vid, (vs, along, lateral) in vehicles_ahead.items():
-                old_kappa = self._true_vel_errors.get(vid, 0.0)
-                new_kappa = evolve_vel_err(
-                    old_kappa, along, self.b_kappa, self.sigma_kappa)
-                self._true_vel_errors[vid] = new_kappa
+                if abs(lateral) < LANE_WIDTH * 0.8:
+                    old_kappa = self._true_vel_errors.get(vid, 0.0)
+                    new_kappa = evolve_vel_err(
+                        old_kappa, along, self.b_kappa, self.sigma_kappa)
+                    self._true_vel_errors[vid] = new_kappa
+        elif self.human_type.startswith("gaussian_meanstd_"):
+            # Additive Gaussian noise with non-zero mean:
+            #   perceived_speed = true_speed + N(mu, sigma)
+            # Format: gaussian_meanstd_<mu> or gaussian_meanstd_<mu>_<sigma>
+            parts = self.human_type.split("gaussian_meanstd_")[1].split("_")
+            mu = _parse_numeric(parts[0])
+            sigma = _parse_numeric(parts[1]) if len(parts) > 1 else 1.0
+            for vid, (vs, along, lateral) in vehicles_ahead.items():
+                if abs(lateral) < LANE_WIDTH * 0.8 and vs.velocity > 0.1:
+                    noise = np.random.normal(mu, sigma)
+                    self._true_vel_errors[vid] = noise / vs.velocity
+                else:
+                    self._true_vel_errors[vid] = 0.0
+        elif self.human_type.startswith("gaussian_std_"):
+            # Additive Gaussian noise: perceived_speed = true_speed + N(0, sigma)
+            # Expressed as multiplicative vel_err: perceived = v*(1+kappa)
+            # so kappa = noise / v  (resampled each step)
+            sigma = _parse_numeric(self.human_type.split("gaussian_std_")[1])
+            for vid, (vs, along, lateral) in vehicles_ahead.items():
+                if abs(lateral) < LANE_WIDTH * 0.8 and vs.velocity > 0.1:
+                    noise = np.random.normal(0.0, sigma)
+                    self._true_vel_errors[vid] = noise / vs.velocity
+                else:
+                    self._true_vel_errors[vid] = 0.0
 
         # --- Human controller (reacts to lead vehicle only) ---
         if lead_state is None:
-            human_accel = 0.0
+            desired_speed = self.desired_speed
+            human_accel = float(np.clip(
+                K_SPEED * (desired_speed - ego.velocity),
+                -MAX_ACCEL, MAX_ACCEL))
             perceived_lead_speed = None
-            desired_speed = ego.velocity
         else:
             vel_err = self._true_vel_errors.get(lead_id, 0.0)
             human_accel = compute_accel(
@@ -783,7 +989,7 @@ class CarFollowController:
             for vid, (vs, along, lateral) in vehicles_ahead.items():
                 diag = self._run_inference_for_vehicle(
                     vid, ego.velocity, vs.velocity, along, human_accel,
-                    is_lead=(vid == lead_id))
+                    is_lead=(vid == lead_id), obs_dt=dt)
                 diag["human_vel_err"] = self._true_vel_errors.get(vid, 0.0)
                 diag["distance"] = along
                 per_vehicle_diag[vid] = diag
@@ -797,18 +1003,18 @@ class CarFollowController:
         intervened = False
         a_cbf_max = None
 
-        if (lead_state is not None and lead_distance < float("inf")
-                and self.intervention_type != "none"):
-            a_cbf_max = cbf_max_accel(
-                lead_distance, ego.velocity, lead_state.velocity,
-                self.d_safe, self.gamma, dt)
+        has_vehicles = len(vehicles_ahead) > 0
+        if has_vehicles and self.intervention_type != "none":
+            if lead_state is not None and lead_distance < float("inf"):
+                a_cbf_max = cbf_max_accel(
+                    lead_distance, ego.velocity, lead_state.velocity,
+                    self.d_safe, self.gamma, dt)
 
             if self.intervention_type == "cbf_single":
-                # Single-step CBF against closest vehicle ahead in-lane
-                # Check all vehicles, take the most restrictive
+                # Single-step CBF against in-lane vehicles only
                 min_a_max = MAX_ACCEL
                 for vid, (vs, along, lateral) in vehicles_ahead.items():
-                    if abs(lateral) < LANE_WIDTH * 0.8:
+                    if _in_lane(lateral):
                         a_m = cbf_max_accel(along, ego.velocity, vs.velocity,
                                             self.d_safe, self.gamma, dt)
                         min_a_max = min(min_a_max, a_m)
@@ -819,9 +1025,14 @@ class CarFollowController:
                     intervened = True
 
             elif self.intervention_type == "always_policy":
-                executed_accel = compute_accel(
-                    ego.velocity, lead_state.velocity, lead_distance,
-                    0.0, self.target_distance)
+                if lead_state is not None:
+                    executed_accel = compute_accel(
+                        ego.velocity, lead_state.velocity, lead_distance,
+                        0.0, self.target_distance)
+                else:
+                    executed_accel = float(np.clip(
+                        K_SPEED * (self.desired_speed - ego.velocity),
+                        -MAX_ACCEL, MAX_ACCEL))
                 intervened = True
 
             elif self.intervention_type in ("cbf_lookahead", "cbf_mode",
@@ -841,16 +1052,12 @@ class CarFollowController:
                         evolving=use_evolving,
                         future_traj=ft))
 
-                lead_kappa = self._get_kappa_hat(lead_id)
-
                 executed_accel, intervened, self._prev_sol = \
                     intervene_lookahead_multi(
                         human_accel, ego, v_infos,
-                        lead_kappa_hat=lead_kappa,
-                        lead_speed=lead_state.velocity,
-                        lead_distance=lead_distance,
                         d_safe=self.d_safe, gamma=self.gamma, dt=dt,
                         target_distance=self.target_distance,
+                        desired_speed=self.desired_speed,
                         prev_sol=self._prev_sol,
                         evolving=use_evolving,
                         b_kappa=self.b_kappa,

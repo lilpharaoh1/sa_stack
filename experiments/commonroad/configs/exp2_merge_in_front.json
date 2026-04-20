@@ -2,32 +2,28 @@
   "scenario": {
     "xml": "exp2_merge_in_front",
     "dt": 0.1,
-    "max_steps": 200
+    "max_steps": 100
   },
   "ego": {
     "target_distance": 20.0,
     "d_safe": 15.0,
+    "desired_speed": 15.0,
     "beta": 1.0,
     "gamma": 0.99,
     "inference": "boltzmann_kalman",
     "intervention": "cbf_single",
     "human": "rbf",
-    "b_kappa": 0.01,
-    "sigma_kappa": 25.0
+    "b_kappa": 0.2,
+    "sigma_kappa": 10.0
   },
   "vehicles": {
     "100": {
-      "controller": "constant_velocity",
-      "velocity_error": 0.3,
-      "_comment": "Lead vehicle in ego lane"
-    },
-    "101": {
       "controller": "lane_change",
       "lane_change": {
         "y_from": 5.25,
         "y_to": 1.75,
-        "t_start": 0.5,
-        "t_dur": 4.0,
+        "t_start": 2.0,
+        "t_dur": 3.0,
         "vx_before": 15.0,
         "vx_after": 15.0,
         "t_decel_dur": 3.0

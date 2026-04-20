@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='UTF-8'?>
-<commonRoad timeStepSize="0.1" commonRoadVersion="2020a" author="Emran" affiliation="" source="epistemic-planning experiments" benchmarkID="ZAM_Highway-1_2" date="2026-04-08">
+<commonRoad timeStepSize="0.1" commonRoadVersion="2020a" author="Emran" affiliation="" source="epistemic-planning experiments" benchmarkID="ZAM_Highway-1_2" date="2026-04-17">
   <location>
     <geoNameId>-999</geoNameId>
     <gpsLatitude>999</gpsLatitude>
@@ -1253,8 +1253,8 @@
       </time>
       <position>
         <point>
-          <x>100.0</x>
-          <y>1.75</y>
+          <x>65.0</x>
+          <y>5.25</y>
         </point>
       </position>
       <orientation>
@@ -1280,8 +1280,8 @@
         </time>
         <position>
           <point>
-            <x>101.5</x>
-            <y>1.75</y>
+            <x>66.5</x>
+            <y>5.25</y>
           </point>
         </position>
         <steeringAngle>
@@ -1300,8 +1300,8 @@
         </time>
         <position>
           <point>
-            <x>103.0</x>
-            <y>1.75</y>
+            <x>68.0</x>
+            <y>5.25</y>
           </point>
         </position>
         <steeringAngle>
@@ -1320,8 +1320,8 @@
         </time>
         <position>
           <point>
-            <x>104.5</x>
-            <y>1.75</y>
+            <x>69.5</x>
+            <y>5.25</y>
           </point>
         </position>
         <steeringAngle>
@@ -1340,8 +1340,8 @@
         </time>
         <position>
           <point>
-            <x>106.0</x>
-            <y>1.75</y>
+            <x>71.0</x>
+            <y>5.25</y>
           </point>
         </position>
         <steeringAngle>
@@ -1360,3964 +1360,7 @@
         </time>
         <position>
           <point>
-            <x>107.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>6</exact>
-        </time>
-        <position>
-          <point>
-            <x>109.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>7</exact>
-        </time>
-        <position>
-          <point>
-            <x>110.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>8</exact>
-        </time>
-        <position>
-          <point>
-            <x>112.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>9</exact>
-        </time>
-        <position>
-          <point>
-            <x>113.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>10</exact>
-        </time>
-        <position>
-          <point>
-            <x>115.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>11</exact>
-        </time>
-        <position>
-          <point>
-            <x>116.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>12</exact>
-        </time>
-        <position>
-          <point>
-            <x>118.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>13</exact>
-        </time>
-        <position>
-          <point>
-            <x>119.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>14</exact>
-        </time>
-        <position>
-          <point>
-            <x>121.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>15</exact>
-        </time>
-        <position>
-          <point>
-            <x>122.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>16</exact>
-        </time>
-        <position>
-          <point>
-            <x>124.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>17</exact>
-        </time>
-        <position>
-          <point>
-            <x>125.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>18</exact>
-        </time>
-        <position>
-          <point>
-            <x>127.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>19</exact>
-        </time>
-        <position>
-          <point>
-            <x>128.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>20</exact>
-        </time>
-        <position>
-          <point>
-            <x>130.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>21</exact>
-        </time>
-        <position>
-          <point>
-            <x>131.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>22</exact>
-        </time>
-        <position>
-          <point>
-            <x>133.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>23</exact>
-        </time>
-        <position>
-          <point>
-            <x>134.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>24</exact>
-        </time>
-        <position>
-          <point>
-            <x>136.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>25</exact>
-        </time>
-        <position>
-          <point>
-            <x>137.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>26</exact>
-        </time>
-        <position>
-          <point>
-            <x>139.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>27</exact>
-        </time>
-        <position>
-          <point>
-            <x>140.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>28</exact>
-        </time>
-        <position>
-          <point>
-            <x>142.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>29</exact>
-        </time>
-        <position>
-          <point>
-            <x>143.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>30</exact>
-        </time>
-        <position>
-          <point>
-            <x>145.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>31</exact>
-        </time>
-        <position>
-          <point>
-            <x>146.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>32</exact>
-        </time>
-        <position>
-          <point>
-            <x>148.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>33</exact>
-        </time>
-        <position>
-          <point>
-            <x>149.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>34</exact>
-        </time>
-        <position>
-          <point>
-            <x>151.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>35</exact>
-        </time>
-        <position>
-          <point>
-            <x>152.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>36</exact>
-        </time>
-        <position>
-          <point>
-            <x>154.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>37</exact>
-        </time>
-        <position>
-          <point>
-            <x>155.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>38</exact>
-        </time>
-        <position>
-          <point>
-            <x>157.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>39</exact>
-        </time>
-        <position>
-          <point>
-            <x>158.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>40</exact>
-        </time>
-        <position>
-          <point>
-            <x>160.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>41</exact>
-        </time>
-        <position>
-          <point>
-            <x>161.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>42</exact>
-        </time>
-        <position>
-          <point>
-            <x>163.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>43</exact>
-        </time>
-        <position>
-          <point>
-            <x>164.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>44</exact>
-        </time>
-        <position>
-          <point>
-            <x>166.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>45</exact>
-        </time>
-        <position>
-          <point>
-            <x>167.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>46</exact>
-        </time>
-        <position>
-          <point>
-            <x>169.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>47</exact>
-        </time>
-        <position>
-          <point>
-            <x>170.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>48</exact>
-        </time>
-        <position>
-          <point>
-            <x>172.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>49</exact>
-        </time>
-        <position>
-          <point>
-            <x>173.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>50</exact>
-        </time>
-        <position>
-          <point>
-            <x>175.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>51</exact>
-        </time>
-        <position>
-          <point>
-            <x>176.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>52</exact>
-        </time>
-        <position>
-          <point>
-            <x>178.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>53</exact>
-        </time>
-        <position>
-          <point>
-            <x>179.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>54</exact>
-        </time>
-        <position>
-          <point>
-            <x>181.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>55</exact>
-        </time>
-        <position>
-          <point>
-            <x>182.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>56</exact>
-        </time>
-        <position>
-          <point>
-            <x>184.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>57</exact>
-        </time>
-        <position>
-          <point>
-            <x>185.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>58</exact>
-        </time>
-        <position>
-          <point>
-            <x>187.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>59</exact>
-        </time>
-        <position>
-          <point>
-            <x>188.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>60</exact>
-        </time>
-        <position>
-          <point>
-            <x>190.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>61</exact>
-        </time>
-        <position>
-          <point>
-            <x>191.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>62</exact>
-        </time>
-        <position>
-          <point>
-            <x>193.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>63</exact>
-        </time>
-        <position>
-          <point>
-            <x>194.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>64</exact>
-        </time>
-        <position>
-          <point>
-            <x>196.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>65</exact>
-        </time>
-        <position>
-          <point>
-            <x>197.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>66</exact>
-        </time>
-        <position>
-          <point>
-            <x>199.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>67</exact>
-        </time>
-        <position>
-          <point>
-            <x>200.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>68</exact>
-        </time>
-        <position>
-          <point>
-            <x>202.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>69</exact>
-        </time>
-        <position>
-          <point>
-            <x>203.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>70</exact>
-        </time>
-        <position>
-          <point>
-            <x>205.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>71</exact>
-        </time>
-        <position>
-          <point>
-            <x>206.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>72</exact>
-        </time>
-        <position>
-          <point>
-            <x>208.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>73</exact>
-        </time>
-        <position>
-          <point>
-            <x>209.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>74</exact>
-        </time>
-        <position>
-          <point>
-            <x>211.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>75</exact>
-        </time>
-        <position>
-          <point>
-            <x>212.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>76</exact>
-        </time>
-        <position>
-          <point>
-            <x>214.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>77</exact>
-        </time>
-        <position>
-          <point>
-            <x>215.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>78</exact>
-        </time>
-        <position>
-          <point>
-            <x>217.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>79</exact>
-        </time>
-        <position>
-          <point>
-            <x>218.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>80</exact>
-        </time>
-        <position>
-          <point>
-            <x>220.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>81</exact>
-        </time>
-        <position>
-          <point>
-            <x>221.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>82</exact>
-        </time>
-        <position>
-          <point>
-            <x>223.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>83</exact>
-        </time>
-        <position>
-          <point>
-            <x>224.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>84</exact>
-        </time>
-        <position>
-          <point>
-            <x>226.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>85</exact>
-        </time>
-        <position>
-          <point>
-            <x>227.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>86</exact>
-        </time>
-        <position>
-          <point>
-            <x>229.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>87</exact>
-        </time>
-        <position>
-          <point>
-            <x>230.5000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>88</exact>
-        </time>
-        <position>
-          <point>
-            <x>232.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>89</exact>
-        </time>
-        <position>
-          <point>
-            <x>233.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>90</exact>
-        </time>
-        <position>
-          <point>
-            <x>235.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>91</exact>
-        </time>
-        <position>
-          <point>
-            <x>236.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>92</exact>
-        </time>
-        <position>
-          <point>
-            <x>238.0000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>93</exact>
-        </time>
-        <position>
-          <point>
-            <x>239.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>94</exact>
-        </time>
-        <position>
-          <point>
-            <x>241.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>95</exact>
-        </time>
-        <position>
-          <point>
-            <x>242.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>96</exact>
-        </time>
-        <position>
-          <point>
-            <x>244.0000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>97</exact>
-        </time>
-        <position>
-          <point>
-            <x>245.5000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>98</exact>
-        </time>
-        <position>
-          <point>
-            <x>247.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>99</exact>
-        </time>
-        <position>
-          <point>
-            <x>248.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>100</exact>
-        </time>
-        <position>
-          <point>
-            <x>250.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>101</exact>
-        </time>
-        <position>
-          <point>
-            <x>251.5000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>102</exact>
-        </time>
-        <position>
-          <point>
-            <x>253.0000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>103</exact>
-        </time>
-        <position>
-          <point>
-            <x>254.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>104</exact>
-        </time>
-        <position>
-          <point>
-            <x>256.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>105</exact>
-        </time>
-        <position>
-          <point>
-            <x>257.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>106</exact>
-        </time>
-        <position>
-          <point>
-            <x>259.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>107</exact>
-        </time>
-        <position>
-          <point>
-            <x>260.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>108</exact>
-        </time>
-        <position>
-          <point>
-            <x>262.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>109</exact>
-        </time>
-        <position>
-          <point>
-            <x>263.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>110</exact>
-        </time>
-        <position>
-          <point>
-            <x>265.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>111</exact>
-        </time>
-        <position>
-          <point>
-            <x>266.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>112</exact>
-        </time>
-        <position>
-          <point>
-            <x>268.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>113</exact>
-        </time>
-        <position>
-          <point>
-            <x>269.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>114</exact>
-        </time>
-        <position>
-          <point>
-            <x>271.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>115</exact>
-        </time>
-        <position>
-          <point>
-            <x>272.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>116</exact>
-        </time>
-        <position>
-          <point>
-            <x>274.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>117</exact>
-        </time>
-        <position>
-          <point>
-            <x>275.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>118</exact>
-        </time>
-        <position>
-          <point>
-            <x>277.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>119</exact>
-        </time>
-        <position>
-          <point>
-            <x>278.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>120</exact>
-        </time>
-        <position>
-          <point>
-            <x>280.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>121</exact>
-        </time>
-        <position>
-          <point>
-            <x>281.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>122</exact>
-        </time>
-        <position>
-          <point>
-            <x>283.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>123</exact>
-        </time>
-        <position>
-          <point>
-            <x>284.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>124</exact>
-        </time>
-        <position>
-          <point>
-            <x>286.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>125</exact>
-        </time>
-        <position>
-          <point>
-            <x>287.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>126</exact>
-        </time>
-        <position>
-          <point>
-            <x>289.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>127</exact>
-        </time>
-        <position>
-          <point>
-            <x>290.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>128</exact>
-        </time>
-        <position>
-          <point>
-            <x>292.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>129</exact>
-        </time>
-        <position>
-          <point>
-            <x>293.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>130</exact>
-        </time>
-        <position>
-          <point>
-            <x>295.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>131</exact>
-        </time>
-        <position>
-          <point>
-            <x>296.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>132</exact>
-        </time>
-        <position>
-          <point>
-            <x>298.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>133</exact>
-        </time>
-        <position>
-          <point>
-            <x>299.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>134</exact>
-        </time>
-        <position>
-          <point>
-            <x>301.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>135</exact>
-        </time>
-        <position>
-          <point>
-            <x>302.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>136</exact>
-        </time>
-        <position>
-          <point>
-            <x>304.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>137</exact>
-        </time>
-        <position>
-          <point>
-            <x>305.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>138</exact>
-        </time>
-        <position>
-          <point>
-            <x>307.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>139</exact>
-        </time>
-        <position>
-          <point>
-            <x>308.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>140</exact>
-        </time>
-        <position>
-          <point>
-            <x>310.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>141</exact>
-        </time>
-        <position>
-          <point>
-            <x>311.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>142</exact>
-        </time>
-        <position>
-          <point>
-            <x>313.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>143</exact>
-        </time>
-        <position>
-          <point>
-            <x>314.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>144</exact>
-        </time>
-        <position>
-          <point>
-            <x>316.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>145</exact>
-        </time>
-        <position>
-          <point>
-            <x>317.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>146</exact>
-        </time>
-        <position>
-          <point>
-            <x>319.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>147</exact>
-        </time>
-        <position>
-          <point>
-            <x>320.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>148</exact>
-        </time>
-        <position>
-          <point>
-            <x>322.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>149</exact>
-        </time>
-        <position>
-          <point>
-            <x>323.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>150</exact>
-        </time>
-        <position>
-          <point>
-            <x>325.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>151</exact>
-        </time>
-        <position>
-          <point>
-            <x>326.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>152</exact>
-        </time>
-        <position>
-          <point>
-            <x>328.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>153</exact>
-        </time>
-        <position>
-          <point>
-            <x>329.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>154</exact>
-        </time>
-        <position>
-          <point>
-            <x>331.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>155</exact>
-        </time>
-        <position>
-          <point>
-            <x>332.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>156</exact>
-        </time>
-        <position>
-          <point>
-            <x>334.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>157</exact>
-        </time>
-        <position>
-          <point>
-            <x>335.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>158</exact>
-        </time>
-        <position>
-          <point>
-            <x>337.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>159</exact>
-        </time>
-        <position>
-          <point>
-            <x>338.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>160</exact>
-        </time>
-        <position>
-          <point>
-            <x>340.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>161</exact>
-        </time>
-        <position>
-          <point>
-            <x>341.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>162</exact>
-        </time>
-        <position>
-          <point>
-            <x>343.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>163</exact>
-        </time>
-        <position>
-          <point>
-            <x>344.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>164</exact>
-        </time>
-        <position>
-          <point>
-            <x>346.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>165</exact>
-        </time>
-        <position>
-          <point>
-            <x>347.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>166</exact>
-        </time>
-        <position>
-          <point>
-            <x>349.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>167</exact>
-        </time>
-        <position>
-          <point>
-            <x>350.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>168</exact>
-        </time>
-        <position>
-          <point>
-            <x>352.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>169</exact>
-        </time>
-        <position>
-          <point>
-            <x>353.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>170</exact>
-        </time>
-        <position>
-          <point>
-            <x>355.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>171</exact>
-        </time>
-        <position>
-          <point>
-            <x>356.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>172</exact>
-        </time>
-        <position>
-          <point>
-            <x>358.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>173</exact>
-        </time>
-        <position>
-          <point>
-            <x>359.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>174</exact>
-        </time>
-        <position>
-          <point>
-            <x>361.0000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>175</exact>
-        </time>
-        <position>
-          <point>
-            <x>362.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>176</exact>
-        </time>
-        <position>
-          <point>
-            <x>364.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>177</exact>
-        </time>
-        <position>
-          <point>
-            <x>365.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>178</exact>
-        </time>
-        <position>
-          <point>
-            <x>367.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>179</exact>
-        </time>
-        <position>
-          <point>
-            <x>368.5000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>180</exact>
-        </time>
-        <position>
-          <point>
-            <x>370.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>181</exact>
-        </time>
-        <position>
-          <point>
-            <x>371.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>182</exact>
-        </time>
-        <position>
-          <point>
-            <x>373.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>183</exact>
-        </time>
-        <position>
-          <point>
-            <x>374.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>184</exact>
-        </time>
-        <position>
-          <point>
-            <x>376.0000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>185</exact>
-        </time>
-        <position>
-          <point>
-            <x>377.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>186</exact>
-        </time>
-        <position>
-          <point>
-            <x>379.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>187</exact>
-        </time>
-        <position>
-          <point>
-            <x>380.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>188</exact>
-        </time>
-        <position>
-          <point>
-            <x>382.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>189</exact>
-        </time>
-        <position>
-          <point>
-            <x>383.5000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>190</exact>
-        </time>
-        <position>
-          <point>
-            <x>385.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>191</exact>
-        </time>
-        <position>
-          <point>
-            <x>386.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>192</exact>
-        </time>
-        <position>
-          <point>
-            <x>388.0000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>193</exact>
-        </time>
-        <position>
-          <point>
-            <x>389.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>194</exact>
-        </time>
-        <position>
-          <point>
-            <x>391.0000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>195</exact>
-        </time>
-        <position>
-          <point>
-            <x>392.5</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>196</exact>
-        </time>
-        <position>
-          <point>
-            <x>394.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>197</exact>
-        </time>
-        <position>
-          <point>
-            <x>395.5000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>198</exact>
-        </time>
-        <position>
-          <point>
-            <x>397.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>199</exact>
-        </time>
-        <position>
-          <point>
-            <x>398.5000</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>200</exact>
-        </time>
-        <position>
-          <point>
-            <x>400.0</x>
-            <y>1.75</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>15.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-    </trajectory>
-  </dynamicObstacle>
-  <dynamicObstacle id="101">
-    <type>car</type>
-    <shape>
-      <rectangle>
-        <length>4.5</length>
-        <width>1.8</width>
-      </rectangle>
-    </shape>
-    <initialState>
-      <time>
-        <exact>0</exact>
-      </time>
-      <position>
-        <point>
-          <x>70.0</x>
-          <y>5.25</y>
-        </point>
-      </position>
-      <orientation>
-        <exact>0.0</exact>
-      </orientation>
-      <velocity>
-        <exact>17.0</exact>
-      </velocity>
-      <acceleration>
-        <exact>0.0</exact>
-      </acceleration>
-      <yawRate>
-        <exact>0.0</exact>
-      </yawRate>
-      <slipAngle>
-        <exact>0.0</exact>
-      </slipAngle>
-    </initialState>
-    <trajectory>
-      <state>
-        <time>
-          <exact>1</exact>
-        </time>
-        <position>
-          <point>
-            <x>71.7</x>
+            <x>72.5</x>
             <y>5.25</y>
           </point>
         </position>
@@ -5325,787 +1368,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>2</exact>
-        </time>
-        <position>
-          <point>
-            <x>73.4</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>3</exact>
-        </time>
-        <position>
-          <point>
-            <x>75.1000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>4</exact>
-        </time>
-        <position>
-          <point>
-            <x>76.8000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>5</exact>
-        </time>
-        <position>
-          <point>
-            <x>78.5000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>6</exact>
-        </time>
-        <position>
-          <point>
-            <x>80.2000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>7</exact>
-        </time>
-        <position>
-          <point>
-            <x>81.9000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>8</exact>
-        </time>
-        <position>
-          <point>
-            <x>83.6000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>9</exact>
-        </time>
-        <position>
-          <point>
-            <x>85.3000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>10</exact>
-        </time>
-        <position>
-          <point>
-            <x>87.0000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>11</exact>
-        </time>
-        <position>
-          <point>
-            <x>88.7000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>12</exact>
-        </time>
-        <position>
-          <point>
-            <x>90.4000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>13</exact>
-        </time>
-        <position>
-          <point>
-            <x>92.1000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>14</exact>
-        </time>
-        <position>
-          <point>
-            <x>93.8000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>15</exact>
-        </time>
-        <position>
-          <point>
-            <x>95.5000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>16</exact>
-        </time>
-        <position>
-          <point>
-            <x>97.2000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>17</exact>
-        </time>
-        <position>
-          <point>
-            <x>98.9000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>18</exact>
-        </time>
-        <position>
-          <point>
-            <x>100.6000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>19</exact>
-        </time>
-        <position>
-          <point>
-            <x>102.3000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>20</exact>
-        </time>
-        <position>
-          <point>
-            <x>104.0000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>21</exact>
-        </time>
-        <position>
-          <point>
-            <x>105.7000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>22</exact>
-        </time>
-        <position>
-          <point>
-            <x>107.4000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>23</exact>
-        </time>
-        <position>
-          <point>
-            <x>109.1000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>24</exact>
-        </time>
-        <position>
-          <point>
-            <x>110.8000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>25</exact>
-        </time>
-        <position>
-          <point>
-            <x>112.5000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>26</exact>
-        </time>
-        <position>
-          <point>
-            <x>114.2000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>27</exact>
-        </time>
-        <position>
-          <point>
-            <x>115.9000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>28</exact>
-        </time>
-        <position>
-          <point>
-            <x>117.6000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>29</exact>
-        </time>
-        <position>
-          <point>
-            <x>119.3000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>30</exact>
-        </time>
-        <position>
-          <point>
-            <x>121.0000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>31</exact>
-        </time>
-        <position>
-          <point>
-            <x>122.7000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>32</exact>
-        </time>
-        <position>
-          <point>
-            <x>124.4000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>33</exact>
-        </time>
-        <position>
-          <point>
-            <x>126.1000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>34</exact>
-        </time>
-        <position>
-          <point>
-            <x>127.8000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>35</exact>
-        </time>
-        <position>
-          <point>
-            <x>129.5000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>36</exact>
-        </time>
-        <position>
-          <point>
-            <x>131.2000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>37</exact>
-        </time>
-        <position>
-          <point>
-            <x>132.9000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>38</exact>
-        </time>
-        <position>
-          <point>
-            <x>134.6000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>39</exact>
-        </time>
-        <position>
-          <point>
-            <x>136.3000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
-        </velocity>
-        <orientation>
-          <exact>0.0</exact>
-        </orientation>
-      </state>
-      <state>
-        <time>
-          <exact>40</exact>
-        </time>
-        <position>
-          <point>
-            <x>138.0000</x>
-            <y>5.25</y>
-          </point>
-        </position>
-        <steeringAngle>
-          <exact>0.0</exact>
-        </steeringAngle>
-        <velocity>
-          <exact>17.0</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>-0.0</exact>
@@ -6113,22 +1376,722 @@
       </state>
       <state>
         <time>
-          <exact>41</exact>
+          <exact>6</exact>
         </time>
         <position>
           <point>
-            <x>139.7000</x>
-            <y>5.2491</y>
+            <x>74.0</x>
+            <y>5.2496</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0000</exact>
+          <exact>15.0000</exact>
         </velocity>
         <orientation>
-          <exact>-0.0014</exact>
+          <exact>-0.0007</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>7</exact>
+        </time>
+        <position>
+          <point>
+            <x>75.5</x>
+            <y>5.2471</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0000</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0028</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>8</exact>
+        </time>
+        <position>
+          <point>
+            <x>77.0</x>
+            <y>5.2403</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0003</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0063</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>9</exact>
+        </time>
+        <position>
+          <point>
+            <x>78.5</x>
+            <y>5.2274</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0009</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0111</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>10</exact>
+        </time>
+        <position>
+          <point>
+            <x>80.0</x>
+            <y>5.2063</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0021</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0170</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>11</exact>
+        </time>
+        <position>
+          <point>
+            <x>81.5</x>
+            <y>5.1756</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0043</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0240</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>12</exact>
+        </time>
+        <position>
+          <point>
+            <x>83.0</x>
+            <y>5.1338</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0076</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0318</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>13</exact>
+        </time>
+        <position>
+          <point>
+            <x>84.5</x>
+            <y>5.0797</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0121</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0402</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>14</exact>
+        </time>
+        <position>
+          <point>
+            <x>86.0</x>
+            <y>5.0126</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0181</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0491</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>15</exact>
+        </time>
+        <position>
+          <point>
+            <x>87.5</x>
+            <y>4.9320</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0254</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0582</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>16</exact>
+        </time>
+        <position>
+          <point>
+            <x>89.0</x>
+            <y>4.8376</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0340</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0673</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>17</exact>
+        </time>
+        <position>
+          <point>
+            <x>90.5</x>
+            <y>4.7297</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0436</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0762</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>18</exact>
+        </time>
+        <position>
+          <point>
+            <x>92.0</x>
+            <y>4.6088</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0538</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0846</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>19</exact>
+        </time>
+        <position>
+          <point>
+            <x>93.5</x>
+            <y>4.4756</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0642</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0923</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>20</exact>
+        </time>
+        <position>
+          <point>
+            <x>95.0</x>
+            <y>4.3313</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0741</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0992</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>21</exact>
+        </time>
+        <position>
+          <point>
+            <x>96.5</x>
+            <y>4.1774</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0832</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.1051</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>22</exact>
+        </time>
+        <position>
+          <point>
+            <x>98.0</x>
+            <y>4.0153</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0909</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.1098</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>23</exact>
+        </time>
+        <position>
+          <point>
+            <x>99.5</x>
+            <y>3.8471</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0968</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.1133</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>24</exact>
+        </time>
+        <position>
+          <point>
+            <x>101.0</x>
+            <y>3.6746</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.1004</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.1154</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>25</exact>
+        </time>
+        <position>
+          <point>
+            <x>102.5</x>
+            <y>3.5</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.1017</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.1161</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>26</exact>
+        </time>
+        <position>
+          <point>
+            <x>104.0</x>
+            <y>3.3253</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.1004</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.1154</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>27</exact>
+        </time>
+        <position>
+          <point>
+            <x>105.5</x>
+            <y>3.1528</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0968</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.1133</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>28</exact>
+        </time>
+        <position>
+          <point>
+            <x>107.0</x>
+            <y>2.9846</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0909</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.1098</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>29</exact>
+        </time>
+        <position>
+          <point>
+            <x>108.5</x>
+            <y>2.8225</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0832</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.1051</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>30</exact>
+        </time>
+        <position>
+          <point>
+            <x>110.0</x>
+            <y>2.6686</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0741</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0992</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>31</exact>
+        </time>
+        <position>
+          <point>
+            <x>111.5</x>
+            <y>2.5243</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0642</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0923</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>32</exact>
+        </time>
+        <position>
+          <point>
+            <x>113.0</x>
+            <y>2.3911</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0538</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0846</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>33</exact>
+        </time>
+        <position>
+          <point>
+            <x>114.5</x>
+            <y>2.2702</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0436</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0762</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>34</exact>
+        </time>
+        <position>
+          <point>
+            <x>116.0</x>
+            <y>2.1623</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0340</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0673</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>35</exact>
+        </time>
+        <position>
+          <point>
+            <x>117.5</x>
+            <y>2.0679</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0254</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0582</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>36</exact>
+        </time>
+        <position>
+          <point>
+            <x>119.0</x>
+            <y>1.9873</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0181</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0491</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>37</exact>
+        </time>
+        <position>
+          <point>
+            <x>120.5</x>
+            <y>1.9202</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0121</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0402</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>38</exact>
+        </time>
+        <position>
+          <point>
+            <x>122.0</x>
+            <y>1.8661</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0076</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0318</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>39</exact>
+        </time>
+        <position>
+          <point>
+            <x>123.5</x>
+            <y>1.8243</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0043</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0240</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>40</exact>
+        </time>
+        <position>
+          <point>
+            <x>125.0</x>
+            <y>1.7936</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0021</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0170</exact>
+        </orientation>
+      </state>
+      <state>
+        <time>
+          <exact>41</exact>
+        </time>
+        <position>
+          <point>
+            <x>126.5</x>
+            <y>1.7725</y>
+          </point>
+        </position>
+        <steeringAngle>
+          <exact>0.0</exact>
+        </steeringAngle>
+        <velocity>
+          <exact>15.0009</exact>
+        </velocity>
+        <orientation>
+          <exact>-0.0111</exact>
         </orientation>
       </state>
       <state>
@@ -6137,18 +2100,18 @@
         </time>
         <position>
           <point>
-            <x>141.4</x>
-            <y>5.2432</y>
+            <x>128.0</x>
+            <y>1.7596</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0002</exact>
+          <exact>15.0003</exact>
         </velocity>
         <orientation>
-          <exact>-0.0059</exact>
+          <exact>-0.0063</exact>
         </orientation>
       </state>
       <state>
@@ -6157,18 +2120,18 @@
         </time>
         <position>
           <point>
-            <x>143.1</x>
-            <y>5.2274</y>
+            <x>129.5</x>
+            <y>1.7528</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0014</exact>
+          <exact>15.0000</exact>
         </velocity>
         <orientation>
-          <exact>-0.0131</exact>
+          <exact>-0.0028</exact>
         </orientation>
       </state>
       <state>
@@ -6177,18 +2140,18 @@
         </time>
         <position>
           <point>
-            <x>144.7999</x>
-            <y>5.1972</y>
+            <x>131.0</x>
+            <y>1.7503</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0043</exact>
+          <exact>15.0000</exact>
         </velocity>
         <orientation>
-          <exact>-0.0227</exact>
+          <exact>-0.0007</exact>
         </orientation>
       </state>
       <state>
@@ -6197,18 +2160,18 @@
         </time>
         <position>
           <point>
-            <x>146.4999</x>
-            <y>5.1490</y>
+            <x>132.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0100</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0343</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6217,18 +2180,18 @@
         </time>
         <position>
           <point>
-            <x>148.1999</x>
-            <y>5.0797</y>
+            <x>134.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0191</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0473</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6237,18 +2200,18 @@
         </time>
         <position>
           <point>
-            <x>149.8999</x>
-            <y>4.9873</y>
+            <x>135.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0320</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0613</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6257,18 +2220,18 @@
         </time>
         <position>
           <point>
-            <x>151.5999</x>
-            <y>4.8706</y>
+            <x>137.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0487</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0756</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6277,18 +2240,18 @@
         </time>
         <position>
           <point>
-            <x>153.2999</x>
-            <y>4.7297</y>
+            <x>138.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0684</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0895</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6297,18 +2260,18 @@
         </time>
         <position>
           <point>
-            <x>154.9999</x>
-            <y>4.5657</y>
+            <x>140.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0898</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1025</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6317,18 +2280,18 @@
         </time>
         <position>
           <point>
-            <x>156.6999</x>
-            <y>4.3806</y>
+            <x>141.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.1111</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1140</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6337,18 +2300,18 @@
         </time>
         <position>
           <point>
-            <x>158.3999</x>
-            <y>4.1774</y>
+            <x>143.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.1305</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1235</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6357,18 +2320,18 @@
         </time>
         <position>
           <point>
-            <x>160.0999</x>
-            <y>3.9599</y>
+            <x>144.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.1459</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1305</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6377,18 +2340,18 @@
         </time>
         <position>
           <point>
-            <x>161.7999</x>
-            <y>3.7324</y>
+            <x>146.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.1559</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1349</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6397,18 +2360,18 @@
         </time>
         <position>
           <point>
-            <x>163.4999</x>
-            <y>3.5</y>
+            <x>147.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.1593</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1364</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6417,18 +2380,18 @@
         </time>
         <position>
           <point>
-            <x>165.1999</x>
-            <y>3.2675</y>
+            <x>149.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.1559</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1349</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6437,18 +2400,18 @@
         </time>
         <position>
           <point>
-            <x>166.8999</x>
-            <y>3.0400</y>
+            <x>150.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.1459</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1305</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6457,18 +2420,18 @@
         </time>
         <position>
           <point>
-            <x>168.5999</x>
-            <y>2.8225</y>
+            <x>152.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.1305</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1235</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6477,18 +2440,18 @@
         </time>
         <position>
           <point>
-            <x>170.2999</x>
-            <y>2.6193</y>
+            <x>153.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.1111</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1140</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6497,18 +2460,18 @@
         </time>
         <position>
           <point>
-            <x>171.9999</x>
-            <y>2.4342</y>
+            <x>155.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0898</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.1025</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6517,18 +2480,18 @@
         </time>
         <position>
           <point>
-            <x>173.6999</x>
-            <y>2.2702</y>
+            <x>156.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0684</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0895</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6537,18 +2500,18 @@
         </time>
         <position>
           <point>
-            <x>175.3999</x>
-            <y>2.1293</y>
+            <x>158.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0487</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0756</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6557,18 +2520,18 @@
         </time>
         <position>
           <point>
-            <x>177.0999</x>
-            <y>2.0126</y>
+            <x>159.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0320</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0613</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6577,18 +2540,18 @@
         </time>
         <position>
           <point>
-            <x>178.7999</x>
-            <y>1.9202</y>
+            <x>161.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0191</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0473</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6597,18 +2560,18 @@
         </time>
         <position>
           <point>
-            <x>180.4999</x>
-            <y>1.8509</y>
+            <x>162.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0100</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0343</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6617,18 +2580,18 @@
         </time>
         <position>
           <point>
-            <x>182.1999</x>
-            <y>1.8027</y>
+            <x>164.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0043</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0227</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6637,18 +2600,18 @@
         </time>
         <position>
           <point>
-            <x>183.8999</x>
-            <y>1.7725</y>
+            <x>165.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0014</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0131</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6657,18 +2620,18 @@
         </time>
         <position>
           <point>
-            <x>185.5999</x>
-            <y>1.7567</y>
+            <x>167.0</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0002</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0059</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6677,18 +2640,18 @@
         </time>
         <position>
           <point>
-            <x>187.2999</x>
-            <y>1.7508</y>
+            <x>168.5</x>
+            <y>1.75</y>
           </point>
         </position>
         <steeringAngle>
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0000</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
-          <exact>-0.0014</exact>
+          <exact>0.0</exact>
         </orientation>
       </state>
       <state>
@@ -6697,7 +2660,7 @@
         </time>
         <position>
           <point>
-            <x>188.9999</x>
+            <x>170.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6705,7 +2668,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>17.0</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6717,7 +2680,7 @@
         </time>
         <position>
           <point>
-            <x>190.6999</x>
+            <x>171.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6725,7 +2688,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.9995</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6737,7 +2700,7 @@
         </time>
         <position>
           <point>
-            <x>192.3995</x>
+            <x>173.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6745,7 +2708,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.9961</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6757,7 +2720,7 @@
         </time>
         <position>
           <point>
-            <x>194.0982</x>
+            <x>174.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6765,7 +2728,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.9870</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6777,7 +2740,7 @@
         </time>
         <position>
           <point>
-            <x>195.7952</x>
+            <x>176.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6785,7 +2748,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.9698</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6797,7 +2760,7 @@
         </time>
         <position>
           <point>
-            <x>197.4894</x>
+            <x>177.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6805,7 +2768,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.9423</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6817,7 +2780,7 @@
         </time>
         <position>
           <point>
-            <x>199.1797</x>
+            <x>179.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6825,7 +2788,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.9027</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6837,7 +2800,7 @@
         </time>
         <position>
           <point>
-            <x>200.8647</x>
+            <x>180.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6845,7 +2808,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.8498</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6857,7 +2820,7 @@
         </time>
         <position>
           <point>
-            <x>202.5430</x>
+            <x>182.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6865,7 +2828,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.7832</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6877,7 +2840,7 @@
         </time>
         <position>
           <point>
-            <x>204.2133</x>
+            <x>183.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6885,7 +2848,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.7027</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6897,7 +2860,7 @@
         </time>
         <position>
           <point>
-            <x>205.8742</x>
+            <x>185.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6905,7 +2868,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.6089</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6917,7 +2880,7 @@
         </time>
         <position>
           <point>
-            <x>207.5245</x>
+            <x>186.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6925,7 +2888,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.5032</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6937,7 +2900,7 @@
         </time>
         <position>
           <point>
-            <x>209.1632</x>
+            <x>188.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6945,7 +2908,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.3870</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6957,7 +2920,7 @@
         </time>
         <position>
           <point>
-            <x>210.7895</x>
+            <x>189.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6965,7 +2928,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.2628</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6977,7 +2940,7 @@
         </time>
         <position>
           <point>
-            <x>212.4028</x>
+            <x>191.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -6985,7 +2948,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.1328</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -6997,7 +2960,7 @@
         </time>
         <position>
           <point>
-            <x>214.0028</x>
+            <x>192.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7005,7 +2968,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>16.0</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7017,7 +2980,7 @@
         </time>
         <position>
           <point>
-            <x>215.5895</x>
+            <x>194.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7025,7 +2988,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.8671</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7037,7 +3000,7 @@
         </time>
         <position>
           <point>
-            <x>217.1632</x>
+            <x>195.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7045,7 +3008,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.7371</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7057,7 +3020,7 @@
         </time>
         <position>
           <point>
-            <x>218.7245</x>
+            <x>197.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7065,7 +3028,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.6129</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7077,7 +3040,7 @@
         </time>
         <position>
           <point>
-            <x>220.2742</x>
+            <x>198.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7085,7 +3048,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.4967</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7097,7 +3060,7 @@
         </time>
         <position>
           <point>
-            <x>221.8133</x>
+            <x>200.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7105,7 +3068,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.3910</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7117,7 +3080,7 @@
         </time>
         <position>
           <point>
-            <x>223.3430</x>
+            <x>201.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7125,7 +3088,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.2972</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7137,7 +3100,7 @@
         </time>
         <position>
           <point>
-            <x>224.8647</x>
+            <x>203.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7145,7 +3108,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.2167</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7157,7 +3120,7 @@
         </time>
         <position>
           <point>
-            <x>226.3797</x>
+            <x>204.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7165,7 +3128,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.1501</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7177,7 +3140,7 @@
         </time>
         <position>
           <point>
-            <x>227.8894</x>
+            <x>206.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7185,7 +3148,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.0972</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7197,7 +3160,7 @@
         </time>
         <position>
           <point>
-            <x>229.3952</x>
+            <x>207.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7205,7 +3168,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.0576</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7217,7 +3180,7 @@
         </time>
         <position>
           <point>
-            <x>230.8982</x>
+            <x>209.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7225,7 +3188,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.0301</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7237,7 +3200,7 @@
         </time>
         <position>
           <point>
-            <x>232.3995</x>
+            <x>210.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7245,7 +3208,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.0129</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7257,7 +3220,7 @@
         </time>
         <position>
           <point>
-            <x>233.8999</x>
+            <x>212.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7265,7 +3228,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.0038</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7277,7 +3240,7 @@
         </time>
         <position>
           <point>
-            <x>235.3999</x>
+            <x>213.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7285,7 +3248,7 @@
           <exact>0.0</exact>
         </steeringAngle>
         <velocity>
-          <exact>15.0004</exact>
+          <exact>15.0</exact>
         </velocity>
         <orientation>
           <exact>0.0</exact>
@@ -7297,7 +3260,7 @@
         </time>
         <position>
           <point>
-            <x>236.8999</x>
+            <x>215.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7317,7 +3280,7 @@
         </time>
         <position>
           <point>
-            <x>238.3999</x>
+            <x>216.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7337,7 +3300,7 @@
         </time>
         <position>
           <point>
-            <x>239.8999</x>
+            <x>218.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7357,7 +3320,7 @@
         </time>
         <position>
           <point>
-            <x>241.3999</x>
+            <x>219.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7377,7 +3340,7 @@
         </time>
         <position>
           <point>
-            <x>242.8999</x>
+            <x>221.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7397,7 +3360,7 @@
         </time>
         <position>
           <point>
-            <x>244.3999</x>
+            <x>222.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7417,7 +3380,7 @@
         </time>
         <position>
           <point>
-            <x>245.8999</x>
+            <x>224.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7437,7 +3400,7 @@
         </time>
         <position>
           <point>
-            <x>247.3999</x>
+            <x>225.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7457,7 +3420,7 @@
         </time>
         <position>
           <point>
-            <x>248.8999</x>
+            <x>227.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7477,7 +3440,7 @@
         </time>
         <position>
           <point>
-            <x>250.3999</x>
+            <x>228.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7497,7 +3460,7 @@
         </time>
         <position>
           <point>
-            <x>251.8999</x>
+            <x>230.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7517,7 +3480,7 @@
         </time>
         <position>
           <point>
-            <x>253.3999</x>
+            <x>231.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7537,7 +3500,7 @@
         </time>
         <position>
           <point>
-            <x>254.8999</x>
+            <x>233.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7557,7 +3520,7 @@
         </time>
         <position>
           <point>
-            <x>256.3999</x>
+            <x>234.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7577,7 +3540,7 @@
         </time>
         <position>
           <point>
-            <x>257.8999</x>
+            <x>236.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7597,7 +3560,7 @@
         </time>
         <position>
           <point>
-            <x>259.3999</x>
+            <x>237.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7617,7 +3580,7 @@
         </time>
         <position>
           <point>
-            <x>260.8999</x>
+            <x>239.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7637,7 +3600,7 @@
         </time>
         <position>
           <point>
-            <x>262.3999</x>
+            <x>240.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7657,7 +3620,7 @@
         </time>
         <position>
           <point>
-            <x>263.8999</x>
+            <x>242.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7677,7 +3640,7 @@
         </time>
         <position>
           <point>
-            <x>265.3999</x>
+            <x>243.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7697,7 +3660,7 @@
         </time>
         <position>
           <point>
-            <x>266.8999</x>
+            <x>245.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7717,7 +3680,7 @@
         </time>
         <position>
           <point>
-            <x>268.3999</x>
+            <x>246.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7737,7 +3700,7 @@
         </time>
         <position>
           <point>
-            <x>269.8999</x>
+            <x>248.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7757,7 +3720,7 @@
         </time>
         <position>
           <point>
-            <x>271.3999</x>
+            <x>249.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7777,7 +3740,7 @@
         </time>
         <position>
           <point>
-            <x>272.8999</x>
+            <x>251.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7797,7 +3760,7 @@
         </time>
         <position>
           <point>
-            <x>274.3999</x>
+            <x>252.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7817,7 +3780,7 @@
         </time>
         <position>
           <point>
-            <x>275.8999</x>
+            <x>254.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7837,7 +3800,7 @@
         </time>
         <position>
           <point>
-            <x>277.3999</x>
+            <x>255.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7857,7 +3820,7 @@
         </time>
         <position>
           <point>
-            <x>278.8999</x>
+            <x>257.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7877,7 +3840,7 @@
         </time>
         <position>
           <point>
-            <x>280.3999</x>
+            <x>258.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7897,7 +3860,7 @@
         </time>
         <position>
           <point>
-            <x>281.8999</x>
+            <x>260.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7917,7 +3880,7 @@
         </time>
         <position>
           <point>
-            <x>283.3999</x>
+            <x>261.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7937,7 +3900,7 @@
         </time>
         <position>
           <point>
-            <x>284.8999</x>
+            <x>263.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7957,7 +3920,7 @@
         </time>
         <position>
           <point>
-            <x>286.3999</x>
+            <x>264.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7977,7 +3940,7 @@
         </time>
         <position>
           <point>
-            <x>287.8999</x>
+            <x>266.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -7997,7 +3960,7 @@
         </time>
         <position>
           <point>
-            <x>289.3999</x>
+            <x>267.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8017,7 +3980,7 @@
         </time>
         <position>
           <point>
-            <x>290.8999</x>
+            <x>269.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8037,7 +4000,7 @@
         </time>
         <position>
           <point>
-            <x>292.3999</x>
+            <x>270.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8057,7 +4020,7 @@
         </time>
         <position>
           <point>
-            <x>293.8999</x>
+            <x>272.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8077,7 +4040,7 @@
         </time>
         <position>
           <point>
-            <x>295.3999</x>
+            <x>273.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8097,7 +4060,7 @@
         </time>
         <position>
           <point>
-            <x>296.8999</x>
+            <x>275.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8117,7 +4080,7 @@
         </time>
         <position>
           <point>
-            <x>298.3999</x>
+            <x>276.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8137,7 +4100,7 @@
         </time>
         <position>
           <point>
-            <x>299.8999</x>
+            <x>278.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8157,7 +4120,7 @@
         </time>
         <position>
           <point>
-            <x>301.3999</x>
+            <x>279.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8177,7 +4140,7 @@
         </time>
         <position>
           <point>
-            <x>302.8999</x>
+            <x>281.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8197,7 +4160,7 @@
         </time>
         <position>
           <point>
-            <x>304.3999</x>
+            <x>282.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8217,7 +4180,7 @@
         </time>
         <position>
           <point>
-            <x>305.8999</x>
+            <x>284.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8237,7 +4200,7 @@
         </time>
         <position>
           <point>
-            <x>307.3999</x>
+            <x>285.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8257,7 +4220,7 @@
         </time>
         <position>
           <point>
-            <x>308.8999</x>
+            <x>287.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8277,7 +4240,7 @@
         </time>
         <position>
           <point>
-            <x>310.3999</x>
+            <x>288.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8297,7 +4260,7 @@
         </time>
         <position>
           <point>
-            <x>311.8999</x>
+            <x>290.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8317,7 +4280,7 @@
         </time>
         <position>
           <point>
-            <x>313.3999</x>
+            <x>291.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8337,7 +4300,7 @@
         </time>
         <position>
           <point>
-            <x>314.8999</x>
+            <x>293.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8357,7 +4320,7 @@
         </time>
         <position>
           <point>
-            <x>316.3999</x>
+            <x>294.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8377,7 +4340,7 @@
         </time>
         <position>
           <point>
-            <x>317.8999</x>
+            <x>296.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8397,7 +4360,7 @@
         </time>
         <position>
           <point>
-            <x>319.3999</x>
+            <x>297.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8417,7 +4380,7 @@
         </time>
         <position>
           <point>
-            <x>320.8999</x>
+            <x>299.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8437,7 +4400,7 @@
         </time>
         <position>
           <point>
-            <x>322.3999</x>
+            <x>300.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8457,7 +4420,7 @@
         </time>
         <position>
           <point>
-            <x>323.8999</x>
+            <x>302.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8477,7 +4440,7 @@
         </time>
         <position>
           <point>
-            <x>325.3999</x>
+            <x>303.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8497,7 +4460,7 @@
         </time>
         <position>
           <point>
-            <x>326.8999</x>
+            <x>305.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8517,7 +4480,7 @@
         </time>
         <position>
           <point>
-            <x>328.3999</x>
+            <x>306.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8537,7 +4500,7 @@
         </time>
         <position>
           <point>
-            <x>329.8999</x>
+            <x>308.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8557,7 +4520,7 @@
         </time>
         <position>
           <point>
-            <x>331.3999</x>
+            <x>309.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8577,7 +4540,7 @@
         </time>
         <position>
           <point>
-            <x>332.8999</x>
+            <x>311.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8597,7 +4560,7 @@
         </time>
         <position>
           <point>
-            <x>334.3999</x>
+            <x>312.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8617,7 +4580,7 @@
         </time>
         <position>
           <point>
-            <x>335.8999</x>
+            <x>314.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8637,7 +4600,7 @@
         </time>
         <position>
           <point>
-            <x>337.3999</x>
+            <x>315.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8657,7 +4620,7 @@
         </time>
         <position>
           <point>
-            <x>338.8999</x>
+            <x>317.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8677,7 +4640,7 @@
         </time>
         <position>
           <point>
-            <x>340.3999</x>
+            <x>318.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8697,7 +4660,7 @@
         </time>
         <position>
           <point>
-            <x>341.8999</x>
+            <x>320.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8717,7 +4680,7 @@
         </time>
         <position>
           <point>
-            <x>343.3999</x>
+            <x>321.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8737,7 +4700,7 @@
         </time>
         <position>
           <point>
-            <x>344.8999</x>
+            <x>323.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8757,7 +4720,7 @@
         </time>
         <position>
           <point>
-            <x>346.3999</x>
+            <x>324.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8777,7 +4740,7 @@
         </time>
         <position>
           <point>
-            <x>347.8999</x>
+            <x>326.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8797,7 +4760,7 @@
         </time>
         <position>
           <point>
-            <x>349.3999</x>
+            <x>327.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8817,7 +4780,7 @@
         </time>
         <position>
           <point>
-            <x>350.8999</x>
+            <x>329.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8837,7 +4800,7 @@
         </time>
         <position>
           <point>
-            <x>352.3999</x>
+            <x>330.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8857,7 +4820,7 @@
         </time>
         <position>
           <point>
-            <x>353.8999</x>
+            <x>332.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8877,7 +4840,7 @@
         </time>
         <position>
           <point>
-            <x>355.3999</x>
+            <x>333.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8897,7 +4860,7 @@
         </time>
         <position>
           <point>
-            <x>356.8999</x>
+            <x>335.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8917,7 +4880,7 @@
         </time>
         <position>
           <point>
-            <x>358.3999</x>
+            <x>336.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8937,7 +4900,7 @@
         </time>
         <position>
           <point>
-            <x>359.8999</x>
+            <x>338.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8957,7 +4920,7 @@
         </time>
         <position>
           <point>
-            <x>361.3999</x>
+            <x>339.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8977,7 +4940,7 @@
         </time>
         <position>
           <point>
-            <x>362.8999</x>
+            <x>341.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -8997,7 +4960,7 @@
         </time>
         <position>
           <point>
-            <x>364.3999</x>
+            <x>342.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9017,7 +4980,7 @@
         </time>
         <position>
           <point>
-            <x>365.8999</x>
+            <x>344.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9037,7 +5000,7 @@
         </time>
         <position>
           <point>
-            <x>367.3999</x>
+            <x>345.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9057,7 +5020,7 @@
         </time>
         <position>
           <point>
-            <x>368.8999</x>
+            <x>347.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9077,7 +5040,7 @@
         </time>
         <position>
           <point>
-            <x>370.3999</x>
+            <x>348.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9097,7 +5060,7 @@
         </time>
         <position>
           <point>
-            <x>371.8999</x>
+            <x>350.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9117,7 +5080,7 @@
         </time>
         <position>
           <point>
-            <x>373.3999</x>
+            <x>351.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9137,7 +5100,7 @@
         </time>
         <position>
           <point>
-            <x>374.8999</x>
+            <x>353.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9157,7 +5120,7 @@
         </time>
         <position>
           <point>
-            <x>376.3999</x>
+            <x>354.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9177,7 +5140,7 @@
         </time>
         <position>
           <point>
-            <x>377.8999</x>
+            <x>356.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9197,7 +5160,7 @@
         </time>
         <position>
           <point>
-            <x>379.3999</x>
+            <x>357.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9217,7 +5180,7 @@
         </time>
         <position>
           <point>
-            <x>380.8999</x>
+            <x>359.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9237,7 +5200,7 @@
         </time>
         <position>
           <point>
-            <x>382.3999</x>
+            <x>360.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9257,7 +5220,7 @@
         </time>
         <position>
           <point>
-            <x>383.8999</x>
+            <x>362.0</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9277,7 +5240,7 @@
         </time>
         <position>
           <point>
-            <x>385.3999</x>
+            <x>363.5</x>
             <y>1.75</y>
           </point>
         </position>
@@ -9297,7 +5260,7 @@
         </time>
         <position>
           <point>
-            <x>386.8999</x>
+            <x>365.0</x>
             <y>1.75</y>
           </point>
         </position>

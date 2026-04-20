@@ -2,7 +2,7 @@
   "scenario": {
     "xml": "exp1_simple_acc",
     "dt": 0.1,
-    "max_steps": 200
+    "max_steps": 100
   },
   "ego": {
     "target_distance": 20.0,
@@ -12,8 +12,8 @@
     "inference": "boltzmann_kalman",
     "intervention": "cbf_single",
     "human": "rbf",
-    "b_kappa": 0.01,
-    "sigma_kappa": 25.0
+    "b_kappa": 0.2,
+    "sigma_kappa": 10.0
   },
   "vehicles": {
     "100": {

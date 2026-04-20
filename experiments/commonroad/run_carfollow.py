@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from run_experiment import (
     Simulation, SimVehicle, VehicleState, Action, Observation,
     bicycle_step, constant_velocity_controller,
-    lane_change_controller_factory,
+    lane_change_controller_factory, accelerating_controller_factory,
     LANE_WIDTH, N_LANES, VEH_LENGTH, VEH_WIDTH,
     OBSTACLE_COLORS, EGO_COLOR, SCENARIO_DIR, FIG_DIR,
 )
@@ -173,9 +173,11 @@ class HumanBeliefPlotter:
             est = info.get("kf_kappa")
             if est is None:
                 est = info.get("inferred_mean")
-            std = info.get("inferred_std")
-            if std is None and info.get("kf_P") is not None:
-                std = np.sqrt(info["kf_P"])
+            # Prefer continuous Kalman std when available;
+            # fall back to discrete posterior std otherwise.
+            std = info.get("inferred_std_continuous")
+            if std is None:
+                std = info.get("inferred_std")
 
             d["inf_means"].append(est)
             d["inf_stds"].append(std)
@@ -274,6 +276,118 @@ class ActionPlotter:
         self._fig.canvas.flush_events()
 
 
+class RiccatiPlotter:
+    """Live plot of Kalman covariance P vs Riccati steady-state.
+
+    Top:    P (or sqrt(P)) over time with the algebraic Riccati solution.
+    Bottom: Inferred estimate +/- 2*sqrt(P) with true value.
+    """
+
+    def __init__(self, Q: float, R: float, C: float = 1.0,
+                 window: int = 500, sqrt_scale: bool = True):
+        self._fig, (self._ax_p, self._ax_est) = plt.subplots(
+            2, 1, figsize=(9, 5), sharex=True,
+            gridspec_kw={"height_ratios": [1, 1]})
+        self._window = window
+        self._sqrt = sqrt_scale
+        self._C = C
+
+        # Algebraic Riccati steady-state:
+        # P = R*(P+Q)/(C²*(P+Q)+R)  →  C²P² + QC²P - QR = 0
+        # P_ss = (-QC² + sqrt((QC²)² + 4C²QR)) / (2C²)
+        a = C ** 2
+        disc = (Q * a) ** 2 + 4 * a * Q * R
+        self._P_ss = (-Q * a + np.sqrt(disc)) / (2 * a)
+
+        ss_label = (f"$\\sqrt{{P_{{ss}}}}$ = {np.sqrt(self._P_ss):.4f}"
+                    if sqrt_scale
+                    else f"$P_{{ss}}$ = {self._P_ss:.6f}")
+        self._ax_p.axhline(
+            np.sqrt(self._P_ss) if sqrt_scale else self._P_ss,
+            color="red", linestyle="--", linewidth=1.5,
+            label=ss_label)
+        self._line_p, = self._ax_p.plot(
+            [], [], color="steelblue", linewidth=1.5,
+            label="$\\sqrt{P}$" if sqrt_scale else "$P$")
+        ylabel = "$\\sqrt{P_{\\varepsilon}}$ (m/s)" if sqrt_scale else "$P_{\\varepsilon}$"
+        self._ax_p.set_ylabel(ylabel)
+        self._ax_p.set_title(
+            f"Kalman covariance convergence   (Q={Q}, R={R}, C={C})",
+            fontsize=10)
+        self._ax_p.legend(fontsize=8, loc="upper right")
+
+        # Estimate + uncertainty band
+        self._line_true, = self._ax_est.plot(
+            [], [], color="steelblue", linewidth=1.5,
+            label="true $\\kappa$")
+        self._line_inf, = self._ax_est.plot(
+            [], [], color="orange", linewidth=1.5,
+            label="inferred $\\kappa$")
+        self._fill = None
+        self._ax_est.axhline(0, color="grey", linewidth=0.5, linestyle="--")
+        self._ax_est.set_xlabel("step")
+        self._ax_est.set_ylabel("$\\kappa$")
+        self._ax_est.legend(fontsize=8, loc="upper right")
+        self._fig.tight_layout()
+
+        self._steps = []
+        self._P_vals = []
+        self._true_vals = []
+        self._inf_vals = []
+        self._std_vals = []
+
+    def update(self, step: int, kf_P: float,
+               true_kappa: float = None,
+               inferred_kappa: float = None,
+               inferred_std: float = None):
+        self._steps.append(step)
+        self._P_vals.append(np.sqrt(kf_P) if self._sqrt else kf_P)
+        self._true_vals.append(true_kappa)
+        self._inf_vals.append(inferred_kappa)
+        self._std_vals.append(inferred_std)
+
+        lo = max(0, len(self._steps) - self._window)
+        s = self._steps[lo:]
+
+        # --- Top: P convergence ---
+        self._line_p.set_data(s, self._P_vals[lo:])
+        p_vals = self._P_vals[lo:]
+        ss_v = np.sqrt(self._P_ss) if self._sqrt else self._P_ss
+        y_hi = max(max(p_vals), ss_v) * 1.1
+        self._ax_p.set_ylim(0, max(y_hi, 1e-6))
+        self._ax_p.set_xlim(s[0], s[-1] + 1)
+
+        # --- Bottom: estimate + band ---
+        true_s = [si for si, v in zip(s, self._true_vals[lo:]) if v is not None]
+        true_v = [v for v in self._true_vals[lo:] if v is not None]
+        self._line_true.set_data(true_s, true_v)
+
+        inf_s = [si for si, v in zip(s, self._inf_vals[lo:]) if v is not None]
+        inf_v = [v for v in self._inf_vals[lo:] if v is not None]
+        self._line_inf.set_data(inf_s, inf_v)
+
+        if self._fill is not None:
+            self._fill.remove()
+            self._fill = None
+        band = [(si, m, sd) for si, m, sd in
+                zip(s, self._inf_vals[lo:], self._std_vals[lo:])
+                if m is not None and sd is not None]
+        if band:
+            bs, bm, bsd = zip(*band)
+            upper = [m + 2 * sd for m, sd in zip(bm, bsd)]
+            lower = [m - 2 * sd for m, sd in zip(bm, bsd)]
+            self._fill = self._ax_est.fill_between(
+                bs, lower, upper, color="orange", alpha=0.15)
+
+        all_v = true_v + inf_v
+        if all_v:
+            self._ax_est.set_ylim(min(all_v) - 0.1, max(all_v) + 0.1)
+        self._ax_est.set_xlim(s[0], s[-1] + 1)
+
+        self._fig.canvas.draw_idle()
+        self._fig.canvas.flush_events()
+
+
 # ---------------------------------------------------------------------------
 #  Config loading
 # ---------------------------------------------------------------------------
@@ -284,7 +398,55 @@ def load_config(name: str) -> dict:
         return json.load(f)
 
 
-def build_simulation(cfg: dict, ego_ctrl: CarFollowController) -> Simulation:
+def _make_ego_lane_change_controller(ego_ctrl: CarFollowController,
+                                     lc_cfg: dict):
+    """Wrap CarFollowController with lane-change steering.
+
+    The CarFollowController handles longitudinal acceleration; this wrapper
+    adds the lateral steering needed for the ego to change lanes.
+    """
+    y_from = lc_cfg["y_from"]
+    y_to = lc_cfg["y_to"]
+    t_start = lc_cfg["t_start"]
+    t_dur = lc_cfg["t_dur"]
+    dy = y_to - y_from
+    t_lc_end = t_start + t_dur
+
+    def controller(obs: Observation) -> Action:
+        # Longitudinal: delegate to CarFollowController
+        accel_action = ego_ctrl(obs)
+        accel = accel_action.acceleration
+
+        # Lateral: lane-change steering (same profile as non-ego lane change)
+        t = obs.time_step * obs.dt
+        ego = obs.ego
+        v_fwd = max(ego.velocity, 1.0)  # avoid division by zero
+
+        if t < t_start:
+            vy_desired = 0.0
+            y_target = y_from
+        elif t < t_lc_end:
+            s = (t - t_start) / t_dur
+            vy_desired = dy / t_dur * (1 - np.cos(2 * np.pi * s))
+            y_target = y_from + dy * (s - np.sin(2 * np.pi * s) / (2 * np.pi))
+        else:
+            vy_desired = 0.0
+            y_target = y_to
+
+        heading_ff = np.arctan2(vy_desired, v_fwd)
+        y_err = y_target - ego.y
+        heading_fb = np.clip(y_err * 0.3, -0.05, 0.05)
+        heading_desired = heading_ff + heading_fb
+        heading_err = heading_desired - ego.heading
+        heading_err = (heading_err + np.pi) % (2 * np.pi) - np.pi
+        steer = np.clip(heading_err * 2.0, -0.3, 0.3)
+
+        return Action(accel, steer)
+
+    return controller
+
+
+def build_simulation(cfg: dict, ego_ctrl) -> Simulation:
     """Build a Simulation from config, with vehicle overrides."""
     scenario_name = cfg["scenario"]["xml"]
     vehicles_cfg = cfg.get("vehicles", {})
@@ -299,6 +461,9 @@ def build_simulation(cfg: dict, ego_ctrl: CarFollowController) -> Simulation:
         elif ctrl_type == "lane_change":
             lc = vcfg["lane_change"]
             overrides[vid] = lane_change_controller_factory(**lc)
+        elif ctrl_type == "accelerating":
+            ac = vcfg.get("accelerating", {})
+            overrides[vid] = accelerating_controller_factory(**ac)
         # else: fall back to playback from XML
 
     return Simulation(
@@ -450,7 +615,7 @@ def parse_args():
 TITLES = {
     "exp1_simple_acc": "Exp 1: ACC with Belief Inference",
     "exp2_merge_in_front": "Exp 2: Merge in Front + Belief",
-    "exp3_ego_merge": "Exp 3: Ego Merge + Belief",
+    "exp3_ego_merge": "Exp 3: Ego Merge Behind Vehicle + Belief",
 }
 
 
@@ -498,7 +663,8 @@ def main():
     ego_ctrl = CarFollowController(
         velocity_errors=vel_errors,
         target_distance=ego_cfg.get("target_distance", 20.0),
-        d_safe=ego_cfg.get("d_safe", 8.0),
+        d_safe=ego_cfg.get("d_safe", 15.0),
+        desired_speed=ego_cfg.get("desired_speed", 15.0),
         beta=ego_cfg.get("beta", 1.0),
         gamma=ego_cfg.get("gamma", 0.99),
         inference=ego_cfg.get("inference", "none"),
@@ -506,10 +672,20 @@ def main():
         human=ego_cfg.get("human", "static"),
         b_kappa=ego_cfg.get("b_kappa", 0.01),
         sigma_kappa=ego_cfg.get("sigma_kappa", 25.0),
+        kf_Q=ego_cfg.get("kf_Q", 0.001),
+        kf_R=ego_cfg.get("kf_R", 0.01),
+        kf_alpha=ego_cfg.get("kf_alpha", 0.0),
     )
 
+    # Wrap ego controller with lane-change steering if configured
+    lc_cfg = ego_cfg.get("ego_lane_change")
+    if lc_cfg:
+        ego_sim_ctrl = _make_ego_lane_change_controller(ego_ctrl, lc_cfg)
+    else:
+        ego_sim_ctrl = ego_ctrl
+
     # Build simulation
-    sim = build_simulation(cfg, ego_ctrl)
+    sim = build_simulation(cfg, ego_sim_ctrl)
 
     title = TITLES.get(args.experiment, args.experiment)
     print(f"\n{'='*60}")
@@ -524,6 +700,7 @@ def main():
     belief_plotter = None
     human_plotter = None
     action_plotter = None
+    riccati_plotter = None
     scene_renderer = SceneRenderer(sim, title=title)
 
     if not args.headless:
@@ -536,6 +713,12 @@ def main():
             human_plotter = HumanBeliefPlotter(
                 vehicle_ids, vel_errors)
         action_plotter = ActionPlotter()
+
+        # Riccati convergence plot for Kalman-based inference
+        if ego_cfg["inference"] in ("boltzmann_kalman", "idkalman"):
+            C = 1.0 if ego_cfg["inference"] == "idkalman" else 15.0
+            riccati_plotter = RiccatiPlotter(
+                Q=ego_ctrl._kf_Q, R=ego_ctrl._kf_R, C=C)
 
     # --- Episode recorder (collects all per-step data) ---
     recorder = {
@@ -551,6 +734,7 @@ def main():
         "human_vel_err": [],
         "kf_kappa": [],
         "kf_P": [],
+        "norm_innovation": [],
         "inferred_mean": [],
         "inferred_std": [],
         "belief_dists": [],
@@ -599,6 +783,7 @@ def main():
         recorder["human_vel_err"].append(info.get("human_vel_err"))
         recorder["kf_kappa"].append(info.get("kf_kappa"))
         recorder["kf_P"].append(info.get("kf_P"))
+        recorder["norm_innovation"].append(info.get("norm_innovation"))
         recorder["inferred_mean"].append(info.get("inferred_mean"))
         recorder["inferred_std"].append(info.get("inferred_std"))
 
@@ -657,6 +842,19 @@ def main():
                         step=t, human_accel=human_a,
                         exec_accel=exec_a,
                         a_safe=info.get("a_max_safe"))
+
+                if riccati_plotter:
+                    kf_p = info.get("kf_P")
+                    if kf_p is not None:
+                        # For idkalman, kf_P is in epsilon space;
+                        # inferred_std_continuous is already sqrt(P_kappa)
+                        riccati_plotter.update(
+                            step=t, kf_P=kf_p,
+                            true_kappa=info.get("human_vel_err"),
+                            inferred_kappa=info.get("kf_kappa",
+                                                    info.get("inferred_mean")),
+                            inferred_std=info.get("inferred_std_continuous",
+                                                  info.get("inferred_std")))
 
             plt.pause(0.001)
 
@@ -743,6 +941,9 @@ def main():
         "dt": sim.dt,
         "n_interventions": n_intv,
         "velocity_errors": {str(k): v for k, v in vel_errors.items()},
+        "kf_Q": ego_ctrl._kf_Q,
+        "kf_R": ego_ctrl._kf_R,
+        "kf_alpha": ego_ctrl._kf_alpha,
     }
     meta_path = os.path.join(run_dir, "metadata.json")
     with open(meta_path, "w") as f:

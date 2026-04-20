@@ -1,1 +1,1 @@
-{"inference": "boltzmann_reactive_floormix", "intervention": "cbf_single", "human": "rbf"}
+{"inference": "boltzmann_reactive", "intervention": "cbf_single", "human": "rbf"}

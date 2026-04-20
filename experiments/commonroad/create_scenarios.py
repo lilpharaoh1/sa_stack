@@ -111,6 +111,27 @@ def constant_velocity_trajectory(x0: float, y0: float, vx: float,
     return states
 
 
+def accelerating_trajectory(x0: float, y0: float, v0: float,
+                            accel: float, v_max: float = 30.0,
+                            heading: float = 0.0,
+                            n_steps: int = N_STEPS) -> list:
+    """Straight-line trajectory with constant acceleration up to v_max."""
+    states = []
+    x = x0
+    v = v0
+    for k in range(1, n_steps + 1):
+        v = min(v + accel * DT, v_max)
+        x += v * DT
+        states.append(KSState(
+            time_step=k,
+            position=np.array([x, y0]),
+            steering_angle=0.0,
+            velocity=v,
+            orientation=heading,
+        ))
+    return states
+
+
 def lane_change_trajectory(x0: float, y_from: float, y_to: float,
                            vx: float, t_start: float, t_dur: float,
                            vx_after: float = None,
@@ -297,26 +318,16 @@ def create_exp2_merge_in_front():
     ego_lane_y = lane_center_y(0)       # lane 1 centre  ~1.75
     adj_lane_y = lane_center_y(1)       # lane 2 centre  ~5.25
 
-    # --- Non-ego 1: lead vehicle in lane 1 (constant velocity) ---
-    lead_x0 = 100.0
-    lead_v = 15.0
-    lead_states = constant_velocity_trajectory(lead_x0, ego_lane_y, lead_v)
-    scenario.add_objects(
-        make_obstacle(100, lead_x0, ego_lane_y, lead_states, velocity=lead_v))
-
-    # --- Non-ego 2: merging vehicle starts in lane 2, merges into lane 1 ---
-    #     Starts alongside / slightly ahead of ego, merges at t=4 s over 3 s.
-    #     After completing the lane change, decelerates to match lead speed
-    #     so it doesn't drive through the lead vehicle.
-    merge_x0 = 70.0
-    merge_v = 17.0   # slightly faster than ego during approach
+    # --- Non-ego: merging vehicle starts in lane 2, merges into lane 1 ---
+    merge_x0 = 65.0
+    merge_v = 15.0
     merge_states = lane_change_trajectory(
         x0=merge_x0, y_from=adj_lane_y, y_to=ego_lane_y,
-        vx=merge_v, t_start=4.0, t_dur=3.0,
-        vx_after=lead_v, t_decel_dur=3.0,
+        vx=merge_v, t_start=0.5, t_dur=4.0,
+        vx_after=merge_v, t_decel_dur=3.0,
     )
     scenario.add_objects(
-        make_obstacle(101, merge_x0, adj_lane_y, merge_states,
+        make_obstacle(100, merge_x0, adj_lane_y, merge_states,
                       velocity=merge_v))
 
     # --- Ego planning problem ---
@@ -332,42 +343,31 @@ def create_exp2_merge_in_front():
 
 
 # ===================================================================
-#  Experiment 3: Ego merges into adjacent lane
+#  Experiment 3: Ego merges behind another vehicle
 # ===================================================================
 def create_exp3_ego_merge():
-    print("Creating Experiment 3: Ego merge ...")
+    print("Creating Experiment 3: Ego merges behind vehicle ...")
     scenario = Scenario(dt=DT, scenario_id=ScenarioID(
         map_name="Highway", map_id=1, configuration_id=3,
     ))
     build_lanelet_network(scenario)
 
-    ego_lane_y = lane_center_y(0)       # lane 1  ~1.75
-    target_lane_y = lane_center_y(1)    # lane 2  ~5.25
+    ego_lane_y = lane_center_y(1)       # lane 2 centre  ~5.25 (ego starts here)
+    target_lane_y = lane_center_y(0)    # lane 1 centre  ~1.75 (ego merges into)
 
-    # --- Non-ego 1: front vehicle in target lane ---
-    front_x0 = 100.0
-    front_v = 14.0
-    front_states = constant_velocity_trajectory(
-        front_x0, target_lane_y, front_v)
+    # --- Non-ego: vehicle in lane 1, 15m ahead of ego ---
+    lead_x0 = 65.0
+    lead_v = 15.0
+    lead_states = constant_velocity_trajectory(lead_x0, target_lane_y, lead_v)
     scenario.add_objects(
-        make_obstacle(100, front_x0, target_lane_y, front_states,
-                      velocity=front_v))
+        make_obstacle(100, lead_x0, target_lane_y, lead_states,
+                      velocity=lead_v))
 
-    # --- Non-ego 2: rear vehicle in target lane ---
-    rear_x0 = 55.0
-    rear_v = 14.0
-    rear_states = constant_velocity_trajectory(
-        rear_x0, target_lane_y, rear_v)
-    scenario.add_objects(
-        make_obstacle(101, rear_x0, target_lane_y, rear_states,
-                      velocity=rear_v))
-
-    # --- Ego planning problem: starts in lane 1, goal in lane 2 ---
-    ego_x0 = 70.0
-    ego_v0 = 15.0
+    # --- Ego planning problem: starts in lane 2, goal in lane 1 ---
+    ego_x0 = 50.0
     pp = make_planning_problem(
-        pp_id=1, x0=ego_x0, y0=ego_lane_y, v0=ego_v0, heading=0.0,
-        goal_x_min=300.0, goal_x_max=450.0, goal_y_center=target_lane_y,
+        pp_id=1, x0=ego_x0, y0=ego_lane_y, v0=15.0, heading=0.0,
+        goal_x_min=350.0, goal_x_max=450.0, goal_y_center=target_lane_y,
     )
     pps = PlanningProblemSet(planning_problem_list=[pp])
 
@@ -376,9 +376,77 @@ def create_exp3_ego_merge():
 
 
 # ===================================================================
+#  Experiment 0: Simple ACC starting at target distance
+# ===================================================================
+def create_expA_acc_at_target():
+    print("Creating Experiment 0: ACC at target distance ...")
+    scenario = Scenario(dt=DT, scenario_id=ScenarioID(
+        map_name="Highway", map_id=1, configuration_id=0,
+    ))
+    build_lanelet_network(scenario)
+
+    lead_y = lane_center_y(0)      # ~1.75
+    lead_x0 = 80.0
+    lead_v = 15.0
+    target_distance = 20.0
+
+    lead_states = constant_velocity_trajectory(lead_x0, lead_y, lead_v)
+    lead_obs = make_obstacle(100, lead_x0, lead_y, lead_states,
+                             velocity=lead_v)
+    scenario.add_objects(lead_obs)
+
+    ego_x0 = lead_x0 - target_distance  # 60.0
+    ego_v0 = 15.0
+    pp = make_planning_problem(
+        pp_id=1, x0=ego_x0, y0=lead_y, v0=ego_v0, heading=0.0,
+        goal_x_min=350.0, goal_x_max=450.0, goal_y_center=lead_y,
+    )
+    pps = PlanningProblemSet(planning_problem_list=[pp])
+
+    save_scenario(scenario, pps, "expA_acc_at_target.xml")
+    return scenario, pps
+
+
+# ===================================================================
+#  Experiment B: ACC at target distance, lead accelerating
+# ===================================================================
+def create_expB_acc_lead_accel():
+    print("Creating Experiment B: ACC with accelerating lead ...")
+    scenario = Scenario(dt=DT, scenario_id=ScenarioID(
+        map_name="Highway", map_id=1, configuration_id=10,
+    ))
+    build_lanelet_network(scenario)
+
+    lead_y = lane_center_y(0)
+    lead_x0 = 80.0
+    lead_v0 = 15.0
+    lead_accel = 1.0    # 1 m/s^2 constant acceleration
+    target_distance = 20.0
+
+    lead_states = accelerating_trajectory(
+        lead_x0, lead_y, lead_v0, accel=lead_accel, v_max=25.0)
+    lead_obs = make_obstacle(100, lead_x0, lead_y, lead_states,
+                             velocity=lead_v0)
+    scenario.add_objects(lead_obs)
+
+    ego_x0 = lead_x0 - target_distance
+    ego_v0 = 15.0
+    pp = make_planning_problem(
+        pp_id=1, x0=ego_x0, y0=lead_y, v0=ego_v0, heading=0.0,
+        goal_x_min=350.0, goal_x_max=500.0, goal_y_center=lead_y,
+    )
+    pps = PlanningProblemSet(planning_problem_list=[pp])
+
+    save_scenario(scenario, pps, "expB_acc_lead_accel.xml")
+    return scenario, pps
+
+
+# ===================================================================
 #  Main
 # ===================================================================
 if __name__ == "__main__":
+    s0, p0 = create_expA_acc_at_target()
+    sB, pB = create_expB_acc_lead_accel()
     s1, p1 = create_exp1_simple_acc()
     s2, p2 = create_exp2_merge_in_front()
     s3, p3 = create_exp3_ego_merge()

@@ -1,0 +1,28 @@
+{
+  "scenario": {
+    "xml": "expB_acc_lead_accel",
+    "dt": 0.1,
+    "max_steps": 100
+  },
+  "ego": {
+    "target_distance": 20.0,
+    "d_safe": 15.0,
+    "beta": 1.0,
+    "gamma": 0.99,
+    "inference": "idkalman",
+    "intervention": "none",
+    "human": "gaussian_std_1",
+    "kf_alpha": 0.0
+  },
+  "vehicles": {
+    "100": {
+      "controller": "accelerating",
+      "accelerating": {
+        "accel": 1.0,
+        "v_max": 25.0
+      },
+      "velocity_error": 0.0,
+      "_comment": "Lead vehicle accelerates at 1 m/s^2 from 15 to 25 m/s"
+    }
+  }
+}

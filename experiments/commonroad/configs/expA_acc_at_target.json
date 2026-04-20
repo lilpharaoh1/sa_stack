@@ -1,0 +1,25 @@
+{
+  "scenario": {
+    "xml": "expA_acc_at_target",
+    "dt": 0.1,
+    "max_steps": 100
+  },
+  "ego": {
+    "target_distance": 20.0,
+    "d_safe": 15.0,
+    "beta": 1.0,
+    "gamma": 0.99,
+    "inference": "boltzmann_kalman",
+    "intervention": "cbf_single",
+    "human": "rbf",
+    "b_kappa": 0.2,
+    "sigma_kappa": 10.0
+  },
+  "vehicles": {
+    "100": {
+      "controller": "constant_velocity",
+      "velocity_error": 0.3,
+      "_comment": "Lead vehicle: ego starts exactly target_distance (20m) behind"
+    }
+  }
+}
