@@ -284,6 +284,7 @@ class RiccatiPlotter:
     """
 
     def __init__(self, Q: float, R: float, C: float = 1.0,
+                 A: float = 1.0,
                  window: int = 500, sqrt_scale: bool = True):
         self._fig, (self._ax_p, self._ax_est) = plt.subplots(
             2, 1, figsize=(9, 5), sharex=True,
@@ -292,12 +293,14 @@ class RiccatiPlotter:
         self._sqrt = sqrt_scale
         self._C = C
 
-        # Algebraic Riccati steady-state:
-        # P = R*(P+Q)/(C²*(P+Q)+R)  →  C²P² + QC²P - QR = 0
-        # P_ss = (-QC² + sqrt((QC²)² + 4C²QR)) / (2C²)
-        a = C ** 2
-        disc = (Q * a) ** 2 + 4 * a * Q * R
-        self._P_ss = (-Q * a + np.sqrt(disc)) / (2 * a)
+        # Algebraic Riccati steady-state with process gain A:
+        # P = R*(A²P+Q)/(C²*(A²P+Q)+R)
+        # (C²A²)P² + (QC²+R(1-A²))P - RQ = 0
+        a2c2 = (A * C) ** 2
+        b = Q * C ** 2 + R * (1.0 - A ** 2)
+        c = -R * Q
+        disc = b ** 2 - 4 * a2c2 * c
+        self._P_ss = (-b + np.sqrt(disc)) / (2 * a2c2)
 
         ss_label = (f"$\\sqrt{{P_{{ss}}}}$ = {np.sqrt(self._P_ss):.4f}"
                     if sqrt_scale
@@ -584,6 +587,7 @@ class SceneRenderer:
 # ---------------------------------------------------------------------------
 
 METHODS_DIR = os.path.join(CONFIG_DIR, "methods")
+HUMANS_DIR = os.path.join(CONFIG_DIR, "humans")
 
 
 def parse_args():
@@ -594,17 +598,23 @@ def parse_args():
     p.add_argument("--method", "-m", type=str, default=None,
                    help="Method config from configs/methods/ "
                         "(e.g. kalman_cbf_kalman). Overrides "
-                        "inference/intervention/human in the "
+                        "inference/intervention in the "
                         "experiment config.")
+    p.add_argument("--human-config", "-hc", type=str, default=None,
+                   help="Human config from configs/humans/ "
+                        "(e.g. walk_noisy). Sets human type "
+                        "and parameters.")
     p.add_argument("--inference", type=str, default=None,
                    help="Override inference method")
     p.add_argument("--intervention", type=str, default=None,
                    help="Override intervention method")
     p.add_argument("--human", type=str, default=None,
-                   help="Override human model (static/rbf)")
+                   help="Override human type (static/gaussian/walk)")
     p.add_argument("--gamma", type=float, default=None)
     p.add_argument("--beta", type=float, default=None)
     p.add_argument("--save", action="store_true", help="Save scene gif")
+    p.add_argument("--no-save", action="store_true",
+                   help="Don't save episode/metadata to results/")
     p.add_argument("--headless", action="store_true", help="No live window")
     p.add_argument("--interval", type=int, default=50,
                    help="Animation interval ms")
@@ -633,12 +643,23 @@ def main():
     ego_cfg = cfg["ego"]
     vehicles_cfg = cfg.get("vehicles", {})
 
-    # Apply method config (overrides experiment defaults)
+    # Apply method config (overrides experiment defaults for filter params)
     if args.method is not None:
         method_path = os.path.join(METHODS_DIR, f"{args.method}.json")
         with open(method_path) as f:
             method_cfg = json.load(f)
         for key, val in method_cfg.items():
+            ego_cfg[key] = val
+
+    # Apply human config (overrides experiment defaults for human params)
+    if args.human_config is not None:
+        human_path = os.path.join(HUMANS_DIR, f"{args.human_config}.json")
+        with open(human_path) as f:
+            human_cfg = json.load(f)
+        # "type" in human config maps to "human" in ego config
+        if "type" in human_cfg:
+            ego_cfg["human"] = human_cfg.pop("type")
+        for key, val in human_cfg.items():
             ego_cfg[key] = val
 
     # Apply CLI overrides (highest priority)
@@ -675,6 +696,15 @@ def main():
         kf_Q=ego_cfg.get("kf_Q", 0.001),
         kf_R=ego_cfg.get("kf_R", 0.01),
         kf_alpha=ego_cfg.get("kf_alpha", 0.0),
+        kf_epsilon_init=ego_cfg.get("kf_epsilon_init", 0.0),
+        kf_revert_alpha=ego_cfg.get("kf_revert_alpha", 0.9),
+        kf_lingap_beta=ego_cfg.get("kf_lingap_beta", 0.1),
+        human_sigma=ego_cfg.get("human_sigma"),
+        human_mu=ego_cfg.get("human_mu"),
+        human_walk_Q=ego_cfg.get("human_walk_Q"),
+        human_revert_alpha=ego_cfg.get("human_revert_alpha", 0.9),
+        human_lingap_beta=ego_cfg.get("human_lingap_beta", 0.1),
+        action_noise_std=ego_cfg.get("action_noise_std", 0.0),
     )
 
     # Wrap ego controller with lane-change steering if configured
@@ -715,10 +745,17 @@ def main():
         action_plotter = ActionPlotter()
 
         # Riccati convergence plot for Kalman-based inference
-        if ego_cfg["inference"] in ("boltzmann_kalman", "idkalman"):
-            C = 1.0 if ego_cfg["inference"] == "idkalman" else 15.0
+        if ego_cfg["inference"] in ("boltzmann_kalman", "iidkalman", "walkkalman", "revertkalman", "lingapkalman", "lingapkalman"):
+            C = 1.0 if ego_cfg["inference"] in ("iidkalman", "walkkalman", "revertkalman", "lingapkalman") else 15.0
+            inf = ego_cfg["inference"]
+            if inf in ("revertkalman", "lingapkalman"):
+                A_proc = ego_ctrl._kf_revert_alpha
+            elif inf == "iidkalman":
+                A_proc = 0.0
+            else:
+                A_proc = 1.0
             riccati_plotter = RiccatiPlotter(
-                Q=ego_ctrl._kf_Q, R=ego_ctrl._kf_R, C=C)
+                Q=ego_ctrl._kf_Q, R=ego_ctrl._kf_R, C=C, A=A_proc)
 
     # --- Episode recorder (collects all per-step data) ---
     recorder = {
@@ -732,6 +769,8 @@ def main():
         "lead_speed": [],
         "intervened": [],
         "human_vel_err": [],
+        "kf_vhat": [],
+        "kf_epsilon": [],
         "kf_kappa": [],
         "kf_P": [],
         "norm_innovation": [],
@@ -781,6 +820,8 @@ def main():
         recorder["lead_speed"].append(info.get("lead_speed"))
         recorder["intervened"].append(info.get("intervened", False))
         recorder["human_vel_err"].append(info.get("human_vel_err"))
+        recorder["kf_vhat"].append(info.get("kf_vhat"))
+        recorder["kf_epsilon"].append(info.get("kf_epsilon"))
         recorder["kf_kappa"].append(info.get("kf_kappa"))
         recorder["kf_P"].append(info.get("kf_P"))
         recorder["norm_innovation"].append(info.get("norm_innovation"))
@@ -899,57 +940,68 @@ def main():
     print(f"{'='*60}")
 
     # Save episode data to JSON
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = (f"{args.experiment}_inf_{ego_cfg['inference']}"
-                f"_int_{ego_cfg['intervention']}"
-                f"_human_{ego_cfg['human']}"
-                f"_seed{args.seed}_{ts}")
-    run_dir = os.path.join(RESULTS_DIR, run_name)
-    os.makedirs(run_dir, exist_ok=True)
+    run_dir = None
+    if not args.no_save:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        hc_tag = f"_hc_{args.human_config}" if args.human_config else ""
+        run_name = (f"{args.experiment}_inf_{ego_cfg['inference']}"
+                    f"_int_{ego_cfg['intervention']}"
+                    f"_human_{ego_cfg['human']}{hc_tag}"
+                    f"_seed{args.seed}_{ts}")
+        run_dir = os.path.join(RESULTS_DIR, run_name)
+        os.makedirs(run_dir, exist_ok=True)
 
-    # Convert vehicle_positions keys to strings for JSON
-    recorder_json = dict(recorder)
-    recorder_json["vehicle_positions"] = {
-        str(k): v for k, v in recorder["vehicle_positions"].items()}
-    # Add belief candidates
-    first_vid = next(iter(vel_errors), None)
-    if first_vid is not None:
-        belief = ego_ctrl.beliefs.get(first_vid)
-        if belief is not None:
-            recorder_json["belief_candidates"] = belief.candidates.tolist()
-    recorder_json["true_vel_errors"] = {
-        str(k): v for k, v in vel_errors.items()}
+        # Convert vehicle_positions keys to strings for JSON
+        recorder_json = dict(recorder)
+        recorder_json["vehicle_positions"] = {
+            str(k): v for k, v in recorder["vehicle_positions"].items()}
+        # Add belief candidates
+        first_vid = next(iter(vel_errors), None)
+        if first_vid is not None:
+            belief = ego_ctrl.beliefs.get(first_vid)
+            if belief is not None:
+                recorder_json["belief_candidates"] = belief.candidates.tolist()
+        recorder_json["true_vel_errors"] = {
+            str(k): v for k, v in vel_errors.items()}
 
-    episode_path = os.path.join(run_dir, "episode.json")
-    with open(episode_path, "w") as f:
-        json.dump(recorder_json, f, indent=2)
+        episode_path = os.path.join(run_dir, "episode.json")
+        with open(episode_path, "w") as f:
+            json.dump(recorder_json, f, indent=2)
 
-    # Save run metadata
-    meta = {
-        "experiment": args.experiment,
-        "inference": ego_cfg["inference"],
-        "intervention": ego_cfg["intervention"],
-        "human": ego_cfg["human"],
-        "gamma": ego_cfg.get("gamma"),
-        "beta": ego_cfg.get("beta"),
-        "target_distance": ego_cfg.get("target_distance"),
-        "d_safe": ego_cfg.get("d_safe"),
-        "b_kappa": ego_cfg.get("b_kappa"),
-        "sigma_kappa": ego_cfg.get("sigma_kappa"),
-        "seed": args.seed,
-        "n_steps": n_steps,
-        "dt": sim.dt,
-        "n_interventions": n_intv,
-        "velocity_errors": {str(k): v for k, v in vel_errors.items()},
-        "kf_Q": ego_ctrl._kf_Q,
-        "kf_R": ego_ctrl._kf_R,
-        "kf_alpha": ego_ctrl._kf_alpha,
-    }
-    meta_path = os.path.join(run_dir, "metadata.json")
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
+        # Save run metadata
+        meta = {
+            "experiment": args.experiment,
+            "inference": ego_cfg["inference"],
+            "intervention": ego_cfg["intervention"],
+            "human": ego_cfg["human"],
+            "gamma": ego_cfg.get("gamma"),
+            "beta": ego_cfg.get("beta"),
+            "target_distance": ego_cfg.get("target_distance"),
+            "d_safe": ego_cfg.get("d_safe"),
+            "b_kappa": ego_cfg.get("b_kappa"),
+            "sigma_kappa": ego_cfg.get("sigma_kappa"),
+            "seed": args.seed,
+            "n_steps": n_steps,
+            "dt": sim.dt,
+            "n_interventions": n_intv,
+            "velocity_errors": {str(k): v for k, v in vel_errors.items()},
+            "kf_Q": ego_ctrl._kf_Q,
+            "kf_R": ego_ctrl._kf_R,
+            "kf_alpha": ego_ctrl._kf_alpha,
+            "kf_revert_alpha": ego_ctrl._kf_revert_alpha,
+            "kf_lingap_beta": ego_ctrl._kf_lingap_beta,
+            "human_sigma": ego_ctrl._human_sigma,
+            "human_mu": ego_ctrl._human_mu,
+            "human_walk_Q": ego_ctrl._human_walk_Q,
+            "action_noise_std": ego_ctrl.action_noise_std,
+        }
+        meta_path = os.path.join(run_dir, "metadata.json")
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
 
-    print(f"\n  Results saved to: {run_dir}")
+        print(f"\n  Results saved to: {run_dir}")
+    else:
+        print(f"\n  Results not saved (--no-save)")
 
     # Save scene animation gif
     if args.save:

@@ -69,15 +69,18 @@ def draw_vehicle(ax, cx, cy, orient, color, alpha=0.7, lw=1.5, label=None):
                     ha="center", va="center", color="white", zorder=20)
 
 
-def riccati_steady_state(Q: float, R: float, C: float = 1.0) -> float:
-    """Algebraic Riccati steady-state for scalar Kalman.
+def riccati_steady_state(Q: float, R: float, C: float = 1.0,
+                         A: float = 1.0) -> float:
+    """Algebraic Riccati steady-state for scalar Kalman with process gain A.
 
-    C²P² + QC²P - QR = 0
-    P_ss = (-QC² + sqrt((QC²)² + 4C²QR)) / (2C²)
+    Solves: P = R*(A²P + Q) / (C²*(A��P + Q) + R)
+    Rearranged: (C²A²)P² + (Q*C² + R(1-A²))P - RQ = 0 = 0
     """
-    a = C ** 2
-    disc = (Q * a) ** 2 + 4 * a * Q * R
-    return (-Q * a + np.sqrt(disc)) / (2 * a)
+    a2c2 = (A * C) ** 2
+    b = Q * C ** 2 + R * (1.0 - A ** 2)
+    c = -R * Q
+    disc = b ** 2 - 4 * a2c2 * c
+    return (-b + np.sqrt(disc)) / (2 * a2c2)
 
 
 def parse_args():
@@ -123,8 +126,14 @@ def main():
     Q = meta.get("kf_Q", 0.001)
     R = meta.get("kf_R", 1.0)
     inf_type = meta.get("inference", "")
-    C = 1.0 if inf_type == "idkalman" else 15.0
-    P_ss = riccati_steady_state(Q, R, C)
+    C = 1.0 if inf_type in ("iidkalman", "walkkalman", "revertkalman", "lingapkalman") else 15.0
+    if inf_type in ("revertkalman", "lingapkalman"):
+        A_proc = meta.get("kf_revert_alpha", 0.9)
+    elif inf_type == "iidkalman":
+        A_proc = 0.0
+    else:
+        A_proc = 1.0
+    P_ss = riccati_steady_state(Q, R, C, A=A_proc)
     has_kalman = any(p is not None for p in kf_P_list)
 
     print(f"  Run:    {os.path.basename(run_dir)}")
@@ -166,7 +175,7 @@ def main():
             v = _lead_speed(t)
             # For idkalman, P is in velocity error space already.
             # For boltzmann_kalman, P is in kappa space → convert.
-            if inf_type == "idkalman":
+            if inf_type in ("iidkalman", "walkkalman", "revertkalman", "lingapkalman"):
                 P_eps = kf_p
             else:
                 P_eps = kf_p * (v ** 2)
@@ -189,6 +198,23 @@ def main():
             ni_steps.append(t)
             ni_vals.append(ni)
 
+    # Pre-compute NEES: (true_eps - est_eps)^2 / P
+    nees_steps, nees_vals = [], []
+    for t in range(n_frames):
+        kf_p = kf_P_list[t] if t < len(kf_P_list) else None
+        hve = human_vel_err[t] if t < len(human_vel_err) else None
+        est_k = kf_kappa_list[t] if t < len(kf_kappa_list) and kf_kappa_list[t] is not None else None
+        if kf_p is not None and hve is not None and est_k is not None and kf_p > 1e-12:
+            v = _lead_speed(t)
+            true_e = hve * v
+            est_e = est_k * v
+            if inf_type in ("iidkalman", "walkkalman", "revertkalman", "lingapkalman"):
+                P_e = kf_p
+            else:
+                P_e = kf_p * (v ** 2)
+            nees_steps.append(t)
+            nees_vals.append((true_e - est_e) ** 2 / P_e)
+
     # -- Fixed axis limits for velocity error --
     initial_eps = initial_kappa * 15.0 if initial_kappa is not None else 0.0
     y_eps_top = abs(initial_eps) + 2.0 if initial_eps != 0 else 3.0
@@ -202,14 +228,15 @@ def main():
         y_eps_bot = min(y_eps_bot, min(band_lower) - 0.2)
 
     # -- Figure layout --
-    fig = plt.figure(figsize=(14, 13))
-    gs = fig.add_gridspec(4, 1, height_ratios=[2, 1, 1, 1],
+    fig = plt.figure(figsize=(14, 16))
+    gs = fig.add_gridspec(5, 1, height_ratios=[2, 1, 1, 1, 1],
                           hspace=0.35,
                           left=0.05, right=0.97, top=0.97, bottom=0.03)
     ax_scene = fig.add_subplot(gs[0])
     ax_belief = fig.add_subplot(gs[1])
     ax_ni = fig.add_subplot(gs[2], sharex=ax_belief)
-    ax_riccati = fig.add_subplot(gs[3], sharex=ax_belief)
+    ax_nees = fig.add_subplot(gs[3], sharex=ax_belief)
+    ax_riccati = fig.add_subplot(gs[4], sharex=ax_belief)
 
     # -- Static belief elements (velocity error = perceived - true, in m/s) --
     ax_belief.axhline(0, color="grey", linewidth=0.5, linestyle="--")
@@ -250,6 +277,23 @@ def main():
                     "autocorr $\\to 0$ if well-calibrated)",
                     fontsize=10)
 
+    # -- NEES panel --
+    ax_nees.axhline(1.0, color="red", linewidth=1.0, linestyle=":",
+                    alpha=0.6, label="expected NEES = 1")
+    line_nees, = ax_nees.plot([], [], color="#e74c3c", linewidth=0.6,
+                              alpha=0.3, label="NEES")
+    line_nees_avg, = ax_nees.plot([], [], color="#e74c3c", linewidth=2.0,
+                                  label="running avg NEES")
+    cursor_nees = ax_nees.axvline(0, color="black", linewidth=0.8, alpha=0.4)
+    ax_nees.set_xlim(0, n_frames - 1)
+    nees_ymax = min(max(nees_vals) * 1.1, 20.0) if nees_vals else 5.0
+    ax_nees.set_ylim(0, max(nees_ymax, 3.0))
+    ax_nees.set_ylabel("NEES")
+    ax_nees.legend(fontsize=8, loc="upper right")
+    ax_nees.set_title("Normalized estimation error squared  "
+                      "($(x_{true} - \\hat{x})^2 / P$,  expect $\\approx 1$)",
+                      fontsize=10)
+
     # -- Static Riccati elements --
     if has_kalman:
         ax_riccati.axhline(np.sqrt(P_ss), color="red", linestyle="--",
@@ -260,7 +304,10 @@ def main():
     cursor_riccati = ax_riccati.axvline(0, color="black", linewidth=0.8, alpha=0.4)
     ax_riccati.set_xlim(0, n_frames - 1)
     if P_sqrt_vals:
-        ax_riccati.set_ylim(0, max(max(P_sqrt_vals), np.sqrt(P_ss)) * 1.15)
+        p_min = min(min(P_sqrt_vals), np.sqrt(P_ss))
+        p_max = max(max(P_sqrt_vals), np.sqrt(P_ss))
+        margin = max((p_max - p_min) * 0.15, p_min * 0.1)
+        ax_riccati.set_ylim(max(0, p_min - margin), p_max + margin)
     else:
         ax_riccati.set_ylim(0, 1)
     ax_riccati.set_xlabel("step")
@@ -382,6 +429,17 @@ def main():
             line_ni_acf.set_data(s_ni, cum_acf)
 
         cursor_ni.set_xdata([t, t])
+
+        # NEES — reveal up to t
+        idx_nees = [i for i, s in enumerate(nees_steps) if s <= t]
+        if idx_nees:
+            s_nees = [nees_steps[i] for i in idx_nees]
+            v_nees = [nees_vals[i] for i in idx_nees]
+            line_nees.set_data(s_nees, v_nees)
+            arr_nees = np.array(v_nees)
+            cum_avg = np.cumsum(arr_nees) / np.arange(1, len(arr_nees) + 1)
+            line_nees_avg.set_data(s_nees, cum_avg)
+        cursor_nees.set_xdata([t, t])
 
         # Riccati — reveal up to t
         idx_p = [i for i, s in enumerate(P_steps) if s <= t]

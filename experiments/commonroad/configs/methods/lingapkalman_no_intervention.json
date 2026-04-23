@@ -1,0 +1,1 @@
+{"inference": "lingapkalman", "intervention": "none", "kf_Q": 0.1, "kf_R": 1.0, "kf_revert_alpha": 0.9, "kf_lingap_beta": 0.01}

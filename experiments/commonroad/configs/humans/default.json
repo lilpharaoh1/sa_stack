@@ -1,0 +1,7 @@
+{
+  "type": "static",
+  "human_sigma": 1.0,
+  "human_mu": 0.0,
+  "human_walk_Q": 0.1,
+  "action_noise_std": 0.0
+}

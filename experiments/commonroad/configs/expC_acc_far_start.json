@@ -1,0 +1,23 @@
+{
+  "scenario": {
+    "xml": "expC_acc_far_start",
+    "dt": 0.1,
+    "max_steps": 100
+  },
+  "ego": {
+    "target_distance": 20.0,
+    "d_safe": 15.0,
+    "beta": 1.0,
+    "gamma": 0.99,
+    "inference": "revertkalman",
+    "intervention": "none",
+    "human": "revert"
+  },
+  "vehicles": {
+    "100": {
+      "controller": "constant_velocity",
+      "velocity_error": 0.0,
+      "_comment": "Lead vehicle at constant 15 m/s, ego starts 40m behind"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "type": "gaussian",
+  "human_sigma": 1.0,
+  "action_noise_std": 1.0
+}

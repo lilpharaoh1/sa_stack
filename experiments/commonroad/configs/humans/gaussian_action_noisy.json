@@ -1,0 +1,6 @@
+{
+  "type": "gaussian",
+  "human_sigma": 1.0,
+  "action_noise_std": 2.0,
+  "_comment": "Only action noise increased (R mismatch: filter has R=0.25, true=1.0)"
+}

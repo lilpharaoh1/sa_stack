@@ -9,7 +9,7 @@
     "d_safe": 15.0,
     "beta": 1.0,
     "gamma": 0.99,
-    "inference": "idkalman",
+    "inference": "iidkalman",
     "intervention": "none",
     "human": "gaussian_std_1",
     "kf_alpha": 0.0

@@ -1,0 +1,6 @@
+{
+  "type": "gaussian",
+  "human_sigma": 2.0,
+  "action_noise_std": 1.0,
+  "_comment": "Only perception noise increased (sigma mismatch: 2.0 vs default 1.0)"
+}

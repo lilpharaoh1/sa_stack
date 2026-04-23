@@ -1,0 +1,7 @@
+{
+  "type": "revert",
+  "human_revert_alpha": 0.9,
+  "human_walk_Q": 0.01,
+  "action_noise_std": 1.0,
+  "_comment": "Only Q decreased (Q mismatch)"
+}

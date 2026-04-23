@@ -1,0 +1,6 @@
+{
+  "type": "walk",
+  "human_walk_Q": 0.5,
+  "action_noise_std": 1.0,
+  "_comment": "Only walk Q increased (Q mismatch: filter has kf_Q=0.1, true=0.5)"
+}

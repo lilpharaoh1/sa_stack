@@ -246,45 +246,49 @@ def infer_boltzmann_kalman(kf_kappa, kf_P,
     }
 
 
-def infer_idkalman(kf_epsilon, kf_P,
-                   ego_speed, lead_speed, distance,
-                   human_accel, target_distance,
-                   belief: VelocityErrorBelief,
-                   kf_Q=0.001, kf_R=1.0,
-                   a_lead=0.0, alpha=0.0, dt=0.1) -> dict:
-    """Kalman filter with acceleration-aware process model in epsilon space.
+def infer_revertkalman(kf_vhat, kf_P,
+                       ego_speed, lead_speed, distance,
+                       human_accel, target_distance,
+                       belief: VelocityErrorBelief,
+                       kf_Q=0.1, kf_R=1.0,
+                       revert_alpha=0.9,
+                       a_lead=0.0, dt=0.1) -> dict:
+    """Kalman filter with mean-reverting process model in v_hat space.
 
-    State x = epsilon (velocity error in m/s, additive).
-    Process:  A = 1 + alpha * a_lead * dt
-              x_pred = A * x_prev
-              P_pred = A^2 * P + Q
-    Obs:      a = K_v * ((v_lead + epsilon) + K_d*(d - d*) - v_ego)
-              C = da/depsilon = K_v = 1.0
-    Update:   K = P_pred / (P_pred + R)
-    Convert:  kappa = epsilon / v_lead  (for intervention pipeline)
+    State x = v_hat (human's perceived lead velocity, m/s).
 
-    When a_lead=0 or alpha=0, reduces to the identity process model.
+    Process:  v_hat_{k|k-1} = A_k * v_hat_{k-1|k-1} + B_k + w_k
+              A_k = alpha
+              B_k = (1 - alpha) * v_lead + a_lead * dt
+              P_{k|k-1} = A^2 * P_{k-1|k-1} + Q
+
+    Obs:      a = K_v * (max(0, v_hat + K_d*(d - d*)) - v_ego) + eta
+              C = da/dv_hat = K_v = 1.0
     """
     # --- Predict ---
-    A = 1.0 + alpha * a_lead * dt
-    x_pred = A * kf_epsilon
+    A = revert_alpha
+    B = (1.0 - revert_alpha) * lead_speed + a_lead * dt
+    vhat_pred = A * kf_vhat + B
     P_pred = A ** 2 * kf_P + kf_Q
 
-    # --- Update (additive observation model, C = K_SPEED = 1.0) ---
+    # --- Observation model (v_hat as perceived velocity) ---
     C = K_SPEED  # = 1.0
-    a_pred = compute_accel_additive(ego_speed, lead_speed, distance,
-                                    x_pred, target_distance)
+    dist_error = distance - target_distance
+    desired = max(0.0, vhat_pred + K_DIST * dist_error)
+    a_pred = float(np.clip(C * (desired - ego_speed), -MAX_ACCEL, MAX_ACCEL))
     innovation = human_accel - a_pred
 
-    S = C ** 2 * P_pred + kf_R  # P_pred + R
-    K_gain = P_pred * C / S     # P_pred / (P_pred + R)
+    # --- Update ---
+    S = C ** 2 * P_pred + kf_R
+    K_gain = P_pred * C / S
     norm_innovation = innovation / np.sqrt(S) if S > 0 else 0.0
-    eps_new = x_pred + K_gain * innovation
+    vhat_new = vhat_pred + K_gain * innovation
     P_new = max((1.0 - K_gain * C) * P_pred, 1e-8)
 
-    # --- Convert to kappa space for beliefs & intervention ---
-    v = max(lead_speed, 0.1)  # avoid division by zero
-    kappa_hat = eps_new / v
+    # --- Convert to epsilon / kappa for the rest of the pipeline ---
+    v = max(lead_speed, 0.1)
+    eps = vhat_new - lead_speed
+    kappa_hat = eps / v
     P_kappa = P_new / (v ** 2)
 
     log_probs = -(belief.candidates - kappa_hat) ** 2 / (2.0 * P_kappa)
@@ -293,7 +297,75 @@ def infer_idkalman(kf_epsilon, kf_P,
     belief.probabilities = probs / probs.sum()
 
     return {
-        "kf_epsilon": eps_new,
+        "kf_vhat": vhat_new,
+        "kf_epsilon": eps,
+        "kf_P": P_new,
+        "kf_kappa": kappa_hat,
+        "norm_innovation": float(norm_innovation),
+        "inferred_mode": belief.mode,
+        "inferred_mean": belief.mean,
+        "inferred_std": belief.std,
+        "inferred_std_continuous": np.sqrt(P_kappa),
+        "inferred_dist": dict(zip(
+            np.round(belief.candidates, 2),
+            np.round(belief.probabilities, 4))),
+    }
+
+
+def infer_lingapkalman(kf_vhat, kf_P,
+                       ego_speed, lead_speed, distance,
+                       human_accel, target_distance,
+                       belief: VelocityErrorBelief,
+                       kf_Q=0.1, kf_R=1.0,
+                       revert_alpha=0.9, lingap_beta=0.1,
+                       a_lead=0.0, dt=0.1) -> dict:
+    """Kalman filter with gap-dependent process model in v_hat space.
+
+    State x = v_hat (human's perceived lead velocity, m/s).
+
+    Process:  v_hat_{k|k-1} = A_k * v_hat_{k-1|k-1} + B_k + w_k
+              A_k = alpha
+              B_k = (1 - alpha) * v_lead + a_lead * dt + beta * gap
+              P_{k|k-1} = A^2 * P_{k-1|k-1} + Q
+
+    The beta * gap term models distance-dependent perception error:
+    the further the lead, the larger the velocity estimation bias.
+    """
+    # --- Predict ---
+    A = revert_alpha
+    gap = max(distance, 0.0)
+    B = (1.0 - revert_alpha) * lead_speed + a_lead * dt + lingap_beta * gap
+    vhat_pred = A * kf_vhat + B
+    P_pred = A ** 2 * kf_P + kf_Q
+
+    # --- Observation model ---
+    C = K_SPEED  # = 1.0
+    dist_error = distance - target_distance
+    desired = max(0.0, vhat_pred + K_DIST * dist_error)
+    a_pred = float(np.clip(C * (desired - ego_speed), -MAX_ACCEL, MAX_ACCEL))
+    innovation = human_accel - a_pred
+
+    # --- Update ---
+    S = C ** 2 * P_pred + kf_R
+    K_gain = P_pred * C / S
+    norm_innovation = innovation / np.sqrt(S) if S > 0 else 0.0
+    vhat_new = vhat_pred + K_gain * innovation
+    P_new = max((1.0 - K_gain * C) * P_pred, 1e-8)
+
+    # --- Convert to epsilon / kappa ---
+    v = max(lead_speed, 0.1)
+    eps = vhat_new - lead_speed
+    kappa_hat = eps / v
+    P_kappa = P_new / (v ** 2)
+
+    log_probs = -(belief.candidates - kappa_hat) ** 2 / (2.0 * P_kappa)
+    log_probs -= log_probs.max()
+    probs = np.exp(log_probs)
+    belief.probabilities = probs / probs.sum()
+
+    return {
+        "kf_vhat": vhat_new,
+        "kf_epsilon": eps,
         "kf_P": P_new,
         "kf_kappa": kappa_hat,
         "norm_innovation": float(norm_innovation),
@@ -714,7 +786,17 @@ class CarFollowController:
                  sigma_kappa: float = 25.0,
                  kf_Q: float = 0.001,
                  kf_R: float = 0.01,
-                 kf_alpha: float = 0.0):
+                 kf_alpha: float = 0.0,
+                 kf_epsilon_init: float = 0.0,
+                 kf_revert_alpha: float = 0.9,
+                 kf_lingap_beta: float = 0.1,
+                 # Human model parameters (override name-encoded values)
+                 human_sigma: float = None,
+                 human_mu: float = None,
+                 human_walk_Q: float = None,
+                 human_revert_alpha: float = 0.9,
+                 human_lingap_beta: float = 0.1,
+                 action_noise_std: float = 0.0):
         self.target_distance = target_distance
         self.d_safe = d_safe
         self.desired_speed = desired_speed
@@ -722,9 +804,22 @@ class CarFollowController:
         self.gamma = gamma
         self.inference_type = inference
         self.intervention_type = intervention
-        self.human_type = human
         self.b_kappa = b_kappa
         self.sigma_kappa = sigma_kappa
+        self.action_noise_std = action_noise_std
+
+        # Resolve human type and parameters.
+        # New-style: human="walk" + human_walk_Q=0.1
+        # Old-style: human="walk_01" (still supported, config params override)
+        self.human_type = human
+        self._human_sigma = human_sigma
+        self._human_mu = human_mu
+        self._human_walk_Q = human_walk_Q
+        self._human_revert_alpha = human_revert_alpha
+        self._human_lingap_beta = human_lingap_beta
+        self._kf_revert_alpha = kf_revert_alpha
+        self._kf_lingap_beta = kf_lingap_beta
+        self._resolve_human_params()
 
         # True velocity errors per non-ego vehicle (from config)
         self._true_vel_errors: Dict[int, float] = dict(
@@ -737,12 +832,18 @@ class CarFollowController:
 
         # Kalman filter state per vehicle
         self._kf_kappa: Dict[int, float] = {v: 0.0 for v in self._true_vel_errors}
-        self._kf_P: Dict[int, float] = {v: 0.5 for v in self._true_vel_errors}
-        self._kf_epsilon: Dict[int, float] = {v: 0.0 for v in self._true_vel_errors}
+        self._kf_P: Dict[int, float] = {v: 10.0 for v in self._true_vel_errors}
+        self._kf_epsilon: Dict[int, float] = {v: kf_epsilon_init for v in self._true_vel_errors}
+        # v_hat state for revertkalman (initialized lazily on first observation)
+        self._kf_vhat: Dict[int, Optional[float]] = {v: None for v in self._true_vel_errors}
+        self._kf_epsilon_init = kf_epsilon_init
         self._kf_Q = kf_Q
-        self._kf_R = 1.0 if (inference == "idkalman" and kf_R == 0.01) else kf_R
+        self._kf_R = kf_R
         self._kf_B = 0.01
         self._kf_alpha = kf_alpha
+
+        # Random walk state for walk_* human (per vehicle, in m/s)
+        self._walk_epsilon: Dict[int, float] = {v: 0.0 for v in self._true_vel_errors}
 
         # Lead acceleration tracking (per vehicle)
         self._prev_lead_speed: Dict[int, float] = {}
@@ -756,14 +857,62 @@ class CarFollowController:
         # Step counter
         self._step = 0
 
+    def _resolve_human_params(self):
+        """Parse human type name into canonical type + params.
+
+        Supports both:
+          New-style: human="walk", human_walk_Q=0.1
+          Old-style: human="walk_01"  (params encoded in name)
+        Config params (human_sigma, etc.) override name-encoded values.
+        """
+        h = self.human_type
+
+        if h.startswith("gaussian_meanstd_"):
+            parts = h.split("gaussian_meanstd_")[1].split("_")
+            if self._human_mu is None:
+                self._human_mu = _parse_numeric(parts[0])
+            if self._human_sigma is None:
+                self._human_sigma = (
+                    _parse_numeric(parts[1]) if len(parts) > 1 else 1.0)
+            self.human_type = "gaussian_mean"
+        elif h.startswith("gaussian_std_"):
+            if self._human_sigma is None:
+                self._human_sigma = _parse_numeric(
+                    h.split("gaussian_std_")[1])
+            self.human_type = "gaussian"
+        elif h.startswith("walk_"):
+            if self._human_walk_Q is None:
+                self._human_walk_Q = _parse_numeric(
+                    h.split("walk_")[1])
+            self.human_type = "walk"
+        elif h == "gaussian":
+            pass  # params from config
+        elif h == "gaussian_mean":
+            pass
+        elif h == "walk":
+            pass
+        elif h == "revert":
+            pass
+        elif h == "lingap":
+            pass
+
+        # Defaults for params not set by name or config
+        if self._human_sigma is None:
+            self._human_sigma = 1.0
+        if self._human_mu is None:
+            self._human_mu = 0.0
+        if self._human_walk_Q is None:
+            self._human_walk_Q = 0.1
+
     def _ensure_belief(self, vid: int):
         """Lazily create belief for a vehicle not in initial config."""
         if vid not in self._beliefs:
             self._beliefs[vid] = VelocityErrorBelief()
             self._true_vel_errors.setdefault(vid, 0.0)
             self._kf_kappa.setdefault(vid, 0.0)
-            self._kf_P.setdefault(vid, 0.5)
+            self._kf_P.setdefault(vid, 10.0)
             self._kf_epsilon.setdefault(vid, 0.0)
+            self._kf_vhat.setdefault(vid, None)
 
     def _run_inference_for_vehicle(self, vid: int, ego_speed: float,
                                     vehicle_speed: float, distance: float,
@@ -799,20 +948,88 @@ class CarFollowController:
                 log_probs -= log_probs.max()
                 probs = np.exp(log_probs)
                 belief.probabilities = probs / probs.sum()
-            elif self.inference_type == "idkalman":
-                # Acceleration-aware prediction in epsilon space
+            elif self.inference_type == "walkkalman":
+                # A=1 prediction: v_hat_pred = v_hat + a_lead * dt
+                if self._kf_vhat.get(vid) is None:
+                    self._kf_vhat[vid] = vehicle_speed + self._kf_epsilon_init
                 prev_v = self._prev_lead_speed.get(vid)
-                if prev_v is not None:
-                    a_lead = (vehicle_speed - prev_v) / obs_dt
-                else:
-                    a_lead = 0.0
+                a_lead = (vehicle_speed - prev_v) / obs_dt if prev_v is not None else 0.0
                 self._prev_lead_speed[vid] = vehicle_speed
-                A = 1.0 + self._kf_alpha * a_lead * obs_dt
-                eps_pred = A * self._kf_epsilon[vid]
-                P_pred = A ** 2 * self._kf_P[vid] + self._kf_Q
-                self._kf_epsilon[vid] = eps_pred
+                vhat_pred = self._kf_vhat[vid] + a_lead * obs_dt
+                P_pred = self._kf_P[vid] + self._kf_Q
+                self._kf_vhat[vid] = vhat_pred
                 self._kf_P[vid] = P_pred
-                # Convert to kappa for display / intervention
+                eps_pred = vhat_pred - vehicle_speed
+                self._kf_epsilon[vid] = eps_pred
+                v = max(vehicle_speed, 0.1)
+                kappa_hat = eps_pred / v
+                P_kappa = P_pred / (v ** 2)
+                self._kf_kappa[vid] = kappa_hat
+                log_probs = -(belief.candidates - kappa_hat) ** 2 / (2.0 * P_kappa)
+                log_probs -= log_probs.max()
+                probs = np.exp(log_probs)
+                belief.probabilities = probs / probs.sum()
+            elif self.inference_type == "iidkalman":
+                # A=0 prediction: v_hat_pred = v_lead + a_lead*dt (forgets prev)
+                if self._kf_vhat.get(vid) is None:
+                    self._kf_vhat[vid] = vehicle_speed + self._kf_epsilon_init
+                prev_v = self._prev_lead_speed.get(vid)
+                a_lead = (vehicle_speed - prev_v) / obs_dt if prev_v is not None else 0.0
+                self._prev_lead_speed[vid] = vehicle_speed
+                # A=0: vhat_pred = 0*vhat + 1*v_lead + a_lead*dt
+                vhat_pred = vehicle_speed + a_lead * obs_dt
+                P_pred = self._kf_Q  # A²=0, so just Q
+                self._kf_vhat[vid] = vhat_pred
+                self._kf_P[vid] = P_pred
+                eps_pred = vhat_pred - vehicle_speed
+                self._kf_epsilon[vid] = eps_pred
+                v = max(vehicle_speed, 0.1)
+                kappa_hat = eps_pred / v
+                P_kappa = P_pred / (v ** 2)
+                self._kf_kappa[vid] = kappa_hat
+                log_probs = -(belief.candidates - kappa_hat) ** 2 / (2.0 * P_kappa)
+                log_probs -= log_probs.max()
+                probs = np.exp(log_probs)
+                belief.probabilities = probs / probs.sum()
+            elif self.inference_type == "revertkalman":
+                # v_hat prediction: v_hat_pred = alpha*v_hat + (1-alpha)*v_lead + a_lead*dt
+                A = self._kf_revert_alpha
+                if self._kf_vhat.get(vid) is None:
+                    self._kf_vhat[vid] = vehicle_speed + self._kf_epsilon_init
+                prev_v = self._prev_lead_speed.get(vid)
+                a_lead = (vehicle_speed - prev_v) / obs_dt if prev_v is not None else 0.0
+                self._prev_lead_speed[vid] = vehicle_speed
+                B = (1.0 - A) * vehicle_speed + a_lead * obs_dt
+                vhat_pred = A * self._kf_vhat[vid] + B
+                P_pred = A ** 2 * self._kf_P[vid] + self._kf_Q
+                self._kf_vhat[vid] = vhat_pred
+                self._kf_P[vid] = P_pred
+                eps_pred = vhat_pred - vehicle_speed
+                self._kf_epsilon[vid] = eps_pred
+                v = max(vehicle_speed, 0.1)
+                kappa_hat = eps_pred / v
+                P_kappa = P_pred / (v ** 2)
+                self._kf_kappa[vid] = kappa_hat
+                log_probs = -(belief.candidates - kappa_hat) ** 2 / (2.0 * P_kappa)
+                log_probs -= log_probs.max()
+                probs = np.exp(log_probs)
+                belief.probabilities = probs / probs.sum()
+            elif self.inference_type == "lingapkalman":
+                # v_hat prediction with gap-dependent term
+                A = self._kf_revert_alpha
+                if self._kf_vhat.get(vid) is None:
+                    self._kf_vhat[vid] = vehicle_speed + self._kf_epsilon_init
+                prev_v = self._prev_lead_speed.get(vid)
+                a_lead = (vehicle_speed - prev_v) / obs_dt if prev_v is not None else 0.0
+                self._prev_lead_speed[vid] = vehicle_speed
+                gap = max(distance, 0.0)
+                B = (1.0 - A) * vehicle_speed + a_lead * obs_dt + self._kf_lingap_beta * gap
+                vhat_pred = A * self._kf_vhat[vid] + B
+                P_pred = A ** 2 * self._kf_P[vid] + self._kf_Q
+                self._kf_vhat[vid] = vhat_pred
+                self._kf_P[vid] = P_pred
+                eps_pred = vhat_pred - vehicle_speed
+                self._kf_epsilon[vid] = eps_pred
                 v = max(vehicle_speed, 0.1)
                 kappa_hat = eps_pred / v
                 P_kappa = P_pred / (v ** 2)
@@ -861,22 +1078,85 @@ class CarFollowController:
             self._kf_kappa[vid] = diag["kf_kappa"]
             self._kf_P[vid] = diag["kf_P"]
             return diag
-        elif self.inference_type == "idkalman":
-            # Estimate lead acceleration from speed difference
+        elif self.inference_type == "walkkalman":
+            # A=1: v_hat_pred = v_hat + a_lead*dt
+            if self._kf_vhat.get(vid) is None:
+                self._kf_vhat[vid] = vehicle_speed + self._kf_epsilon_init
             prev_v = self._prev_lead_speed.get(vid)
-            if prev_v is not None:
-                a_lead = (vehicle_speed - prev_v) / (obs_dt if obs_dt > 0 else 0.1)
-            else:
-                a_lead = 0.0
+            a_lead = (vehicle_speed - prev_v) / (obs_dt if obs_dt > 0 else 0.1) if prev_v is not None else 0.0
             self._prev_lead_speed[vid] = vehicle_speed
 
-            diag = infer_idkalman(
-                self._kf_epsilon[vid], self._kf_P[vid],
+            diag = infer_revertkalman(
+                self._kf_vhat[vid], self._kf_P[vid],
                 belief=belief,
                 kf_Q=self._kf_Q, kf_R=self._kf_R,
-                a_lead=a_lead, alpha=self._kf_alpha,
+                revert_alpha=1.0,
+                a_lead=a_lead,
                 dt=obs_dt if obs_dt > 0 else 0.1,
                 **common)
+            self._kf_vhat[vid] = diag["kf_vhat"]
+            self._kf_epsilon[vid] = diag["kf_epsilon"]
+            self._kf_kappa[vid] = diag["kf_kappa"]
+            self._kf_P[vid] = diag["kf_P"]
+            return diag
+        elif self.inference_type == "iidkalman":
+            # A=0: v_hat_pred = v_lead + a_lead*dt (forgets previous estimate)
+            if self._kf_vhat.get(vid) is None:
+                self._kf_vhat[vid] = vehicle_speed + self._kf_epsilon_init
+            prev_v = self._prev_lead_speed.get(vid)
+            a_lead = (vehicle_speed - prev_v) / (obs_dt if obs_dt > 0 else 0.1) if prev_v is not None else 0.0
+            self._prev_lead_speed[vid] = vehicle_speed
+
+            diag = infer_revertkalman(
+                self._kf_vhat[vid], self._kf_P[vid],
+                belief=belief,
+                kf_Q=self._kf_Q, kf_R=self._kf_R,
+                revert_alpha=0.0,
+                a_lead=a_lead,
+                dt=obs_dt if obs_dt > 0 else 0.1,
+                **common)
+            self._kf_vhat[vid] = diag["kf_vhat"]
+            self._kf_epsilon[vid] = diag["kf_epsilon"]
+            self._kf_kappa[vid] = diag["kf_kappa"]
+            self._kf_P[vid] = diag["kf_P"]
+            return diag
+        elif self.inference_type == "revertkalman":
+            # Lazy init vhat on first observation
+            if self._kf_vhat.get(vid) is None:
+                self._kf_vhat[vid] = vehicle_speed + self._kf_epsilon_init
+            # Estimate lead acceleration
+            prev_v = self._prev_lead_speed.get(vid)
+            a_lead = (vehicle_speed - prev_v) / (obs_dt if obs_dt > 0 else 0.1) if prev_v is not None else 0.0
+            self._prev_lead_speed[vid] = vehicle_speed
+
+            diag = infer_revertkalman(
+                self._kf_vhat[vid], self._kf_P[vid],
+                belief=belief,
+                kf_Q=self._kf_Q, kf_R=self._kf_R,
+                revert_alpha=self._kf_revert_alpha,
+                a_lead=a_lead, dt=obs_dt if obs_dt > 0 else 0.1,
+                **common)
+            self._kf_vhat[vid] = diag["kf_vhat"]
+            self._kf_epsilon[vid] = diag["kf_epsilon"]
+            self._kf_kappa[vid] = diag["kf_kappa"]
+            self._kf_P[vid] = diag["kf_P"]
+            return diag
+        elif self.inference_type == "lingapkalman":
+            if self._kf_vhat.get(vid) is None:
+                self._kf_vhat[vid] = vehicle_speed + self._kf_epsilon_init
+            prev_v = self._prev_lead_speed.get(vid)
+            a_lead = (vehicle_speed - prev_v) / (obs_dt if obs_dt > 0 else 0.1) if prev_v is not None else 0.0
+            self._prev_lead_speed[vid] = vehicle_speed
+
+            diag = infer_lingapkalman(
+                self._kf_vhat[vid], self._kf_P[vid],
+                belief=belief,
+                kf_Q=self._kf_Q, kf_R=self._kf_R,
+                revert_alpha=self._kf_revert_alpha,
+                lingap_beta=self._kf_lingap_beta,
+                a_lead=a_lead, dt=obs_dt if obs_dt > 0 else 0.1,
+                **common)
+            self._kf_vhat[vid] = diag["kf_vhat"]
             self._kf_epsilon[vid] = diag["kf_epsilon"]
             self._kf_kappa[vid] = diag["kf_kappa"]
             self._kf_P[vid] = diag["kf_P"]
@@ -926,28 +1206,59 @@ class CarFollowController:
                     new_kappa = evolve_vel_err(
                         old_kappa, along, self.b_kappa, self.sigma_kappa)
                     self._true_vel_errors[vid] = new_kappa
-        elif self.human_type.startswith("gaussian_meanstd_"):
-            # Additive Gaussian noise with non-zero mean:
-            #   perceived_speed = true_speed + N(mu, sigma)
-            # Format: gaussian_meanstd_<mu> or gaussian_meanstd_<mu>_<sigma>
-            parts = self.human_type.split("gaussian_meanstd_")[1].split("_")
-            mu = _parse_numeric(parts[0])
-            sigma = _parse_numeric(parts[1]) if len(parts) > 1 else 1.0
+        elif self.human_type == "gaussian_mean":
             for vid, (vs, along, lateral) in vehicles_ahead.items():
                 if abs(lateral) < LANE_WIDTH * 0.8 and vs.velocity > 0.1:
-                    noise = np.random.normal(mu, sigma)
+                    noise = np.random.normal(
+                        self._human_mu, self._human_sigma)
                     self._true_vel_errors[vid] = noise / vs.velocity
                 else:
                     self._true_vel_errors[vid] = 0.0
-        elif self.human_type.startswith("gaussian_std_"):
-            # Additive Gaussian noise: perceived_speed = true_speed + N(0, sigma)
-            # Expressed as multiplicative vel_err: perceived = v*(1+kappa)
-            # so kappa = noise / v  (resampled each step)
-            sigma = _parse_numeric(self.human_type.split("gaussian_std_")[1])
+        elif self.human_type == "gaussian":
             for vid, (vs, along, lateral) in vehicles_ahead.items():
                 if abs(lateral) < LANE_WIDTH * 0.8 and vs.velocity > 0.1:
-                    noise = np.random.normal(0.0, sigma)
+                    noise = np.random.normal(0.0, self._human_sigma)
                     self._true_vel_errors[vid] = noise / vs.velocity
+                else:
+                    self._true_vel_errors[vid] = 0.0
+        elif self.human_type == "walk":
+            for vid, (vs, along, lateral) in vehicles_ahead.items():
+                if vid not in self._walk_epsilon:
+                    self._walk_epsilon[vid] = 0.0
+                if abs(lateral) < LANE_WIDTH * 0.8 and vs.velocity > 0.1:
+                    self._walk_epsilon[vid] += np.random.normal(
+                        0.0, np.sqrt(self._human_walk_Q))
+                    self._true_vel_errors[vid] = (
+                        self._walk_epsilon[vid] / vs.velocity)
+                else:
+                    self._true_vel_errors[vid] = 0.0
+        elif self.human_type == "revert":
+            # AR(1): eps_k = alpha * eps_{k-1} + N(0, sqrt(Q))
+            for vid, (vs, along, lateral) in vehicles_ahead.items():
+                if vid not in self._walk_epsilon:
+                    self._walk_epsilon[vid] = 0.0
+                if abs(lateral) < LANE_WIDTH * 0.8 and vs.velocity > 0.1:
+                    self._walk_epsilon[vid] = (
+                        self._human_revert_alpha * self._walk_epsilon[vid]
+                        + np.random.normal(0.0, np.sqrt(self._human_walk_Q)))
+                    self._true_vel_errors[vid] = (
+                        self._walk_epsilon[vid] / vs.velocity)
+                else:
+                    self._true_vel_errors[vid] = 0.0
+        elif self.human_type == "lingap":
+            # AR(1) + gap-dependent drift:
+            # eps_k = alpha * eps_{k-1} + beta * gap + N(0, sqrt(Q))
+            for vid, (vs, along, lateral) in vehicles_ahead.items():
+                if vid not in self._walk_epsilon:
+                    self._walk_epsilon[vid] = 0.0
+                if abs(lateral) < LANE_WIDTH * 0.8 and vs.velocity > 0.1:
+                    gap = max(along, 0.0)
+                    self._walk_epsilon[vid] = (
+                        self._human_revert_alpha * self._walk_epsilon[vid]
+                        + self._human_lingap_beta * gap
+                        + np.random.normal(0.0, np.sqrt(self._human_walk_Q)))
+                    self._true_vel_errors[vid] = (
+                        self._walk_epsilon[vid] / vs.velocity)
                 else:
                     self._true_vel_errors[vid] = 0.0
 
@@ -981,6 +1292,14 @@ class CarFollowController:
                               if lead_id is not None else None),
         }
 
+        # --- Observed action (human action + observation noise) ---
+        if self.action_noise_std > 0:
+            observed_accel = human_accel + np.random.normal(
+                0.0, self.action_noise_std)
+        else:
+            observed_accel = human_accel
+        self.last_step_info["observed_accel"] = observed_accel
+
         # --- Inference for ALL vehicles ahead ---
         # Lead vehicle: full observation model (action is informative)
         # Non-lead: prediction only (action carries no info about this vehicle)
@@ -988,7 +1307,7 @@ class CarFollowController:
         if self.inference_type != "none":
             for vid, (vs, along, lateral) in vehicles_ahead.items():
                 diag = self._run_inference_for_vehicle(
-                    vid, ego.velocity, vs.velocity, along, human_accel,
+                    vid, ego.velocity, vs.velocity, along, observed_accel,
                     is_lead=(vid == lead_id), obs_dt=dt)
                 diag["human_vel_err"] = self._true_vel_errors.get(vid, 0.0)
                 diag["distance"] = along

@@ -1,0 +1,6 @@
+{
+  "type": "walk",
+  "human_walk_Q": 0.1,
+  "action_noise_std": 0.5,
+  "_comment": "Only action noise decreased (R mismatch)"
+}

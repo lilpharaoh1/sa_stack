@@ -1,0 +1,6 @@
+{
+  "type": "revert",
+  "human_revert_alpha": 0.9,
+  "human_walk_Q": 0.1,
+  "action_noise_std": 1.0
+}

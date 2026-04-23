@@ -1,0 +1,27 @@
+{
+  "experiment": "expA_acc_at_target",
+  "inference": "revertkalman",
+  "intervention": "none",
+  "human": "revert",
+  "gamma": 0.99,
+  "beta": 1.0,
+  "target_distance": 20.0,
+  "d_safe": 15.0,
+  "b_kappa": 0.2,
+  "sigma_kappa": 10.0,
+  "seed": 21,
+  "n_steps": 100,
+  "dt": 0.1,
+  "n_interventions": 0,
+  "velocity_errors": {
+    "100": 0.3
+  },
+  "kf_Q": 0.1,
+  "kf_R": 1.0,
+  "kf_alpha": 0.0,
+  "kf_revert_alpha": 0.6,
+  "human_sigma": 1.0,
+  "human_mu": 0.0,
+  "human_walk_Q": 0.1,
+  "action_noise_std": 1.0
+}
